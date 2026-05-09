@@ -1,0 +1,24 @@
+{
+  "name": "Ava",
+  "camera_enabled": true,
+  "memory_bridge_enabled": true,
+  "old_memory_path": "",
+  "protected_profiles": [
+    "zeke",
+    "Zeke",
+    "creator",
+    "your creator"
+  ],
+  "aliases": {
+    "zeke": [
+      "Zeke",
+      "creator",
+      "your creator"
+    ],
+    "Mom": [
+      "mom",
+      "mother",
+      "my mom"
+    ]
+  }
+}
