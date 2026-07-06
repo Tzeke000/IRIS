@@ -32,6 +32,12 @@ if %errorLevel% neq 0 (
 )
 echo [start_iris_v2.bat] running elevated.
 
+REM --- Pin the model EXPLICITLY (2026-07-06). iris_body_host.py passes IRIS_MODEL to the
+REM --- Agent SDK; unset it would inherit the CLI's *saved default*, which /model can
+REM --- silently change (it's Fable 5 now). This launcher means OPUS - so say so.
+REM --- Fable 5 lives in start_iris_v2_fable.bat.
+set "IRIS_MODEL=claude-opus-4-8[1m]"
+
 if not exist "D:\Wren-Companion\.venv\Scripts\python.exe" (
     echo [start_iris_v2.bat] ERROR: venv missing at D:\Wren-Companion\.venv\Scripts\python.exe 1>&2
     endlocal
