@@ -471,6 +471,130 @@ class _PixyJog:
             self._dev = None
 
 
+class _V4l2AbsJog:
+    """LINUX drive (2026-10-07, Zeke: head "jumping around a bit when i move").
+    Same interface as _PixyJog, but instead of streaming HID velocity vectors it
+    INTEGRATES the vector into an absolute pan/tilt setpoint and streams that
+    over V4L2 (VIDIOC_S_CTRL, 1-deg steps). MEASURED here before building it
+    (scratch/bench/ramp_test.py): a 30 Hz stream of 1-deg setpoints moves the
+    PIXY continuously (motor slews between setpoints, ~0.25 s lag) — not the
+    discrete ~1/s hops the Windows WinRT absolute path gave.
+    WHY: the jog path is position-blind (V4L2 readback stays at the last absolute
+    command while jogging — measured: pan_absolute sat at 115 deg while the head
+    faced the desk), so est came from visual odometry, drifted 20-40 deg, and
+    every resync look_at(est) PHYSICALLY SNAPPED the head by that drift. Here the
+    setpoint IS the position: no odometry, no drift, no resync snaps.
+    The jog plant is emulated (same deg/s per unit, incl. the 2.4x weaker
+    downward tilt the controller already compensates), so the tuned PD loop,
+    trims and rails behave as before. Hard rails: pan +-150, tilt -60..+90."""
+
+    _S_CTRL = 0xC008561C
+    _G_CTRL = 0xC008561B
+    _PAN_ID = 0x009A0908
+    _TILT_ID = 0x009A0909
+    _PAN_DEG_S = 0.839       # per unit (HID jog, measured 08-25)
+    _TILT_UP_DEG_S = 0.887
+    _TILT_DOWN_DEG_S = 0.36
+    _MAX_DT = 0.30           # never integrate a stall into a big jump
+
+    def __init__(self, device: str) -> None:
+        self.device = device
+        self._fd: int | None = None
+        self._lock = threading.Lock()
+        self._v = (0.0, 0.0)
+        self._t: float | None = None
+        self.pan: float | None = None
+        self.tilt: float | None = None
+        self._sent: tuple[int | None, int | None] = (None, None)
+        self._burst_active = False
+        self.last_motion_ts = 0.0
+
+    def _ioctl(self, req: int, cid: int, val: int = 0) -> int:
+        import fcntl
+        import os as _os
+        if self._fd is None:
+            self._fd = _os.open(self.device, _os.O_RDWR)
+        buf = bytearray(struct.pack("Ii", cid, int(val)))
+        fcntl.ioctl(self._fd, req, buf)
+        return struct.unpack("Ii", bytes(buf))[1]
+
+    def _read_device(self) -> None:
+        self.pan = self._ioctl(self._G_CTRL, self._PAN_ID) / 3600.0
+        self.tilt = self._ioctl(self._G_CTRL, self._TILT_ID) / 3600.0
+        self._sent = (int(round(self.pan)), int(round(self.tilt)))
+
+    def _integrate(self, now: float) -> None:
+        if self._t is not None and (self._v[0] or self._v[1]) and self.pan is not None:
+            dt = min(self._MAX_DT, max(0.0, now - self._t))
+            vx, vy = self._v
+            self.pan += vx * self._PAN_DEG_S * dt
+            self.tilt += vy * (self._TILT_UP_DEG_S if vy > 0 else self._TILT_DOWN_DEG_S) * dt
+            self.pan = max(-150.0, min(150.0, self.pan))
+            self.tilt = max(-60.0, min(90.0, self.tilt))
+            want = (int(round(self.pan)), int(round(self.tilt)))
+            if want[0] != self._sent[0]:
+                self._ioctl(self._S_CTRL, self._PAN_ID, want[0] * 3600)
+            if want[1] != self._sent[1]:
+                self._ioctl(self._S_CTRL, self._TILT_ID, want[1] * 3600)
+            self._sent = want
+        self._t = now
+
+    def position(self) -> tuple[float, float] | None:
+        with self._lock:
+            try:
+                if not self._burst_active:
+                    self._read_device()     # picks up any look_at/home made elsewhere
+            except Exception:
+                return None
+            if self.pan is None:
+                return None
+            return (self.pan, self.tilt)
+
+    def write_vector(self, x: float, y: float) -> bool:
+        with self._lock:
+            try:
+                now = time.time()
+                moving = bool(x or y)
+                if moving and not self._burst_active:
+                    self._read_device()     # start every burst from the device's truth
+                    self._t = now
+                self._integrate(now)
+                self._v = (float(x), float(y))
+                if moving:
+                    self.last_motion_ts = now
+                if moving != self._burst_active:
+                    self._burst_active = moving
+                    try:
+                        from brain.visual_attention import _ptz_audit
+                        _ptz_audit("abs_jog_start" if moving else "abs_jog_stop", True,
+                                   x=round(x, 1), y=round(y, 1),
+                                   pan=None if self.pan is None else round(self.pan, 1),
+                                   tilt=None if self.tilt is None else round(self.tilt, 1))
+                    except Exception:
+                        pass
+                return True
+            except Exception:
+                self.close_fd()
+                return False
+
+    def stop(self) -> None:
+        self.write_vector(0.0, 0.0)
+
+    def close_fd(self) -> None:
+        try:
+            if self._fd is not None:
+                import os as _os
+                _os.close(self._fd)
+        except Exception:
+            pass
+        self._fd = None
+
+    def close(self) -> None:
+        self.stop()
+        with self._lock:
+            self.close_fd()
+
+
 def _hand_centers(g: dict[str, Any]) -> list[tuple[float, float]]:
     """Mean landmark position per visible hand, in frame pixels."""
     hr = g.get("_hand_results")
@@ -686,6 +810,20 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
             _act = None
     except Exception:
         _act = None
+    # LINUX: drive by streamed absolute setpoints (see _V4l2AbsJog). Opt out with
+    # IRIS_PTZ_DRIVE=hid to get the old HID-jog + odometry + resync path back.
+    import os as _os_drive
+    abs_mode = False
+    if (_act is not None and getattr(_act, "name", "") == "v4l2_ptz"
+            and _os_drive.environ.get("IRIS_PTZ_DRIVE", "abs").lower() != "hid"):
+        jog = _V4l2AbsJog(getattr(_act, "device", "/dev/video0"))
+        _p0 = jog.position()
+        if _p0 is not None:
+            abs_mode = True
+            est_pan, est_tilt = _p0
+        else:
+            jog = _PixyJog()
+    st["drive"] = "v4l2_abs" if abs_mode else "hid_jog"
     try:
         while not stop.is_set():
             t_tick = time.time()
@@ -809,6 +947,13 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                         _odo_prev_ts = _ro.capture_ts
                 except Exception:
                     pass
+                if abs_mode:
+                    # the setpoint IS the position — overrides odometry's estimate
+                    _pa = jog.position()
+                    if _pa is not None:
+                        est_pan, est_tilt = _pa
+                        st["est_bearing"] = {"pan_deg": round(est_pan, 1),
+                                             "tilt_deg": round(est_tilt, 1)}
                 # ── person seeing-half (2026-08-25): YOLOX+ByteTrack+faces
                 # primary; TrackerVit face path is the FALLBACK when the
                 # module itself fails (pt_error), NOT when it says lost —
@@ -1055,7 +1200,7 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                              or _odo_stale_s >= _ODO_STALE_FORCE_S)
                             and time.time() - last_resync_ts
                             >= _ODO_SKIP_MIN_GAP_S)
-                        if (_act is not None
+                        if (_act is not None and not abs_mode
                                 and ((time.time() - last_resync_ts >= resync_interval
                                       and (st["_jog_effort_deg"]
                                            >= _RESYNC_MIN_DEG or _forced))
