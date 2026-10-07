@@ -1339,6 +1339,21 @@ def _attention_smooth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
         if not target:
             return {"ok": True, "started": False, "reason": "no auto_start_target",
                     "tune_path": str(_TUNE_PATH)}
+        # 2026-10-07 (first server boot): autostart ignored the deliberate-off
+        # flag and drove the head on an untested Linux actuator. A park is only
+        # as good as its last flag reader, so honour the flag here. Fail closed:
+        # a flag that exists but can't be parsed counts as OFF.
+        _off_flag = _TUNE_PATH.parent / "servo_deliberately_off.json"
+        try:
+            _off = bool(_json.loads(_off_flag.read_text(encoding="utf-8")).get("off", True))
+        except FileNotFoundError:
+            _off = False
+        except Exception:
+            _off = True
+        if _off:
+            return {"ok": True, "started": False,
+                    "reason": f"deliberately off ({_off_flag.name})",
+                    "auto_start_target": target}
         if running:
             return {"ok": True, "started": False, "reason": "already running",
                     "target": (g.get("_attention_state_obj") or {}).get("target")}
