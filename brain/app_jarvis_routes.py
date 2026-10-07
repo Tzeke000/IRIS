@@ -104,6 +104,39 @@ def _call(name: str, params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any
         return {"ok": False, "error": repr(e)[:240]}
 
 
+_SSH_PROBE_TTL_S = 60.0
+_ssh_probe_cache: dict[str, Any] = {"ts": 0.0, "ok": False}
+
+
+def _server_ssh_reachable() -> bool:
+    """Is the server's sshd answering? Cached for 60 s, and polite on the wire.
+
+    2026-10-07: the app's Server tab polled this every ~5 s with a bare TCP
+    connect-and-close. Each one made sshd on iris-home log
+    `error: kex_exchange_identification: Connection closed by remote host`,
+    about 700 error lines between 17:26 and 18:58, which showed up as scary
+    red text in Proxmox. Now we read sshd's banner and send our own
+    identification line before closing (sshd treats that as an ordinary
+    pre-auth disconnect, not a protocol error), and we probe at most once a minute."""
+    now = time.time()
+    if now - float(_ssh_probe_cache["ts"]) < _SSH_PROBE_TTL_S:
+        return bool(_ssh_probe_cache["ok"])
+    ok = False
+    try:
+        from brain.private_config import get as priv
+        host = priv("iris_home_tailnet") or priv("iris_home_host")
+        with socket.create_connection((host, 22), timeout=1.5) as s:
+            s.settimeout(1.5)
+            banner = s.recv(256)
+            ok = banner.startswith(b"SSH-")
+            if ok:
+                s.sendall(b"SSH-2.0-iris-reachability-probe\r\n")
+    except Exception:
+        ok = False
+    _ssh_probe_cache.update(ts=now, ok=ok)
+    return ok
+
+
 def bridge_status(root: Path) -> dict[str, Any]:
     out: dict[str, Any] = {"ok": True}
     try:
@@ -118,13 +151,7 @@ def bridge_status(root: Path) -> dict[str, Any]:
         out["server_key_authorized"] = "iris-home-to-tower" in keys
     except Exception:
         out["server_key_authorized"] = None
-    try:
-        from brain.private_config import get as priv
-        host = priv("iris_home_tailnet") or priv("iris_home_host")
-        with socket.create_connection((host, 22), timeout=1.5):
-            out["server_reachable"] = True
-    except Exception:
-        out["server_reachable"] = False
+    out["server_reachable"] = _server_ssh_reachable()
     try:
         ps = ("$a=Get-NetAdapter -Physical | Where-Object Status -eq 'Up' | Select-Object -First 1;"
               "(Get-NetAdapterPowerManagement -Name $a.Name).WakeOnMagicPacket")
