@@ -6,7 +6,8 @@
 #
 #   loop: ~/iris_start.sh <mode>   (ONE-OF-ME gate: ~/LIVE + tower heartbeat/ping; then launcher)
 #     gate refused (rc 5/6/7)  -> stop: the tower is me right now. Never loop against the gate.
-#     launcher exited          -> restart after 30 s, at most 2 times per rolling hour, then stand down
+#     launcher exited          -> restart after 30 s, at most IRIS_MAX_RESTARTS (default 5, Zeke 10-07)
+#                                 times per rolling hour, then stand down
 #     .tmp/restart_cc.flag     -> (restart_self / safe_restart) stop the launcher; the loop restarts it
 #   ~/IRIS_BOOT_TEST present   -> IRIS_ROLE=staging: the launcher runs the runtime-only dry run
 #                                 (no claude, no cognition) - safe to test a power cut any time.
@@ -21,6 +22,7 @@ GATE="$HOME/iris_start.sh"
 export IRIS_NO_PAUSE=1
 exec 8<&0
 STARTS=()
+MAX_RESTARTS="${IRIS_MAX_RESTARTS:-5}"   # was 2; Zeke 10-07: "move it to five just in case"
 
 if [ -f "$HOME/IRIS_BOOT_TEST" ]; then
   export IRIS_ROLE=staging
@@ -33,13 +35,13 @@ while :; do
   for t in "${STARTS[@]:-}"; do [ -n "$t" ] && [ $((NOW - t)) -lt 3600 ] && KEEP+=("$t"); done
   STARTS=("${KEEP[@]:-}")
   N=0; for t in "${STARTS[@]:-}"; do [ -n "$t" ] && N=$((N+1)); done
-  if [ "$N" -ge 3 ]; then
-    log "STANDING DOWN: 3 starts within an hour (1 + 2 restarts). Not looping. Check state/launcher_boot.log."
+  if [ "$N" -ge $((MAX_RESTARTS + 1)) ]; then
+    log "STANDING DOWN: $N starts within an hour (1 + $MAX_RESTARTS restarts). Not looping. Check state/launcher_boot.log."
     break
   fi
   STARTS+=("$NOW")
   rm -f "$FLAG"
-  log "start #$((N+1)) this hour: $GATE $MODE"
+  log "start #$((N+1)) this hour (limit 1 + $MAX_RESTARTS): $GATE $MODE"
   # fd 8 = the tmux pane's tty: a background job's stdin would be /dev/null, and the CLI mode
   # (interactive claude) and the host's console reader both need the real terminal.
   "$GATE" "$MODE" 0<&8 &
