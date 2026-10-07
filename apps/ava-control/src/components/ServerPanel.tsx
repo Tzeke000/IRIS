@@ -83,7 +83,7 @@ export default function ServerPanel() {
 
       <Section title="Server status">
         <div style={{ display: "grid", gap: 6 }}>
-          <div>{dot(reach?.proxmox)}Proxmox host (X.X.X.X)</div>
+          <div>{dot(reach?.proxmox)}Proxmox host</div>
           <div>{dot(reach?.iris_home_ssh)}iris-home reachable (SSH)</div>
           <div>{dot(reach?.iris_home_runtime)}Me running on the server</div>
         </div>
