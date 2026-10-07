@@ -43,6 +43,10 @@ class FaceMeshVideo:
     as iris_hands) and is not documented thread-safe, so detect() is locked.
     Each consumer owns its own instance (model is 3.7MB — cheap)."""
 
+    _shared_lock = threading.Lock()
+    _shared_frame: Any = None
+    _shared_lm: Any = None
+
     def __init__(self) -> None:
         opts = mp_vision.FaceLandmarkerOptions(
             base_options=mp_python.BaseOptions(model_asset_path=str(_MODEL_PATH)),
@@ -59,18 +63,28 @@ class FaceMeshVideo:
         """Return the landmark list (NormalizedLandmark with .x/.y/.z) or None."""
         if frame_bgr is None:
             return None
-        import cv2
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB) if len(frame_bgr.shape) == 3 else frame_bgr
-        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        with self._lock:
-            ts_ms = int(time.time() * 1000)
-            if ts_ms <= self._last_ts_ms:
-                ts_ms = self._last_ts_ms + 1
-            self._last_ts_ms = ts_ms
-            res = self._lm.detect_for_video(mp_img, ts_ms)
-        if not res.face_landmarks:
-            return None
-        return res.face_landmarks[0]
+        # ONE facemesh pass per camera frame (2026-10-07, "everything at 30"):
+        # the expression and attention workers each owned an instance and both
+        # meshed the SAME live frame — two identical ~18 ms passes, plus the GIL-
+        # heavy landmark conversion twice. The class-level memo hands the second
+        # caller the first caller's landmarks when it is the same frame OBJECT
+        # (the perception workers share g["_raw_frame_slot"][1]).
+        with FaceMeshVideo._shared_lock:
+            if FaceMeshVideo._shared_frame is frame_bgr:
+                return FaceMeshVideo._shared_lm
+            import cv2
+            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB) if len(frame_bgr.shape) == 3 else frame_bgr
+            mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            with self._lock:
+                ts_ms = int(time.time() * 1000)
+                if ts_ms <= self._last_ts_ms:
+                    ts_ms = self._last_ts_ms + 1
+                self._last_ts_ms = ts_ms
+                res = self._lm.detect_for_video(mp_img, ts_ms)
+            lm = res.face_landmarks[0] if res.face_landmarks else None
+            FaceMeshVideo._shared_frame = frame_bgr
+            FaceMeshVideo._shared_lm = lm
+            return lm
 
 # MediaPipe Face Mesh iris landmark indices (refine_landmarks=True required)
 # Left iris:  468 (center), 469, 470, 471, 472 (edge points)

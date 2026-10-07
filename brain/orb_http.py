@@ -146,7 +146,25 @@ def _inner_life_block() -> dict:
     }
 
 
+_BG_CACHE: dict = {"ts": 0.0, "block": None}
+_BG_TTL_S = 10.0
+
+
 def _brain_graph_snapshot_block() -> dict:
+    """TTL-cached (2026-10-07): the orb polls /snapshot about once a second and
+    the uncached block dataclass-dumps the WHOLE concept graph plus re-reads
+    10k episodes just for counts — py-spy put the snapshot thread at 28% of
+    all GIL-held time, starving the 30 Hz perception workers. Counts that are
+    10 s stale are fine for a status panel."""
+    now = time.time()
+    if _BG_CACHE["block"] is not None and now - _BG_CACHE["ts"] < _BG_TTL_S:
+        return _BG_CACHE["block"]
+    block = _brain_graph_snapshot_block_uncached()
+    _BG_CACHE.update({"ts": now, "block": block})
+    return block
+
+
+def _brain_graph_snapshot_block_uncached() -> dict:
     """Concept graph stats for snapshot. Lighter than full /brain/graph
     response — just totals so the orb's status panel can show counts.
 
