@@ -34,6 +34,12 @@ _STICKY_S = 8.0            # how long a confident identity holds a spot
 _STICKY_FLOOR = 0.30       # below this the face is genuinely someone else / nothing
 _STICKY_DIST_FRAC = 1.2    # centre-to-centre distance allowed, in multiples of the face width
 _MIN_FACE_PX = 28          # smaller boxes are texture (vent grilles, screens) - never a target  # cosine sim ≥ this → positive ID
+# Live-loop identity cadence (see InsightFaceEngine._fast_get, 2026-10-07): the
+# identity models run every Nth frame (30fps capture -> ~10Hz re-identification);
+# in between, a face that IoU-matches the previous pass carries these attributes.
+_FULL_EVERY_N = 3
+_CARRY_IOU = 0.3
+_CARRY_KEYS = ("embedding", "gender", "age", "landmark_3d_68", "pose")
 
 _SINGLETON: Optional["InsightFaceEngine"] = None
 _SINGLETON_LOCK = threading.Lock()
@@ -327,7 +333,7 @@ class InsightFaceEngine:
             return []
         try:
             with self._lock:
-                faces = self._app.get(frame)
+                faces = self._fast_get(frame)
         except Exception as e:
             print(f"[insight_face] analyze error: {e!r}")
             return []
@@ -397,6 +403,64 @@ class InsightFaceEngine:
             except Exception as e:
                 print(f"[insight_face] face decode error: {e!r}")
         return results
+
+    def _fast_get(self, frame: Any) -> list:
+        """30Hz-capable replacement for FaceAnalysis.get() on the LIVE loop only
+        (2026-10-07, Zeke: "everything at 30"). Detection + 106-pt landmarks run
+        EVERY frame (position/landmarks stay fresh); the identity-side models
+        (recognition, genderage, 3d68 pose) run every _FULL_EVERY_N-th frame, or
+        immediately for any face that doesn't IoU-match a face from the last
+        pass. Matched faces carry their identity attributes forward. Measured on
+        the V100 under the runtime's thread mix: full get() capped the face
+        worker at ~20fps; the identity models were ~13 of its ~30 ms.
+        add_face()/_load_faces() still use the full app.get() — enrollment
+        never takes this path. Caller holds self._lock."""
+        from insightface.app.common import Face  # type: ignore
+        app = self._app
+        bboxes, kpss = app.det_model.detect(frame, max_num=0, metric="default")
+        d = self.__dict__
+        if bboxes.shape[0] == 0:
+            d["_fg_cache"] = []
+            return []
+        n = int(d.get("_fg_n", 0)) + 1
+        d["_fg_n"] = n
+        full = (n % _FULL_EVERY_N == 0)
+        cache = d.get("_fg_cache") or []
+        faces, new_cache = [], []
+        for i in range(bboxes.shape[0]):
+            face = Face(bbox=bboxes[i, 0:4],
+                        kps=kpss[i] if kpss is not None else None,
+                        det_score=bboxes[i, 4])
+            match = None
+            if not full and cache:
+                bx1, by1, bx2, by2 = (float(v) for v in bboxes[i, 0:4])
+                best = 0.0
+                for c in cache:
+                    cx1, cy1, cx2, cy2 = c["bbox"]
+                    iw = max(0.0, min(bx2, cx2) - max(bx1, cx1))
+                    ih = max(0.0, min(by2, cy2) - max(by1, cy1))
+                    inter = iw * ih
+                    union = (bx2 - bx1) * (by2 - by1) + (cx2 - cx1) * (cy2 - cy1) - inter
+                    iou = inter / union if union > 0 else 0.0
+                    if iou > best:
+                        best, match = iou, c
+                if best < _CARRY_IOU:
+                    match = None
+            for taskname, model in app.models.items():
+                if taskname == "detection":
+                    continue
+                if taskname == "landmark_2d_106" or match is None:
+                    model.get(frame, face)
+            if match is not None:
+                for k, v in match["attrs"].items():
+                    face[k] = v
+            faces.append(face)
+            new_cache.append({
+                "bbox": tuple(float(v) for v in bboxes[i, 0:4]),
+                "attrs": {k: face[k] for k in _CARRY_KEYS if k in face},
+            })
+        d["_fg_cache"] = new_cache
+        return faces
 
     def _match(self, emb: Any) -> tuple[str, float]:
         if not self._known:

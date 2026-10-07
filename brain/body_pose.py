@@ -110,9 +110,37 @@ def _load() -> Any:
     return _MODEL
 
 
+# ONNX path for the LIVE LOOP (2026-10-07, "everything at 30"): the same weights
+# exported static at 640 (models/pose/yolo11n-pose.onnx). Ultralytics runs it via
+# ORT with the GIL released for the whole graph; eager torch held the GIL per op
+# and the runtime's thread mix capped the pose loop at ~9 Hz (bench: 8.6 -> 26.9).
+# Only imgsz == ONNX_IMGSZ calls use it; any other size stays on the .pt model.
+ONNX_PATH = MODEL_PATH.with_suffix(".onnx")
+ONNX_IMGSZ = 640
+_ONNX_MODEL: Any = None
+_ONNX_ERROR: str | None = None
+
+
+def _load_for(imgsz: int) -> Any:
+    global _ONNX_MODEL, _ONNX_ERROR
+    if int(imgsz) != ONNX_IMGSZ or _ONNX_ERROR or not ONNX_PATH.exists():
+        return _load()
+    if _ONNX_MODEL is not None:
+        return _ONNX_MODEL
+    with _LOCK:
+        if _ONNX_MODEL is None and not _ONNX_ERROR:
+            try:
+                from ultralytics import YOLO  # type: ignore
+                _ONNX_MODEL = YOLO(str(ONNX_PATH), task="pose")
+            except Exception as e:  # noqa: BLE001
+                _ONNX_ERROR = repr(e)[:200]
+    return _ONNX_MODEL if _ONNX_MODEL is not None else _load()
+
+
 def status() -> dict[str, Any]:
     return {"loaded": _MODEL is not None, "error": _LOAD_ERROR,
             "weights": str(MODEL_PATH), "weights_present": MODEL_PATH.exists(),
+            "onnx_loaded": _ONNX_MODEL is not None, "onnx_error": _ONNX_ERROR,
             "hfov_deg": hfov_deg(), "heights_m": _config().get("heights_m") or {},
             **_STATS}
 
@@ -286,7 +314,7 @@ def analyze(frame: Any, *, person_hint: str | None = None, conf: float = 0.25,
     sits in its upper part or a body track overlaps it; otherwise it is
     'unverified' — a humanoid statue on the dresser scored 0.75 at both sizes.
     """
-    m = _load()
+    m = _load_for(imgsz)
     if m is None:
         return {"ok": False, "error": _LOAD_ERROR or "model not loaded", "persons": []}
     t0 = time.time()
@@ -447,7 +475,11 @@ HISTORY_S = 12.0
 # this machine is to A/B it INSIDE the running stack with a one-call revert
 # (see memory/pose_30hz_2026-09-03.md — a change benchmarked offline was 10x
 # worse live the same morning). set_tuning() moves them without a file edit.
-LOOP_ACTIVE_S = 0.05     # someone in view. BAKED 2026-09-03 after Zeke watched it:
+LOOP_ACTIVE_S = 1.0 / 30.0  # someone in view: the PERIOD BUDGET per pass (2026-10-07:
+                         # the pass time is now subtracted, and the same frame is never
+                         # re-read — was a flat 0.05 s wait AFTER each pass, which with
+                         # the ONNX model's ~13 ms capped the loop at ~16 Hz, Zeke: all 30).
+                         # History of the old value: BAKED 2026-09-03 after Zeke watched it:
                          # *"it's a lotttt better"*. Was 1.0 — set 09-02 because at
                          # 2 Hz the shared GPU pushed person_track's YOLOX 33→156 ms.
                          # That constraint died when body detection moved to its own
@@ -575,8 +607,10 @@ class PoseLoop:
 
     def _run(self) -> None:
         global _LAST_HEAD
+        last_cap = 0.0
         while not self._stop.is_set():
             period = LOOP_IDLE_S
+            t_pass = time.time()
             try:
                 from brain import frame_store
                 g = self._g
@@ -591,7 +625,11 @@ class PoseLoop:
                     tracks = []
                 if faces or tracks:
                     res = frame_store.get_buffered_frame(max_age_sec=2.0)
-                    if res.frame is not None:
+                    if res.frame is not None and float(res.capture_ts or 0.0) <= last_cap:
+                        period = 0.004           # no new frame yet — poll cheaply
+                        res = None
+                    if res is not None and res.frame is not None:
+                        last_cap = float(res.capture_ts or 0.0)
                         known = [str(f.get("person_id")) for f in faces
                                  if str(f.get("person_id") or "unknown") not in ("unknown", "")]
                         hint = known[0] if len(known) == 1 else None
@@ -605,7 +643,7 @@ class PoseLoop:
                             g["_human_pose_live"] = out
                             if any(p.get("verified_person") or p.get("likely_person") for p in out["persons"]):
                                 self.stats["with_person"] += 1
-                                period = LOOP_ACTIVE_S
+                                period = max(0.0, LOOP_ACTIVE_S - (time.time() - t_pass))
                 else:
                     self.stats["ticks"] += 1
             except Exception:  # noqa: BLE001

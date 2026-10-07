@@ -84,6 +84,14 @@ _model = None
 _device = "cpu"
 _load_error = ""
 _cache: dict[str, Any] = {"ts": 0.0, "fp": None, "dets": []}
+# ONNX Runtime path (2026-10-07, "everything at 30"): the same YOLOX-s exported to
+# models/yolox/yolox_s.onnx (scratch/bench/export.py). ORT runs the whole graph in
+# one C++ call with the GIL released; eager torch takes the GIL per op, and in the
+# runtime's thread mix that held YOLOX to ~10 Hz (measured: 9.8 -> 29.3 Hz).
+# Falls back to the torch path if the .onnx or the CUDA EP is missing.
+_ONNX = _ROOT / "models" / "yolox" / "yolox_s.onnx"
+_ort_sess = None
+_ort_error = ""
 
 
 def _log(msg: str) -> None:
@@ -138,9 +146,44 @@ def _ensure_model():
     return _model
 
 
+def _ensure_ort():
+    """ORT CUDA session over the exported ONNX, or None (never raises)."""
+    global _ort_sess, _ort_error
+    if _ort_sess is not None or _ort_error:
+        return _ort_sess
+    with _LOCK:
+        if _ort_sess is not None or _ort_error:
+            return _ort_sess
+        try:
+            if not _ONNX.is_file():
+                _ort_error = f"onnx missing at {_ONNX}"
+                return None
+            import onnxruntime as ort
+            if hasattr(ort, "preload_dlls"):
+                try:
+                    ort.preload_dlls()
+                except Exception:  # noqa: BLE001
+                    pass
+            if "CUDAExecutionProvider" not in ort.get_available_providers():
+                _ort_error = "no CUDA EP"
+                return None
+            sess = ort.InferenceSession(str(_ONNX), providers=["CUDAExecutionProvider"])
+            if "CUDAExecutionProvider" not in sess.get_providers():
+                _ort_error = "CUDA EP not applied"
+                return None
+            _ort_sess = sess
+            _log("loaded YOLOX-s ONNX on CUDA EP")
+        except Exception as e:  # noqa: BLE001
+            _ort_error = repr(e)
+            _log(f"onnx load failed (torch fallback): {e!r}")
+            return None
+    return _ort_sess
+
+
 def detect(frame, *, min_score: float = _MIN_SCORE) -> list[dict]:
     """All person boxes in a BGR frame, best first. [] on any failure."""
-    model = _ensure_model()
+    sess = _ensure_ort()
+    model = sess if sess is not None else _ensure_model()
     if model is None or frame is None:
         return []
     now = time.time()
@@ -172,10 +215,14 @@ def detect(frame, *, min_score: float = _MIN_SCORE) -> list[dict]:
                              interpolation=cv2.INTER_LINEAR)
         canvas = np.full((_INPUT_H, _INPUT_W, 3), 114, dtype=np.uint8)
         canvas[:resized.shape[0], :resized.shape[1]] = resized
-        x = torch.from_numpy(canvas.transpose(2, 0, 1)).float()
-        with torch.no_grad():
-            out = model(x.unsqueeze(0).to(_device))
-        o = out[0].cpu().numpy()
+        if sess is not None:
+            o = sess.run(None, {sess.get_inputs()[0].name:
+                                canvas.transpose(2, 0, 1)[None].astype(np.float32)})[0][0]
+        else:
+            x = torch.from_numpy(canvas.transpose(2, 0, 1)).float()
+            with torch.no_grad():
+                out = model(x.unsqueeze(0).to(_device))
+            o = out[0].cpu().numpy()
         scores = o[:, 4] * o[:, 5 + _PERSON_CLASS]
         keep = scores > min(0.05, min_score)
         if not keep.any():
