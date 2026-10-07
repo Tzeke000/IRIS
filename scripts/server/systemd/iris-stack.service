@@ -10,7 +10,7 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/tmux new-session -d -s iris %h/staged/Wren-Companion/scripts/server/iris_supervise.sh opus
+ExecStart=/usr/bin/tmux new-session -d -s iris %h/IRIS/scripts/server/iris_supervise.sh opus
 # HUP to everything in the session -> the launcher's trap stops host, claude and runtime cleanly
 ExecStop=-/usr/bin/tmux kill-session -t iris
 TimeoutStopSec=40
