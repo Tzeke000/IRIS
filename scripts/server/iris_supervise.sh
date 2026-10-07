@@ -12,7 +12,7 @@
 #                                 (no claude, no cognition) - safe to test a power cut any time.
 set -u
 MODE="${1:-opus}"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 LOG="$ROOT/state/supervise.log"
 mkdir -p "$ROOT/state" "$ROOT/.tmp"
 log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }

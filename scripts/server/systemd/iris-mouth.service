@@ -9,9 +9,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/staged/Wren-Companion
+WorkingDirectory=%h/IRIS
 EnvironmentFile=%h/.config/iris/voice.env
-ExecStart=%h/venvs/iris-style/bin/python %h/staged/Wren-Companion/voice/wren_styletts_server.py
+ExecStart=%h/venvs/iris-style/bin/python %h/IRIS/voice/wren_styletts_server.py
 Restart=always
 RestartSec=10
 

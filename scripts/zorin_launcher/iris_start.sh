@@ -16,9 +16,9 @@
 set -u
 MODE="${1:-opus}"
 case "$MODE" in
-  fable) LABEL="Iris (Fable 5.1)";  SCRIPT="$HOME/staged/Wren-Companion/start_iris_v2_fable.sh" ;;
-  opus)  LABEL="Iris (Opus)";       SCRIPT="$HOME/staged/Wren-Companion/start_iris_v2.sh" ;;
-  cli)   LABEL="Iris (CLI)";        SCRIPT="$HOME/staged/Wren-Companion/start_iris.sh" ;;
+  fable) LABEL="Iris (Fable 5.1)";  SCRIPT="$HOME/IRIS/start_iris_v2_fable.sh" ;;
+  opus)  LABEL="Iris (Opus)";       SCRIPT="$HOME/IRIS/start_iris_v2.sh" ;;
+  cli)   LABEL="Iris (CLI)";        SCRIPT="$HOME/IRIS/start_iris.sh" ;;
   *) echo "unknown mode: $MODE (fable|opus|cli)"; exit 2 ;;
 esac
 [ -f "$HOME/.iris_private.env" ] && . "$HOME/.iris_private.env"  # IRIS_TOWER_LAN / IRIS_TOWER_TS (not in git)

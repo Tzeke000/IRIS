@@ -6,7 +6,7 @@
 # (what the app's "Open my console" attaches to). Never starts anything the gate refused.
 set -u
 MODE="${1:-opus}"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 case "$MODE" in cli|opus|fable) ;; *) echo "unknown mode: $MODE"; exit 2 ;; esac
 if tmux has-session -t iris 2>/dev/null; then
   echo "I'm already running on the server. Use \"Open my console\" to see me."

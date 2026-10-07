@@ -9,11 +9,11 @@ Wants=network-online.target iris-mouth.service
 
 [Service]
 Type=simple
-WorkingDirectory=%h/staged/Wren-Companion
+WorkingDirectory=%h/IRIS
 EnvironmentFile=%h/.config/iris/voice.env
 Environment=WREN_VOICE_PORT=8769
-Environment=HF_HOME=%h/staged/Wren-Companion/.cache/huggingface
-ExecStart=%h/venvs/iris-v100/bin/python %h/staged/Wren-Companion/voice/wren_voice_daemon.py
+Environment=HF_HOME=%h/IRIS/.cache/huggingface
+ExecStart=%h/venvs/iris-v100/bin/python %h/IRIS/voice/wren_voice_daemon.py
 Restart=always
 RestartSec=10
 

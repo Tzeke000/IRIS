@@ -5,7 +5,7 @@
 # session "iris", after that gate has checked ONE-OF-ME (tower heartbeat + ~/LIVE).
 set -u
 MODE="${1:-opus}"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$ROOT" || exit 2
 mkdir -p "$ROOT/state" "$ROOT/.tmp"
 LOG="$ROOT/state/launcher_boot.log"

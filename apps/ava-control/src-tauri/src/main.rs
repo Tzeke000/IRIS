@@ -164,7 +164,7 @@ fn server_start_iris(mode: String) -> Result<String, String> {
         return Err(format!("unknown mode {mode}"));
     }
     let ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
-    let remote = format!("~/staged/Wren-Companion/scripts/server/iris_start_detached.sh {mode}");
+    let remote = format!("~/IRIS/scripts/server/iris_start_detached.sh {mode}");
     let out = Command::new(ssh)
         .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=6", iris_home().as_str(), remote.as_str()])
         .creation_flags(CREATE_NO_WINDOW)
