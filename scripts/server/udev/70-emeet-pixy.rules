@@ -1,0 +1,5 @@
+# EMEET PIXY (328f:00c0): let the iris user drive the PTZ jog (HID velocity reports).
+# Without this, /dev/hidraw* is root-only (crw-------) and attention_smooth's
+# _PixyJog.write_vector fails every tick -> mode=hid_error, writes=0 (found 2026-10-07).
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="328f", ATTRS{idProduct}=="00c0", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="328f", ATTRS{idProduct}=="00c0", MODE="0664", GROUP="plugdev"
