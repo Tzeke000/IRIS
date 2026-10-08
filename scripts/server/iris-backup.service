@@ -1,0 +1,11 @@
+# iris-backup - nightly off-VM tarball to the tower (scripts/server/backup_to_tower.sh). 2026-10-07.
+[Unit]
+Description=Iris nightly backup to the tower
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/IRIS
+ExecStart=%h/IRIS/scripts/server/backup_to_tower.sh
+Nice=10
+IOSchedulingClass=idle

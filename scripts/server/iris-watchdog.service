@@ -1,0 +1,9 @@
+# iris-watchdog - outside-of-me watchdog (scripts/server/iris_watchdog.py): wedge -> restart flag,
+# down -> Discord DM to Zeke. 2026-10-07 hardening pass.
+[Unit]
+Description=Iris server watchdog (wedge restart + down alerts)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/IRIS
+ExecStart=%h/venvs/iris-v100/bin/python %h/IRIS/scripts/server/iris_watchdog.py
