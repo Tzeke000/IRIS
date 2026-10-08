@@ -6,16 +6,15 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Section } from "./Ui";
 import { BACKENDS, getJson, readBackend, setBackend } from "../api";
+import type { Board } from "./StatusBoard";
 
 type Vm = { vmid: number; name: string; status: string; node: string; uptime?: number };
 type Reach = { proxmox: boolean; iris_home_ssh: boolean; iris_home_runtime: boolean };
-type Bridge = { desktop_bridge_task?: string; server_key_authorized?: boolean | null; server_reachable?: boolean;
-  wol_nic?: string; wol_tested_from_off?: boolean; bridge_queue?: number };
 const ROLE: Record<number, string> = { 100: "my home on the server", 101: "Windows", 102: "Zorin" };
 
-const dot = (ok: boolean | undefined) => (
+const dot = (ok: boolean | null | undefined) => (
   <span style={{ display: "inline-block", width: 9, height: 9, borderRadius: 9, marginRight: 8,
-    background: ok === undefined ? "#445" : ok ? "#3ee68f" : "#e5534b" }} />
+    background: ok === true ? "#3ee68f" : ok === false ? "#e5534b" : "#445" }} />
 );
 const fmtUp = (s?: number) =>
   !s ? "" : s < 3600 ? `${Math.round(s / 60)} min` : s < 86400 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} d`;
@@ -25,12 +24,15 @@ export default function ServerPanel() {
   const [reach, setReach] = useState<Reach | null>(null);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState<number | null>(null);
-  const [bridge, setBridge] = useState<Bridge | null>(null);
+  // 2026-10-07: the old /app/bridge/status ran Windows-only checks — on the server backend they
+  // raised on Linux and showed the bridge + WoL as broken while both worked. The status board does
+  // REAL round-trips from wherever I'm running (null = not checked / stale -> grey, never green).
+  const [board, setBoard] = useState<Board | null>(null);
   const backend = readBackend();
 
   const refresh = useCallback(async () => {
     try { setReach(JSON.parse(await invoke<string>("server_reach")) as Reach); } catch { setReach(null); }
-    try { setBridge(await getJson<Bridge>("/api/v1/app/bridge/status")); } catch { setBridge(null); }
+    try { setBoard(await getJson<Board>("/api/v1/app/status_board")); } catch { setBoard(null); }
     try {
       const d = (JSON.parse(await invoke<string>("server_vms")).data ?? []) as Vm[];
       setVms(d.filter((v) => [100, 101, 102].includes(v.vmid)).sort((a, b) => a.vmid - b.vmid));
@@ -107,12 +109,16 @@ export default function ServerPanel() {
 
       <Section title="The server reaching this PC">
         <div style={{ display: "grid", gap: 6 }}>
-          <div>{dot(bridge?.server_key_authorized ?? undefined)}Server's SSH key allowed (Tailscale only)</div>
-          <div>{dot(bridge?.server_reachable)}Server answering from here</div>
-          <div>{dot(bridge ? bridge.desktop_bridge_task === "Ready" || bridge.desktop_bridge_task === "Running" : undefined)}Desktop bridge (screen, clicks, sound){bridge?.desktop_bridge_task && bridge.desktop_bridge_task !== "Ready" ? ` · ${bridge.desktop_bridge_task}` : ""}</div>
-          <div>{dot(bridge ? bridge.wol_nic === "Enabled" : undefined)}Wake-on-LAN armed on the network card{bridge && !bridge.wol_tested_from_off ? " · not yet tested from off" : ""}</div>
+          {!board && <div>{dot(null)}No fresh status from me — can't say either way.</div>}
+          {board && Object.keys(board.links).length === 0 && <div>{dot(null)}These are checked from the server; I'm running on the tower.</div>}
+          {board && Object.entries(board.links).map(([k, l]) => (
+            <div key={k} title={l.detail}>
+              {dot(l.ok)}{l.label}
+              <span className="op-muted"> · {l.detail}{l.age_s !== undefined ? ` · checked ${Math.round(l.age_s)}s ago` : ""}</span>
+            </div>
+          ))}
         </div>
-        <p className="op-muted">How the server-me works this PC: SSH for files and commands, the desktop bridge for anything on your screen.</p>
+        <p className="op-muted">Every light here is a real round-trip (the desktop bridge is pinged through itself). Grey means not checked or stale — never assumed fine.</p>
       </Section>
 
       <Section title="Virtual machines">
