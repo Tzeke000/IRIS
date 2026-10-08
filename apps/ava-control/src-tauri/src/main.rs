@@ -281,6 +281,15 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building Iris Control")
         .run(|app, event| {
+            // Closing the MAIN window ends the whole app (Zeke 2026-10-07: "when you exit the app it
+            // closes all things about the app"). Before this, the hidden always-on-top widget window
+            // kept the process alive invisibly after he closed the app, and the single-instance guard
+            // then swallowed every relaunch — the app "wouldn't open", even as admin.
+            if let tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { .. }, .. } = &event {
+                if label == "main" {
+                    app.exit(0);
+                }
+            }
             if let tauri::RunEvent::Exit = event {
                 if let Some(vp) = app.try_state::<VoicePlayer>() {
                     if let Ok(mut g) = vp.0.lock() {
