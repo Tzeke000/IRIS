@@ -11,7 +11,7 @@ show a window. This bridge closes that gap WITHOUT a resident agent:
                 the result and prints it as JSON.
   the task:  pythonw desktop_bridge.py serve   (processes every pending request, then exits)
 
-Actions: screenshot [max_px] (-> JPEG path; scp it back) · pc {..pc tool params..} (volume, media,
+Actions: screenshot {monitor: "all"|1|2.., max_px} (-> JPEG path; scp it back) · monitors · pc {..pc tool params..} (volume, media,
 windows, launch — the same code as the `pc` tool) · open target · click x y [button] · type text ·
 keys combo ('ctrl+shift+esc') · ping.
 Install the task once (from his desktop, or over SSH):  python desktop_bridge.py install
@@ -31,9 +31,44 @@ Q = ROOT / "state" / "desktop_bridge"
 OUT = Q / "out"
 LOG = Q / "log.jsonl"
 TASK = "Iris-Desktop-Bridge"
-ACTIONS = {"ping", "screenshot", "pc", "open", "click", "type", "keys"}   # nothing else runs, ever
+ACTIONS = {"ping", "screenshot", "monitors", "pc", "open", "click", "type", "keys"}   # nothing else runs, ever
 PYW = ROOT / ".venv" / "Scripts" / "pythonw.exe"
 NOWIN = 0x08000000
+
+
+def _monitors() -> list[dict]:
+    """Displays in physical pixels, primary first, then left-to-right (monitor 1 = primary)."""
+    import ctypes
+    from ctypes import wintypes
+    u32 = ctypes.windll.user32
+    try:
+        u32.SetProcessDPIAware()   # real pixel rects, same space ImageGrab uses
+    except Exception:
+        pass
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+    mons: list[dict] = []
+    PROC = ctypes.WINFUNCTYPE(ctypes.c_int, wintypes.HMONITOR, wintypes.HDC,
+                              ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+
+    def _cb(h, _hdc, _r, _l):
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(mi)
+        u32.GetMonitorInfoW(h, ctypes.byref(mi))
+        rc = mi.rcMonitor
+        mons.append({"left": rc.left, "top": rc.top, "right": rc.right, "bottom": rc.bottom,
+                     "width": rc.right - rc.left, "height": rc.bottom - rc.top,
+                     "primary": bool(mi.dwFlags & 1)})
+        return 1
+
+    u32.EnumDisplayMonitors(None, None, PROC(_cb), 0)
+    mons.sort(key=lambda m: (not m["primary"], m["left"]))
+    for i, m in enumerate(mons, 1):
+        m["index"] = i
+    return mons
 
 
 def _screen_locked() -> bool:
@@ -92,14 +127,35 @@ def _do(action: str, args: dict) -> dict:
         return {"ok": False, "error": "the screen is locked (or a UAC prompt is up) — nothing to see or click"}
     if action == "ping":
         return {"ok": True, "session": os.environ.get("SESSIONNAME"), "user": os.environ.get("USERNAME")}
+    if action == "monitors":
+        return {"ok": True, "monitors": _monitors()}
     if action == "screenshot":
+        # monitor (Zeke 10-07: "see both displays on my tower both at the same time and one or the
+        # other"): "all" = every display stitched as Windows lays them out; 1 = the primary; 2.. = the
+        # others left-to-right; omitted = the primary (old behaviour; all_screens=true still works).
         from PIL import ImageGrab
-        im = ImageGrab.grab(all_screens=bool(args.get("all_screens"))).convert("RGB")
+        mons = _monitors()
+        sel = args.get("monitor")
+        if sel is None and args.get("all_screens"):
+            sel = "all"
+        if sel in (None, "", "primary"):
+            sel = 1
+        if str(sel) == "all":
+            im = ImageGrab.grab(all_screens=True)
+            which = "all"
+        else:
+            i = int(sel)
+            if not 1 <= i <= len(mons):
+                return {"ok": False, "error": f"monitor {i} does not exist", "monitors": mons}
+            m = mons[i - 1]
+            im = ImageGrab.grab(bbox=(m["left"], m["top"], m["right"], m["bottom"]), all_screens=True)
+            which = i
+        im = im.convert("RGB")
         im.thumbnail((int(args.get("max_px") or 1280),) * 2)
         OUT.mkdir(parents=True, exist_ok=True)
-        p = OUT / f"screen_{time.strftime('%Y%m%d_%H%M%S')}.jpg"
+        p = OUT / f"screen_{time.strftime('%Y%m%d_%H%M%S')}_{which}.jpg"
         im.save(p, "JPEG", quality=70)
-        return {"ok": True, "path": str(p), "size": list(im.size)}
+        return {"ok": True, "path": str(p), "size": list(im.size), "monitor": which, "monitors": mons}
     if action == "pc":
         sys.path.insert(0, str(ROOT))
         from tools.system.pc_control_tool import _tool_pc
