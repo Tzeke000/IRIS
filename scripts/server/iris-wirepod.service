@@ -1,0 +1,19 @@
+# iris-wirepod - wire-pod (chipper) for Vector, built from source on the server (2026-10-07 Vector move).
+# Config lives beside the binary (~/wire-pod/chipper: apiConfig.json, jdocs/, session-certs/), vosk model
+# in ~/wire-pod/vosk. Binary has cap_net_bind_service for :443; libvosk is in /usr/local/lib.
+[Unit]
+Description=wire-pod (Vector's chipper) on the server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/wire-pod/chipper
+Environment=STT_SERVICE=vosk
+Environment=DEBUG_LOGGING=true
+ExecStart=%h/wire-pod/chipper/chipper
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

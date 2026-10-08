@@ -341,7 +341,9 @@ _OLLAMA_EXE = (Path.home() / "AppData" / "Local" / "Programs" / "Ollama"
 _ollama_spawn_ts = 0.0
 
 
-_LB_OFF_FLAG = Path(r"D:\Wren-Companion") / "state" / "little_brain" / "pilot_deliberately_off.json"
+# Repo-relative (2026-10-07, the Vector move to the Linux server): the old hard-coded D:\ path was
+# simply ABSENT on Linux, so the park read as "not parked" — exactly the scar in the docstring below.
+_LB_OFF_FLAG = Path(__file__).resolve().parents[1] / "state" / "little_brain" / "pilot_deliberately_off.json"
 
 
 def _little_brain_parked() -> bool:

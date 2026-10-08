@@ -1,0 +1,15 @@
+# iris-vector-nerves - Vector's inhabit daemon (senses, battery, possession, transcript tap). ONE host
+# holds the nerves: the tower's copy is stopped + disabled. Honors state/vector_deliberately_off.json.
+[Unit]
+Description=Iris Vector nerves (inhabit daemon)
+After=iris-wirepod.service iris-ears.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/IRIS
+ExecStart=%h/venvs/iris-v100/bin/python -u %h/IRIS/scripts/vector_inhabit_daemon.py
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target
