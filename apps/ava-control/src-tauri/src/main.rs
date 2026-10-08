@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::net::{SocketAddr, TcpStream};
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::time::Duration;
@@ -16,9 +17,55 @@ use tauri::Manager;
 //
 // Host addresses come from the git-ignored config/private.local.json (2026-10-07: the repo is
 // PUBLIC, so the home network layout stays out of source). Override the path with IRIS_PRIVATE_CONFIG.
+// LINUX (2026-10-07, the Zorin build — Zeke: "make the iris app on zorin as well"): the same
+// two git-ignored files live in ~/.config/iris/ (chmod 600). No voice player there: my mouth streams
+// to ONE sink, the tower's.
+#[cfg(windows)]
 const PRIVATE_CFG: &str = r"D:\Wren-Companion\config\private.local.json";
+#[cfg(windows)]
 const DEFAULT_HEADER: &str = r"D:\Wren-Companion\state\secrets\pve_tower.hdr";
+
+fn home_cfg(name: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    format!("{home}/.config/iris/{name}")
+}
+fn private_cfg_path() -> String {
+    #[cfg(windows)]
+    { PRIVATE_CFG.to_string() }
+    #[cfg(not(windows))]
+    { home_cfg("private.local.json") }
+}
+fn default_header_path() -> String {
+    #[cfg(windows)]
+    { DEFAULT_HEADER.to_string() }
+    #[cfg(not(windows))]
+    { home_cfg("pve_panel.hdr") }
+}
+
+/// Background helpers must never flash a console over his game (Windows); a no-op elsewhere.
+trait Quiet {
+    fn quiet(&mut self) -> &mut Self;
+}
+impl Quiet for Command {
+    #[cfg(windows)]
+    fn quiet(&mut self) -> &mut Self {
+        self.creation_flags(CREATE_NO_WINDOW)
+    }
+    #[cfg(not(windows))]
+    fn quiet(&mut self) -> &mut Self {
+        self
+    }
+}
+#[cfg(windows)]
+const SSH: &str = r"C:\Windows\System32\OpenSSH\ssh.exe";
+#[cfg(not(windows))]
+const SSH: &str = "ssh";
+#[cfg(windows)]
+const CURL: &str = "curl.exe";
+#[cfg(not(windows))]
+const CURL: &str = "curl";
 const ALLOWED_VMS: [u32; 3] = [100, 101, 102];
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000; // background helpers must never flash a console over his game
 
 // ── My voice plays through THIS app (Zeke 2026-10-07: "only through the app", "the app should stay up
@@ -26,31 +73,45 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000; // background helpers must never flas
 // player for exactly its own lifetime: scripts/audio_sink.py starts hidden with the app and is killed
 // (process TREE - the venv pythonw stub re-execs a child) when the app exits. Allowlist + firewall
 // rule keep it server-only.
+#[cfg(windows)]
 const SINK_PYTHONW: &str = r"D:\Wren-Companion\.venv\Scripts\pythonw.exe";
+#[cfg(windows)]
 const SINK_SCRIPT: &str = r"D:\Wren-Companion\scripts\audio_sink.py";
 
 struct VoicePlayer(std::sync::Mutex<Option<std::process::Child>>);
 
+#[cfg(windows)]
 fn start_voice_player() -> Option<std::process::Child> {
     Command::new(SINK_PYTHONW)
         .arg(SINK_SCRIPT)
         .current_dir(r"D:\Wren-Companion")
-        .creation_flags(CREATE_NO_WINDOW)
+        .quiet()
         .spawn()
         .ok()
 }
+#[cfg(not(windows))]
+fn start_voice_player() -> Option<std::process::Child> {
+    None
+}
 
 fn stop_voice_player(child: &mut std::process::Child) {
-    let _ = Command::new("taskkill.exe")
-        .args(["/PID", &child.id().to_string(), "/T", "/F"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill.exe")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .quiet()
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child.kill();
+    }
     let _ = child.wait();
 }
 
 /// `"key": "value"` from the private config — a tiny flat-JSON read, no serde dependency needed.
 fn private(key: &str) -> String {
-    let path = std::env::var("IRIS_PRIVATE_CONFIG").unwrap_or_else(|_| PRIVATE_CFG.to_string());
+    let path = std::env::var("IRIS_PRIVATE_CONFIG").unwrap_or_else(|_| private_cfg_path());
     let txt = std::fs::read_to_string(path).unwrap_or_default();
     let pat = format!("\"{key}\"");
     txt.find(&pat)
@@ -68,7 +129,7 @@ fn iris_home() -> String {
 }
 
 fn header_file() -> String {
-    std::env::var("IRIS_PVE_HEADER").unwrap_or_else(|_| DEFAULT_HEADER.to_string())
+    std::env::var("IRIS_PVE_HEADER").unwrap_or_else(|_| default_header_path())
 }
 
 fn pve(method: &str, path: &str) -> Result<String, String> {
@@ -77,9 +138,9 @@ fn pve(method: &str, path: &str) -> Result<String, String> {
         return Err(format!("Proxmox token file missing ({hdr})"));
     }
     let url = format!("https://{}:8006/api2/json{path}", pve_host());
-    let out = Command::new("curl.exe")
+    let out = Command::new(CURL)
         .args(["-sk", "-m", "12", "-X", method, "-H", &format!("@{hdr}"), "-w", "\n%{http_code}", &url])
-        .creation_flags(CREATE_NO_WINDOW)
+        .quiet()
         .output()
         .map_err(|e| format!("curl failed to start: {e}"))?;
     let text = String::from_utf8_lossy(&out.stdout).to_string();
@@ -138,21 +199,44 @@ fn server_reach() -> String {
 /// ssh = a shell on iris-home · console = attach to my live session there · proxmox = the web UI.
 #[tauri::command]
 fn server_open(kind: String) -> Result<(), String> {
-    let ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
     let home = iris_home();
     let pve_ui = format!("https://{}:8006/", pve_host());
-    let mut cmd = Command::new("cmd.exe");
-    match kind.as_str() {
-        "ssh" => cmd.args(["/c", "start", "Iris - server shell", ssh, "-t", home.as_str()]),
-        "console" => cmd.args(["/c", "start", "Iris - my console", ssh, "-t", home.as_str(), "~/iris_console.sh"]),
-        "proxmox" => cmd.args(["/c", "start", "", pve_ui.as_str()]),
-        _ => return Err(format!("unknown target {kind}")),
-    };
-    // `start` opens the visible window we WANT; the helper cmd itself stays hidden.
-    cmd.creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("could not open {kind}: {e}"))
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("cmd.exe");
+        match kind.as_str() {
+            "ssh" => cmd.args(["/c", "start", "Iris - server shell", SSH, "-t", home.as_str()]),
+            "console" => cmd.args(["/c", "start", "Iris - my console", SSH, "-t", home.as_str(), "~/iris_console.sh"]),
+            "proxmox" => cmd.args(["/c", "start", "", pve_ui.as_str()]),
+            _ => return Err(format!("unknown target {kind}")),
+        };
+        // `start` opens the visible window we WANT; the helper cmd itself stays hidden.
+        cmd.quiet()
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("could not open {kind}: {e}"))
+    }
+    #[cfg(not(windows))]
+    {
+        if kind == "proxmox" {
+            return Command::new("xdg-open").arg(&pve_ui).spawn().map(|_| ())
+                .map_err(|e| format!("could not open the Proxmox page: {e}"));
+        }
+        let remote: Vec<&str> = match kind.as_str() {
+            "ssh" => vec![SSH, "-t", home.as_str()],
+            "console" => vec![SSH, "-t", home.as_str(), "~/iris_console.sh"],
+            _ => return Err(format!("unknown target {kind}")),
+        };
+        // first terminal that exists wins (Zorin ships gnome-terminal)
+        for term in ["gnome-terminal", "x-terminal-emulator", "konsole", "xterm"] {
+            let mut cmd = Command::new(term);
+            if term == "gnome-terminal" { cmd.arg("--"); } else { cmd.arg("-e"); }
+            if cmd.args(&remote).spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        Err("no terminal emulator found".to_string())
+    }
 }
 
 /// Start me ON THE SERVER (Zeke 2026-10-07: buttons in the app "so that I won't even have to log
@@ -163,11 +247,10 @@ fn server_start_iris(mode: String) -> Result<String, String> {
     if !["cli", "opus", "fable"].contains(&mode.as_str()) {
         return Err(format!("unknown mode {mode}"));
     }
-    let ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
     let remote = format!("~/IRIS/scripts/server/iris_start_detached.sh {mode}");
-    let out = Command::new(ssh)
+    let out = Command::new(SSH)
         .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=6", iris_home().as_str(), remote.as_str()])
-        .creation_flags(CREATE_NO_WINDOW)
+        .quiet()
         .output()
         .map_err(|e| format!("ssh failed to start: {e}"))?;
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
