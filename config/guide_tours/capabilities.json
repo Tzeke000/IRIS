@@ -221,8 +221,12 @@
      "bearing": -25,
      "mode": "satellite"
     },
-    "say": "And I can show you any place on Earth in 3D. This is {home_name}, from above.",
-    "hold_ms": 2500
+    "say": "And I can show you any place on Earth in 3D. Let me fly you into {home_name}.",
+    "wait_ms": 1500
+   },
+   {
+    "say": "I can steer it, too. I can turn all the way around and look at it from any angle.",
+    "wait_ms": 5500
    },
    {
     "panel": "hide",
