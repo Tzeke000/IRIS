@@ -31,6 +31,7 @@
     "core:window:allow-outer-position",
     "core:window:allow-available-monitors",
     "core:window:allow-scale-factor",
-    "core:window:allow-inner-size"
+    "core:window:allow-inner-size",
+    "core:window:allow-is-visible"
   ]
 }

@@ -181,6 +181,9 @@ export default function WidgetApp() {
       try {
         const w = await import("@tauri-apps/api/window");
         const cw = w.getCurrentWindow();
+        // only while I'm SHOWN: on Linux, asking a hidden (never-realized) GTK window to ignore the cursor makes
+        // tao unwrap a None and abort the whole app (10-08, Zorin) — and there's nothing to click through anyway
+        if (!(await cw.isVisible())) { last = null; return; }
         const [c, p, k] = await Promise.all([w.cursorPosition(), cw.outerPosition(), cw.scaleFactor()]);
         const dx = (c.x - p.x) / k - eyeX * guide.zoom, dy = (c.y - p.y) / k - eyeY * guide.zoom;
         const over = Math.hypot(dx, dy) < ES * 0.55 * guide.zoom;
