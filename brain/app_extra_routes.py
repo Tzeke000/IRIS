@@ -379,7 +379,12 @@ def install(app: Any, g: dict[str, Any], root: Path) -> list[str]:
     def _brains() -> dict[str, Any]:
         return brains(root)
 
-    for path, fn in (("/api/v1/tools", _tools), ("/api/v1/vector/status", _vector_status),
+    def _status_board():
+        from brain import app_status_board
+        return app_status_board.board(g)
+
+    for path, fn in (("/api/v1/app/status_board", _status_board),
+                     ("/api/v1/tools", _tools), ("/api/v1/vector/status", _vector_status),
                      ("/api/v1/vector/frame", _vector_frame),
                      ("/api/v1/app/scene", _scene), ("/api/v1/app/learning", _learning),
                      ("/api/v1/app/people", _people), ("/api/v1/app/proposals", _proposals),

@@ -3,6 +3,7 @@ import * as d3 from "d3";
 import ForceGraph3D from "3d-force-graph";
 import { API_BASE, ApiLogEntry, getJson, getText, postJson, registerApiLogger } from "./api";
 import { JsonBlock, Kv, Section } from "./components/Ui";
+import { StatusCorner, StatusTopBar, useStatusBoard } from "./components/StatusBoard";
 import ServerPanel from "./components/ServerPanel";
 import ToolsPanel from "./components/ToolsPanel";
 import VectorPanel from "./components/VectorPanel";
@@ -20,6 +21,7 @@ type ChatMessage = {
   content?: string;
   source?: string;            // zeke | claude_code | ava_response | ava_initiative | unknown_user | <person_id>
   meta?: Record<string, unknown>;
+  ts?: number;
 };
 
 // ── Brain-tab performance caps ──────────────────────────────────────────
@@ -1573,7 +1575,40 @@ export default function App() {
     }
   };
 
-  const displayMessages = useMemo(() => chatHist.slice(-200), [chatHist]);
+  // Inner thoughts live IN the chat now (Zeke 10-07: "your inner thoughts can get moved to a place in
+  // the chat") — merged by timestamp as role "thought", instead of floating on the main page.
+  const [thoughtMsgs, setThoughtMsgs] = useState<ChatMessage[]>([]);
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await getJson<{ ok?: boolean; thoughts?: { ts: number; thought: string; trigger?: string }[] }>(
+          "/api/v1/inner_monologue/recent?limit=40");
+        if (alive && Array.isArray(r.thoughts)) {
+          setThoughtMsgs(r.thoughts.map((t) => ({ role: "thought", content: t.thought, source: "thought", ts: Number(t.ts) })));
+        }
+      } catch { /* optional */ }
+    };
+    void load();
+    const iv = setInterval(() => void load(), 30000);
+    return () => { alive = false; clearInterval(iv); };
+  }, []);
+  const displayMessages = useMemo(() => {
+    const hist = chatHist.slice(-200);
+    if (!thoughtMsgs.length) return hist;
+    const tsOf = (m: ChatMessage) => Number(m.ts ?? 0);
+    const oldest = hist.length ? Math.min(...hist.map(tsOf).filter((t) => t > 0)) : 0;
+    const th = thoughtMsgs.filter((t) => tsOf(t) >= oldest);
+    return [...hist, ...th].sort((a, b) => tsOf(a) - tsOf(b));
+  }, [chatHist, thoughtMsgs]);
+  const statusBoard = useStatusBoard();
+  // The middle of the page is my eye (Zeke 10-07): size it to the window, between the old 400 and 620.
+  const [eyeSize, setEyeSize] = useState(() => Math.max(380, Math.min(620, Math.round(window.innerHeight * 0.58))));
+  useEffect(() => {
+    const onR = () => setEyeSize(Math.max(380, Math.min(620, Math.round(window.innerHeight * 0.58))));
+    window.addEventListener("resize", onR);
+    return () => window.removeEventListener("resize", onR);
+  }, []);
 
   const memThreads = memory?.active_threads;
   const threadList = Array.isArray(memThreads) ? memThreads : [];
@@ -2239,6 +2274,7 @@ export default function App() {
           </button>
         </div>
       </header>
+      <StatusTopBar sb={statusBoard} mood={primaryEmotion} moodSub={secondaryWord || undefined} moodColor={effectiveOrbColor} />
 
       {!online && (
         <div className="op-banner">
@@ -2292,7 +2328,7 @@ export default function App() {
               emotion={primaryEmotion}
               emotionColor={effectiveOrbColor}
               state={shutdownInProgress ? "offline" : (orbPulseMode as any)}
-              size={400}
+              size={eyeSize}
               amplitude={ttsAmplitude}
               energy={moodEnergy}
               recenterTrigger={orbRecenterCounter}
@@ -2311,10 +2347,6 @@ export default function App() {
             )}
           </div>
         </div>
-        <div className="iris-mood" style={{ color: effectiveOrbColor }}>
-          {primaryEmotion}
-          {secondaryWord ? <span> · with a little {secondaryWord}</span> : null}
-        </div>
         {PRESENCE_V2_ENABLED && (
           // No `key=` — React reuses this DOM node across content changes (one-shot fade-in on empty→live).
           <div className={`presence-speaking-text ${speakingTextForUI ? "live" : "empty"}`}>
@@ -2332,15 +2364,7 @@ export default function App() {
                   ? "processing…"
                   : ""}
         </div>
-        {PRESENCE_V2_ENABLED && (
-          <div className={`presence-inner-state-line ${innerStateLine ? "live" : "empty"}`}>
-            {innerStateLine}
-          </div>
-        )}
-        {/* Inner monologue — what I'm thinking ABOUT (snapshot.inner_life.current_thought), not what I'm saying. */}
-        <div className={`presence-inner-thought ${currentInnerThought ? "live" : "empty"}`}>
-          {currentInnerThought}
-        </div>
+        {/* Inner thoughts moved into the Chat tab (Zeke 10-07) — the middle of the page is my eye. */}
         <div className="presence-input-row iris-composer">
           <input
             type="text"
@@ -2390,6 +2414,7 @@ export default function App() {
           <span className="presence-camera-scene">what I see</span>
         </button>
       </section>
+      <StatusCorner sb={statusBoard} />
       {cameraOverlayOpen && (
         <div className="camera-overlay" onClick={() => setCameraOverlayOpen(false)}>
           {/* Prefer live frame (refreshes every 200ms) — fall back to cached annotated frame */}
@@ -2631,7 +2656,9 @@ export default function App() {
                           ? "assistant"
                           : m.role === "system"
                             ? "system"
-                            : "user";
+                            : m.role === "thought"
+                              ? "thought"
+                              : "user";
                       // Prefer the `source` tag (zeke / claude_code /
                       // ava_response / ava_initiative / unknown_user) over
                       // the bare `role` so the chat log surfaces who
@@ -2644,6 +2671,7 @@ export default function App() {
                         if (s === "ava_response") return "ava";
                         if (s === "ava_initiative") return "ava (initiated)";
                         if (s === "unknown_user") return "unknown user";
+                        if (s === "thought") return "💭 my thought";
                         if (s) return s;  // passthrough for third-party profiles
                         return m.role ?? "?";
                       })();
@@ -2662,24 +2690,7 @@ export default function App() {
                         <span className="typing-text">Iris is thinking...</span>
                       </div>
                     )}
-                    {/* Inner thought — fades in, holds 8s, fades out. */}
-                    {displayedThought && (
-                      <div
-                        className="inner-thought"
-                        style={{
-                          marginTop: 12,
-                          padding: "8px 12px",
-                          fontStyle: "italic",
-                          color: "#7a8aa3",
-                          fontSize: 13,
-                          opacity: thoughtVisible ? 0.85 : 0,
-                          transition: "opacity 1s ease-in-out",
-                          letterSpacing: "0.01em",
-                        }}
-                      >
-                        💭 {displayedThought}
-                      </div>
-                    )}
+                    {/* Inner thoughts are chat entries now (role "thought"), merged above by timestamp. */}
                   </div>
                   <div className="chat-compose chat-compose-stick">
                     <textarea
