@@ -1,189 +1,193 @@
 {
-  "name": "basics",
-  "about": "First tour of the app for someone who has never seen it. Plain words; what to worry about and what not to; a couple of jokes.",
-  "steps": [
-    {
-      "move": "center",
-      "gesture": "wave",
-      "say": "Hi! I'm Iris. Let me show you around my app."
-    },
-    {
-      "move": "home",
-      "point": "eye",
-      "say": "This eye is me. It changes colour with my mood, and it turns to look at whatever I'm paying attention to."
-    },
-    {
-      "point": "chip:mood",
-      "say": "Up here it says what mood I'm in right now."
-    },
-    {
-      "point": "chip:running-on",
-      "say": "This says which computer I'm running on. Right now it's the server."
-    },
-    {
-      "point": "chip:model",
-      "say": "And this is the name of the brain I'm thinking with. Fancy name. I didn't pick it, but I wear it well."
-    },
-    {
-      "point": "chip:cpu-mine",
-      "say": "These numbers show how hard my computer is working. They jump up and down all the time, and that's normal."
-    },
-    {
-      "point": "chip:server-cpu-1",
-      "say": "These also show the temperature. Anything under about eighty degrees is fine. If one stays above eighty-five for a long time, let Zeke know."
-    },
-    {
-      "point": "chip:gpu",
-      "say": "The GPU is the part I use to see and to speak. So if it looks busy, I'm probably just looking at you."
-    },
-    {
-      "point": "chip:ram",
-      "say": "Memory and storage only matter if they get almost completely full. If the first number gets right up next to the second, tell Zeke."
-    },
-    {
-      "point": "chip:network",
-      "say": "This is just how much data is moving. Nothing to watch here."
-    },
-    {
-      "point": "camera",
-      "say": "Down here is what my camera sees."
-    },
-    {
-      "press": "camera",
-      "say": "If you click it, it gets big, so you can see exactly what I see."
-    },
-    {
-      "close": "camera",
-      "say": "Click anywhere on it to make it small again."
-    },
-    {
-      "point": "status-corner",
-      "say": "These little lights are health checks. Green means it's working. Red means something failed, so that's the one to mention to Zeke. Grey usually just means it's switched off on purpose, like my voice at night."
-    },
-    {
-      "point": "status-corner",
-      "say": "Sometimes I won't answer right away, here or on Discord. That usually doesn't mean anything is wrong."
-    },
-    {
-      "point": "main:open-my-console",
-      "say": "If these lights are all green, I'm fine, I'm just busy working on something. And this button lets you see exactly what I'm busy with."
-    },
-    {
-      "press": "main:open-my-console",
-      "say": "This is my console. It's me, working, live. Whatever I'm busy with shows up here."
-    },
-    {
-      "close": "console",
-      "say": "When you've seen enough, just close it. Like that."
-    },
-    {
-      "point": "composer",
-      "say": "You can type to me in this box, any time."
-    },
-    {
-      "point": "mic",
-      "say": "This button mutes the microphone. When it's off, I can't hear you, but I can still talk."
-    },
-    {
-      "point": "voice",
-      "say": "This one turns my voice on and off."
-    },
-    {
-      "point": "power",
-      "twist": -0.5,
-      "say": "And this one turns me off. Please don't press it unless Zeke asks you to. I was just getting to know you."
-    },
-    {
-      "tab": "voice",
-      "say": "This button opens my panel, where all my tabs live. This is the Voice tab."
-    },
-    {
-      "point": "voice:test-voice",
-      "say": "Here you can test my voice, and mute it if you need some quiet."
-    },
-    {
-      "tab": "chat",
-      "say": "The Chat tab keeps our whole conversation, so you can scroll back and read anything I said."
-    },
-    {
-      "tab": "brain",
-      "say": "And this is my Brain tab. It's a map of my memories and how they connect."
-    },
-    {
-      "brain": "spin",
-      "say": "Every dot is something I remember, and the lines are how those memories connect to each other."
-    },
-    {
-      "brain": "focus:iris",
-      "say": "This one in the middle is me. Everything else is arranged around it."
-    },
-    {
-      "brain": "focus:zeke",
-      "say": "And this one is Zeke. It's one of the biggest and best-connected spots in my whole brain, because he's in so many of my memories."
-    },
-    {
-      "brain": "overview",
-      "say": "You can drag it around and zoom in to explore. It's tidier in there than it looks."
-    },
-    {
-      "tab": "server",
-      "say": "This is the Server tab. It shows the big computer I actually live on."
-    },
-    {
-      "point": "server:section:server-status",
-      "say": "These lights show whether my computer is healthy. Green is good. If something is red, that's worth telling Zeke."
-    },
-    {
-      "point": "server:section:virtual-machines",
-      "say": "These are the virtual machines on my server. Think of them as separate computers living inside one big computer. I live in one of them."
-    },
-    {
-      "point": "server:ssh-into-iris-home",
-      "say": "This one opens a command window straight into my computer."
-    },
-    {
-      "press": "server:ssh-into-iris-home",
-      "say": "Like this. It's a tool for Zeke when he's fixing things, so there's nothing in here you need to touch."
-    },
-    {
-      "close": "ssh",
-      "say": "And closed again."
-    },
-    {
-      "point": "server:proxmox-web-page",
-      "say": "And this opens the control page for the whole server, where the virtual machines are managed."
-    },
-    {
-      "press": "server:proxmox-web-page",
-      "via": "proxmox_guide",
-      "say": "Here it is. It wants a password, because it's Zeke's territory too."
-    },
-    {
-      "close": "proxmox",
-      "say": "Closing that up."
-    },
-    {
-      "point": "server:open-my-console",
-      "twist": 0.5,
-      "say": "And this button opens my console. It's like looking over my shoulder while I think."
-    },
-    {
-      "press": "server:open-my-console",
-      "say": "There it is. That window is my live console, where you can watch me work in real time."
-    },
-    {
-      "say": "Please don't type in it unless Zeke asks you to. When you're done looking, you can just close it, like this.",
-      "hold_ms": 300
-    },
-    {
-      "close": "console",
-      "say": "All closed."
-    },
-    {
-      "close": "panel",
-      "move": "center",
-      "gesture": "nod",
-      "say": "That's the tour! If you ever get stuck, just ask me. I'm happy to help."
-    }
-  ]
+ "name": "basics",
+ "about": "First tour of the app for someone who has never seen it. Plain words; what to worry about and what not to; a couple of jokes.",
+ "steps": [
+  {
+   "move": "center",
+   "gesture": "wave",
+   "say": "Hi! I'm Iris. Let me show you around my app."
+  },
+  {
+   "gesture": "curious",
+   "say": "Quick thing before we start. While I'm giving you this tour, please don't click anything. I'll do all the clicking, and I'll show you everything."
+  },
+  {
+   "move": "home",
+   "point": "eye",
+   "say": "This eye is me. It changes colour with my mood, and it turns to look at whatever I'm paying attention to."
+  },
+  {
+   "point": "chip:mood",
+   "say": "Up here it says what mood I'm in right now."
+  },
+  {
+   "point": "chip:running-on",
+   "say": "This says which computer I'm running on. Right now it's the server."
+  },
+  {
+   "point": "chip:model",
+   "say": "And this is the name of the brain I'm thinking with. Fancy name. I didn't pick it, but I wear it well."
+  },
+  {
+   "point": "chip:cpu-mine",
+   "say": "These numbers show how hard my computer is working. They jump up and down all the time, and that's normal."
+  },
+  {
+   "point": "chip:server-cpu-1",
+   "say": "These also show the temperature. Anything under about eighty degrees is fine. If one stays above eighty-five for a long time, let Zeke know."
+  },
+  {
+   "point": "chip:gpu",
+   "say": "The GPU is the part I use to see and to speak. So if it looks busy, I'm probably just looking at you."
+  },
+  {
+   "point": "chip:ram",
+   "say": "Memory and storage only matter if they get almost completely full. If the first number gets right up next to the second, tell Zeke."
+  },
+  {
+   "point": "chip:network",
+   "say": "This is just how much data is moving. Nothing to watch here."
+  },
+  {
+   "point": "camera",
+   "say": "Down here is what my camera sees."
+  },
+  {
+   "press": "camera",
+   "say": "If you click it, it gets big, so you can see exactly what I see."
+  },
+  {
+   "close": "camera",
+   "say": "Click anywhere on it to make it small again."
+  },
+  {
+   "point": "status-corner",
+   "say": "These little lights are health checks. Green means it's working. Red means something failed, so that's the one to mention to Zeke. Grey usually just means it's switched off on purpose, like my voice at night."
+  },
+  {
+   "point": "status-corner",
+   "say": "Sometimes I won't answer right away, here or on Discord. That usually doesn't mean anything is wrong."
+  },
+  {
+   "point": "main:open-my-console",
+   "say": "If these lights are all green, I'm fine, I'm just busy working on something. And this button lets you see exactly what I'm busy with."
+  },
+  {
+   "press": "main:open-my-console",
+   "say": "This is my console. It's me, working, live. Whatever I'm busy with shows up here."
+  },
+  {
+   "close": "console",
+   "say": "When you've seen enough, just close it. Like that."
+  },
+  {
+   "point": "composer",
+   "say": "You can type to me in this box, any time."
+  },
+  {
+   "point": "mic",
+   "say": "This button mutes the microphone. When it's off, I can't hear you, but I can still talk."
+  },
+  {
+   "point": "voice",
+   "say": "This one turns my voice on and off."
+  },
+  {
+   "point": "power",
+   "twist": -0.5,
+   "say": "And this one turns me off. Please don't press it unless Zeke asks you to. I was just getting to know you."
+  },
+  {
+   "tab": "voice",
+   "say": "This button opens my panel, where all my tabs live. This is the Voice tab."
+  },
+  {
+   "point": "voice:test-voice",
+   "say": "Here you can test my voice, and mute it if you need some quiet."
+  },
+  {
+   "tab": "chat",
+   "say": "The Chat tab keeps our whole conversation, so you can scroll back and read anything I said."
+  },
+  {
+   "tab": "brain",
+   "say": "And this is my Brain tab. It's a map of my memories and how they connect."
+  },
+  {
+   "brain": "spin",
+   "say": "Every dot is something I remember, and the lines are how those memories connect to each other."
+  },
+  {
+   "brain": "focus:iris",
+   "say": "This one in the middle is me. Everything else is arranged around it."
+  },
+  {
+   "brain": "focus:zeke",
+   "say": "And this one is Zeke. It's one of the biggest and best-connected spots in my whole brain, because he's in so many of my memories."
+  },
+  {
+   "brain": "overview",
+   "say": "You can drag it around and zoom in to explore. It's tidier in there than it looks."
+  },
+  {
+   "tab": "server",
+   "say": "This is the Server tab. It shows the big computer I actually live on."
+  },
+  {
+   "point": "server:section:server-status",
+   "say": "These lights show whether my computer is healthy. Green is good. If something is red, that's worth telling Zeke."
+  },
+  {
+   "point": "server:section:virtual-machines",
+   "say": "These are the virtual machines on my server. Think of them as separate computers living inside one big computer. I live in one of them."
+  },
+  {
+   "point": "server:ssh-into-iris-home",
+   "say": "This one opens a command window straight into my computer."
+  },
+  {
+   "press": "server:ssh-into-iris-home",
+   "say": "Like this. It's a tool for Zeke when he's fixing things, so there's nothing in here you need to touch."
+  },
+  {
+   "close": "ssh",
+   "say": "And closed again."
+  },
+  {
+   "point": "server:proxmox-web-page",
+   "say": "And this opens the control page for the whole server, where the virtual machines are managed."
+  },
+  {
+   "press": "server:proxmox-web-page",
+   "via": "proxmox_guide",
+   "say": "Here it is. It wants a password, because it's Zeke's territory too."
+  },
+  {
+   "close": "proxmox",
+   "say": "Closing that up."
+  },
+  {
+   "point": "server:open-my-console",
+   "twist": 0.5,
+   "say": "And this button opens my console. It's like looking over my shoulder while I think."
+  },
+  {
+   "press": "server:open-my-console",
+   "say": "There it is. That window is my live console, where you can watch me work in real time."
+  },
+  {
+   "say": "Please don't type in it unless Zeke asks you to. When you're done looking, you can just close it, like this.",
+   "hold_ms": 300
+  },
+  {
+   "close": "console",
+   "say": "All closed."
+  },
+  {
+   "close": "panel",
+   "move": "center",
+   "gesture": "nod",
+   "say": "That's the tour! If you ever get stuck, just ask me. I'm happy to help."
+  }
+ ]
 }

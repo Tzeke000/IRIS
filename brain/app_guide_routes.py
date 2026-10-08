@@ -10,6 +10,7 @@ brain.orb_http. The app polls the script; I write it with the `app_guide` tool.
   POST /api/v1/app/guide/ui_map   {tab, viewport, items[]}      the app reports its live layout (ids + rects)
   POST /api/v1/app/guide/say      {text, emotion?}              speak one sentence (the app times it to the
                                                                 arm motion); honours the voice-off flag
+  POST /api/v1/app/guide/hush     {}                            cut the line I'm saying short (someone clicked)
 
 Same origin policy as the Jarvis routes: state-changing POSTs refuse a browser Origin that isn't the app's.
 """
@@ -137,8 +138,29 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "spoken": False, "error": repr(e)[:200]}
 
+    async def guide_hush(request: Request):
+        """Cut my current line short (10-08, Zeke: if someone clicks during the tour, stop for a sec, say
+        'please don't click', then carry on). Barge-in on the mouth: GET :8769/stop aborts the in-flight line."""
+        if not origin_ok(request.headers.get("origin")):
+            return deny()
+        if not rate_ok("guide_hush", 30, 60):
+            return {"ok": False, "error": "slow down"}
+        import os as _os
+        import urllib.request as _url
+        host = _os.environ.get("IRIS_VOICE_HOST", "127.0.0.1")
+        port = int(_os.environ.get("WREN_VOICE_PORT", "8769"))
+        try:
+            import asyncio
+            def _stop() -> str:
+                with _url.urlopen(f"http://{host}:{port}/stop", timeout=2) as r:
+                    return r.read().decode("utf-8", "replace")[:40]
+            return {"ok": True, "mouth": await asyncio.to_thread(_stop)}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": repr(e)[:160]}
+
     # This module owns these paths: drop older copies so a live re-install picks up edited handlers.
-    mine = {"/api/v1/app/attention", "/api/v1/app/guide", "/api/v1/app/guide/progress", "/api/v1/app/guide/ui_map", "/api/v1/app/guide/say"}
+    mine = {"/api/v1/app/attention", "/api/v1/app/guide", "/api/v1/app/guide/progress", "/api/v1/app/guide/ui_map", "/api/v1/app/guide/say",
+            "/api/v1/app/guide/hush"}
     try:
         app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", None) not in mine]
         existing = {e for e in existing if e.split(" ", 1)[-1] not in mine}
@@ -157,7 +179,8 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
                              ("GET", "/api/v1/app/guide", guide_get),
                              ("POST", "/api/v1/app/guide/progress", guide_progress),
                              ("POST", "/api/v1/app/guide/ui_map", guide_ui_map),
-                             ("POST", "/api/v1/app/guide/say", guide_say)):
+                             ("POST", "/api/v1/app/guide/say", guide_say),
+                             ("POST", "/api/v1/app/guide/hush", guide_hush)):
         if f"{method} {path}" in existing:
             continue
         app.add_api_route(path, fn, methods=[method])

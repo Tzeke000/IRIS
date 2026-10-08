@@ -65,7 +65,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
   const [gaze, setGaze] = useState<{ x: number; y: number } | undefined>(undefined);
   const [eyePos, setEyePos] = useState<Vec>({ x: 0, y: 0 });
   const live = useRef({ floating: false, pos: { x: 0, y: 0 } as Vec, offset: { x: 0, y: 0 } as Vec, operatorOpen, activeTab,
-    size: 180, stop: false, running: false, seq: -1 });
+    size: 180, stop: false, running: false, seq: -1, clicked: 0, warnedAt: 0 });
   live.current.operatorOpen = operatorOpen;
   live.current.activeTab = activeTab;
 
@@ -298,7 +298,11 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
     return k;
   };
 
-  const speak = async (text: string, emotion?: string, silent?: boolean) => {
+  /** Returns false if someone clicked while I was saying it (I cut the line short, so the caller can warn + repeat). */
+  const speak = async (text: string, emotion?: string, silent?: boolean): Promise<boolean> => {
+    const L0 = live.current;
+    const clicks0 = L0.clicked;
+    const interrupted = () => L0.clicked !== clicks0;
     setCaption(text);
     report("say", text.slice(0, 200));
     let spoken = false;
@@ -320,6 +324,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
         let sp = false;
         try { sp = Boolean((await getJson<{ speaking?: boolean }>("/api/v1/tts/state"))?.speaking); } catch { /* keep going */ }
         const now = performance.now();
+        if (interrupted()) { void postJson("/api/v1/app/guide/hush", {}).catch(() => undefined); break; }
         if (sp) { if (!started) { started = true; startedAt = now; } quietSince = 0; }
         else if (started) {
           if (!quietSince) quietSince = now;
@@ -327,10 +332,29 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
         }
         else if (now - t0 > 5000) break;                          // never started: fall back to reading time
       }
-      if (!started) await sleep(Math.max(0, est - (performance.now() - t0)));
+      if (!started && !interrupted()) await sleep(Math.max(0, est - (performance.now() - t0)));
     } else {
-      await sleep(est);                                          // voice off: give time to read the caption
+      const tEnd = t0 + est;                                     // voice off: give time to read the caption
+      while (performance.now() < tEnd && !interrupted()) await sleep(80);
     }
+    return !interrupted();
+  };
+
+  // Someone clicked during the tour (Zeke 10-08): stop for a sec, ask them not to, then carry on.
+  const NO_CLICK_LINES = [
+    "Hey, please don't click while I'm showing you around. I've got it.",
+    "Oops, no clicking please. Let me do the driving.",
+    "Hands off for a moment, please. I'll show you everything.",
+  ];
+  const warnNoClick = async (silent?: boolean) => {
+    const L = live.current;
+    L.warnedAt = performance.now();
+    const n = Math.floor(Math.random() * NO_CLICK_LINES.length);
+    const clicks0 = L.clicked;
+    await gesture("shake");
+    await speak(NO_CLICK_LINES[n], "calm", silent);
+    if (L.clicked !== clicks0) L.clicked = clicks0;   // clicks DURING the warning don't earn a second warning
+    await sleep(250);
   };
 
   const gesture = async (g: Step["gesture"]) => {
@@ -447,6 +471,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       for (let i = 0; i < s.steps.length; i++) {
         if (L.stop) { report("stopped", "", i); break; }
         const st = s.steps[i];
+        const clicksAtStep = L.clicked;
         report("step", st.say?.slice(0, 80) || st.point || st.press || st.tab || "", i);
         if (st.tab) {
           if (!L.operatorOpen) { await reachFor("panel", true); openedPanel = true; await sleep(500); }
@@ -472,8 +497,17 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
         if (st.close === "console" || st.close === "ssh" || st.close === "proxmox") {   // their own windows: close them myself
           try { await invoke("server_close", { kind: st.close }); } catch (e) { report("note", `close ${st.close}: ${String(e).slice(0, 120)}`); }
         }
-        if (st.say) await speak(st.say, st.emotion, s.silent);
+        if (st.say) {
+          for (let tries = 0; tries < 3; tries++) {
+            const done = await speak(st.say, st.emotion, s.silent);
+            if (done || L.stop) break;
+            report("clicked", st.say.slice(0, 80), i);
+            await warnNoClick(s.silent);                    // then say the line again, from the top
+            setCaption(st.say);
+          }
+        }
         await sleep(st.hold_ms ?? 400);
+        if (L.clicked !== clicksAtStep && !L.stop) { report("clicked", "between lines", i); await warnNoClick(s.silent); }
         for (const k of ARM_KEYS) { const h = armH(k); h.release(); h.twistGoal = 0; }
         void used;
         setCaption("");
@@ -493,6 +527,23 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liftOff, land, travel]);
+
+  // ---------------------------------------------------------------- no clicking during the tour
+  // My own presses are el.click() (isTrusted = false) and pass straight through; a REAL person's click is
+  // swallowed (so it can't knock the tour off course) and counted, and the runner asks them not to.
+  useEffect(() => {
+    const block = (e: Event) => {
+      const L = live.current;
+      if (!L.running || !e.isTrusted) return;
+      e.preventDefault();
+      e.stopPropagation();
+      (e as Event & { stopImmediatePropagation: () => void }).stopImmediatePropagation();
+      if (e.type === "pointerdown" && performance.now() - L.warnedAt > 2500) L.clicked += 1;
+    };
+    const types = ["pointerdown", "mousedown", "pointerup", "mouseup", "click", "dblclick", "contextmenu"];
+    types.forEach((t) => window.addEventListener(t, block, { capture: true }));
+    return () => types.forEach((t) => window.removeEventListener(t, block, { capture: true }));
+  }, []);
 
   // ---------------------------------------------------------------- poll the script
   useEffect(() => {
