@@ -25,6 +25,7 @@ const PRIVATE_CFG: &str = r"D:\Wren-Companion\config\private.local.json";
 #[cfg(windows)]
 const DEFAULT_HEADER: &str = r"D:\Wren-Companion\state\secrets\pve_tower.hdr";
 
+#[cfg(not(windows))]
 fn home_cfg(name: &str) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     format!("{home}/.config/iris/{name}")
