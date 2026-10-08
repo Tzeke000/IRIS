@@ -337,22 +337,27 @@ fn server_open(kind: String) -> Result<(), String> {
 // around". The app runs INSIDE his desktop session, so it can drive the real mouse + keyboard (the SSH
 // desktop bridge needs a scheduled task per action — far too slow for a smooth glide). The widget's tour
 // runner calls these; nothing here runs unless a guide script asks for it.
+#[cfg(windows)]
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 
+#[cfg(windows)]
 fn enigo() -> Result<Enigo, String> {
     Enigo::new(&Settings::default()).map_err(|e| format!("no input device: {e:?}"))
 }
 
+#[cfg(windows)]
 #[tauri::command]
 fn desk_cursor() -> Result<(i32, i32), String> {
     enigo()?.location().map_err(|e| format!("{e:?}"))
 }
 
+#[cfg(windows)]
 #[tauri::command]
 fn desk_move(x: i32, y: i32) -> Result<(), String> {
     enigo()?.move_mouse(x, y, Coordinate::Abs).map_err(|e| format!("{e:?}"))
 }
 
+#[cfg(windows)]
 #[tauri::command]
 fn desk_click(button: Option<String>, double: Option<bool>) -> Result<(), String> {
     let mut e = enigo()?;
@@ -365,12 +370,14 @@ fn desk_click(button: Option<String>, double: Option<bool>) -> Result<(), String
     Ok(())
 }
 
+#[cfg(windows)]
 #[tauri::command]
 fn desk_scroll(amount: i32) -> Result<(), String> {
     enigo()?.scroll(amount, Axis::Vertical).map_err(|e| format!("{e:?}"))
 }
 
 /// Type like a person: one character at a time with a small human jitter, so a watcher SEES it typed.
+#[cfg(windows)]
 #[tauri::command]
 async fn desk_type(text: String, cps: Option<f64>) -> Result<(), String> {
     let cps = cps.unwrap_or(14.0).clamp(2.0, 60.0);
@@ -390,6 +397,7 @@ async fn desk_type(text: String, cps: Option<f64>) -> Result<(), String> {
 }
 
 /// "ctrl+l", "enter", "win+d", "alt+tab", "ctrl+shift+t"…
+#[cfg(windows)]
 #[tauri::command]
 fn desk_keys(combo: String) -> Result<(), String> {
     let mut e = enigo()?;
@@ -414,6 +422,27 @@ fn desk_keys(combo: String) -> Result<(), String> {
     for m in mods.iter().rev() { let _ = e.key(*m, Direction::Release); }
     r
 }
+
+// Linux: no hands yet (enigo needs libxdo, which Zorin doesn't ship) — the commands exist so the app builds and the
+// widget tour fails soft there instead of not starting.
+#[cfg(not(windows))]
+#[tauri::command]
+fn desk_cursor() -> Result<(i32, i32), String> { Err("no desktop hands on Linux yet".into()) }
+#[cfg(not(windows))]
+#[tauri::command]
+fn desk_move(x: i32, y: i32) -> Result<(), String> { let _ = (x, y); Err("no desktop hands on Linux yet".into()) }
+#[cfg(not(windows))]
+#[tauri::command]
+fn desk_click(button: Option<String>, double: Option<bool>) -> Result<(), String> { let _ = (button, double); Err("no desktop hands on Linux yet".into()) }
+#[cfg(not(windows))]
+#[tauri::command]
+fn desk_scroll(amount: i32) -> Result<(), String> { let _ = amount; Err("no desktop hands on Linux yet".into()) }
+#[cfg(not(windows))]
+#[tauri::command]
+async fn desk_type(text: String, cps: Option<f64>) -> Result<(), String> { let _ = (text, cps); Err("no desktop hands on Linux yet".into()) }
+#[cfg(not(windows))]
+#[tauri::command]
+fn desk_keys(combo: String) -> Result<(), String> { let _ = combo; Err("no desktop hands on Linux yet".into()) }
 
 /// Open an app (small allowlist) or an https page, the way he would. Chrome opens a NEW window so the demo
 /// never takes over a window he's using.

@@ -13,10 +13,11 @@ tauri = { version = "2", features = [] }
 # stacking a new process. Without it the app piled up 9 orphan instances over
 # 4 days (2026-06-29 diagnosis). Must be registered as the FIRST plugin.
 tauri-plugin-single-instance = "2"
-# The guide's HANDS on the desktop (2026-10-08 "what I can do" tour): glide the mouse, click, type, scroll.
-enigo = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+# The guide's HANDS on the desktop (2026-10-08 "what I can do" tour): glide the mouse, click, type, scroll.
+# Windows-only: on Linux enigo links libxdo, which Zorin doesn't ship — the app wouldn't even start there.
+enigo = "0.2"
 # mouse LOCK during the widget tour: a low-level mouse hook swallows the person's (physical) mouse while my own
 # injected moves pass (2026-10-08, Zeke: "make sure the person doesn't have control of the mouse")
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }

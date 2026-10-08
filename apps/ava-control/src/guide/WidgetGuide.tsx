@@ -313,7 +313,7 @@ export function useWidgetGuide() {
     try {
       const w = await win();
       const cw = w.getCurrentWindow();
-      await cw.setIgnoreCursorEvents(true);               // nobody can grab me mid-tour
+      if (await cw.isVisible()) await cw.setIgnoreCursorEvents(true);   // nobody can grab me mid-tour (never while hidden: tao aborts on Linux)
       // and nobody can grab the MOUSE while I'm driving (Zeke 10-08): a lock that expires on its own unless refreshed
       L.touched = 0;
       const lockTick = async () => {
@@ -400,7 +400,7 @@ export function useWidgetGuide() {
       setGaze(undefined);
       try { if (panelRef.current) await showPanel(null); } catch { /* fine */ }
       try { if (live.current.home) await travelTo(live.current.home); } catch { /* fine */ }
-      try { const w = await win(); await w.getCurrentWindow().setIgnoreCursorEvents(false); } catch { /* fine */ }
+      try { const w = await win(); const cw = w.getCurrentWindow(); if (await cw.isVisible()) await cw.setIgnoreCursorEvents(false); } catch { /* fine */ }
       L.running = false; setRunning(false);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
