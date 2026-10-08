@@ -32,6 +32,10 @@ actions:
           head:   {pan_deg, tilt_deg}|"home"   turn my REAL head (the PTZ camera)
           camera: show|hide         open my live camera view beside the widget eye
           image:  "<file in state/guide_media>"|"hide"   show a picture beside the eye
+          video:  "<mp4 in state/guide_media>"|"hide"   play it (quietly) beside the eye
+          weather: "<place>" ("" = here)|"hide"     the weather card · map3d: {lat,lon,zoom,pitch,bearing,mode}|"here"|"hide"
+          panel: "hide"             close whatever panel is open
+          desk {do:"taskbar"}       glide to MY app's taskbar icon and click it (brings the app back)
           wait_ms: int
   tour  {name, silent?}       play a saved tour from config/guide_tours/<name>.json (e.g. "basics"); a tour file may
                               carry "then": {"client": "widget", "steps": [...]}
@@ -52,8 +56,9 @@ ROOT = Path(__file__).resolve().parents[2]
 ST = ROOT / "state"
 STEP_KEYS = {"via", "brain", "tab", "move", "point", "press", "close", "say", "gesture", "twist", "hold_ms", "emotion",
              # 10-08 "what I can do" tour: main window hands off to the WIDGET, which drives the desktop
-             "minimize", "travel", "desk", "head", "camera", "image", "wait_ms", "look"}
-DESK_DO = {"move", "click", "type", "keys", "scroll", "open", "snap", "close_new", "circle", "place"}
+             "minimize", "travel", "desk", "head", "camera", "image", "wait_ms", "look",
+             "video", "weather", "map3d", "panel"}
+DESK_DO = {"move", "click", "type", "keys", "scroll", "open", "snap", "close_new", "circle", "place", "taskbar"}
 GESTURES = {"wave", "nod", "shake", "curious"}
 
 
@@ -170,6 +175,22 @@ def _clean_steps(steps: Any) -> tuple[list[dict[str, Any]], list[str]]:
                 errs.append(f"step {i}: camera must be show|hide")
         if "image" in s:
             c["image"] = str(s["image"])[:80]
+        if "video" in s:
+            c["video"] = str(s["video"])[:80]
+        if "weather" in s:
+            c["weather"] = str(s["weather"] or "")[:120]
+        if s.get("panel") == "hide":
+            c["panel"] = "hide"
+        if "map3d" in s:
+            m = s["map3d"]
+            if m in ("here", "hide"):
+                c["map3d"] = m
+            elif isinstance(m, dict) and "lat" in m and "lon" in m:
+                c["map3d"] = {k: float(m[k]) for k in ("lat", "lon", "zoom", "pitch", "bearing") if k in m}
+                if m.get("mode") in ("satellite", "buildings"):
+                    c["map3d"]["mode"] = m["mode"]
+            else:
+                errs.append(f"step {i}: map3d must be {{lat, lon, ...}} | 'here' | 'hide'")
         if c:
             out.append(c)
     return out, errs
@@ -195,6 +216,14 @@ def _app_guide(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         t = _read(ROOT / "config" / "guide_tours" / f"{name}.json", None)
         if not t:
             return {"ok": False, "error": f"no tour {name!r} (action=tours lists them)"}
+        # {tokens} like {home_place} come from the git-ignored guide_tours/places.local.json — the repo is
+        # PUBLIC, so where Zeke lives never goes into a tracked tour file (10-08).
+        places = _read(ROOT / "config" / "guide_tours" / "places.local.json", {}) or {}
+        if places:
+            raw = json.dumps(t)
+            for k, v in places.items():
+                raw = raw.replace("{" + str(k) + "}", str(v))
+            t = json.loads(raw)
         params = {**params, "steps": t.get("steps"), "then": t.get("then"), "action": "run"}
         action = "run"
     client = "".join(c for c in str(params.get("client") or "") if c.isalnum())[:20]

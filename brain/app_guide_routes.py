@@ -243,18 +243,60 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
             except Exception:  # noqa: BLE001
                 pass
 
+    def guide_taskbar_icon():
+        """Where MY app's button is on his taskbar (screen px), so the tour ends by clicking it like a person
+        (Zeke 10-08). Windows' managed UI Automation doesn't expose Win10 taskbar buttons, so: a screenshot of his
+        primary monitor through the desktop bridge + template-match the app icon (icons/icon.ico) in the taskbar."""
+        import subprocess
+        import tempfile
+        try:
+            import cv2
+            import numpy as np
+            from PIL import Image
+            out = subprocess.run(["ssh", "-o", "BatchMode=yes", "tower",
+                                  r'D:\Wren-Companion\.venv\Scripts\python.exe D:\Wren-Companion\scripts\desktop_bridge.py '
+                                  r'submit screenshot "{\"monitor\": 1, \"max_px\": 4000}"'],
+                                 capture_output=True, text=True, timeout=45)
+            d = json.loads(out.stdout.strip().splitlines()[-1])
+            if not d.get("ok"):
+                return {"ok": False, "error": f"screenshot: {d.get('error')}"}
+            mon = next((m for m in d.get("monitors", []) if m.get("index") == 1), {"left": 0, "top": 0})
+            local = Path(tempfile.gettempdir()) / "iris_taskbar_shot.jpg"
+            subprocess.run(["scp", "-q", f"tower:{d['path'].replace(chr(92), '/')}", str(local)], timeout=30, check=True)
+            scr = cv2.imread(str(local))
+            H = scr.shape[0]
+            bar = scr[H - 48:H, :]
+            ico = np.array(Image.open(root / "apps" / "ava-control" / "src-tauri" / "icons" / "icon.ico").convert("RGBA"))[:, :, [2, 1, 0, 3]]
+            bgc = bar.reshape(-1, 3).mean(0)
+            best = (-1.0, 0, (0, 0))
+            for sz in range(14, 34):
+                t = cv2.resize(ico, (sz, sz), interpolation=cv2.INTER_NEAREST).astype(np.float32)
+                a = t[:, :, 3:4] / 255
+                t3 = (t[:, :, :3] * a + bgc * (1 - a)).astype(np.uint8)
+                _, mv, _, ml = cv2.minMaxLoc(cv2.matchTemplate(bar, t3, cv2.TM_CCOEFF_NORMED))
+                if mv > best[0]:
+                    best = (mv, sz, ml)
+            mv, sz, (x, y) = best
+            if mv < 0.8:
+                return {"ok": False, "error": f"icon not found on the taskbar (best {mv:.2f})"}
+            return {"ok": True, "x": int(mon.get("left", 0)) + x + sz // 2, "y": int(mon.get("top", 0)) + H - 48 + y + sz // 2,
+                    "score": round(float(mv), 3)}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": repr(e)[:200]}
+
     def guide_media(name: str):
         """Pictures the widget shows during a tour (state/guide_media/<name>, png/jpg only)."""
         from fastapi.responses import FileResponse, JSONResponse as _J
         safe = "".join(ch for ch in name if ch.isalnum() or ch in "._-")[:80]
         p = st / "guide_media" / safe
-        if not safe or safe != name or p.suffix.lower() not in (".png", ".jpg", ".jpeg") or not p.is_file():
+        if not safe or safe != name or p.suffix.lower() not in (".png", ".jpg", ".jpeg", ".mp4") or not p.is_file():
             return _J({"ok": False, "error": "no such picture"}, status_code=404)
         return FileResponse(str(p))
 
     # This module owns these paths: drop older copies so a live re-install picks up edited handlers.
     mine = {"/api/v1/app/attention", "/api/v1/app/guide", "/api/v1/app/guide/progress", "/api/v1/app/guide/ui_map", "/api/v1/app/guide/say",
-            "/api/v1/app/guide/hush", "/api/v1/app/guide/head", "/api/v1/app/guide/media/{name}"}
+            "/api/v1/app/guide/hush", "/api/v1/app/guide/head", "/api/v1/app/guide/media/{name}",
+            "/api/v1/app/guide/taskbar_icon"}
     try:
         app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", None) not in mine]
         existing = {e for e in existing if e.split(" ", 1)[-1] not in mine}
@@ -276,7 +318,8 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
                              ("POST", "/api/v1/app/guide/say", guide_say),
                              ("POST", "/api/v1/app/guide/hush", guide_hush),
                              ("POST", "/api/v1/app/guide/head", guide_head),
-                             ("GET", "/api/v1/app/guide/media/{name}", guide_media)):
+                             ("GET", "/api/v1/app/guide/media/{name}", guide_media),
+                             ("GET", "/api/v1/app/guide/taskbar_icon", guide_taskbar_icon)):
         if f"{method} {path}" in existing:
             continue
         app.add_api_route(path, fn, methods=[method])

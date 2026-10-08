@@ -16,5 +16,10 @@ tauri-plugin-single-instance = "2"
 # The guide's HANDS on the desktop (2026-10-08 "what I can do" tour): glide the mouse, click, type, scroll.
 enigo = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+# mouse LOCK during the widget tour: a low-level mouse hook swallows the person's (physical) mouse while my own
+# injected moves pass (2026-10-08, Zeke: "make sure the person doesn't have control of the mouse")
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]

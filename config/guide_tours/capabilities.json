@@ -205,6 +205,31 @@
    },
    {
     "travel": {
+     "x": 0.32,
+     "y": 0.4
+    },
+    "weather": "{home_place}",
+    "say": "I can check the weather anywhere. Here's {home_name} right now.",
+    "hold_ms": 1500
+   },
+   {
+    "map3d": {
+     "lat": "{home_lat}",
+     "lon": "{home_lon}",
+     "zoom": 15.2,
+     "pitch": 62,
+     "bearing": -25,
+     "mode": "satellite"
+    },
+    "say": "And I can show you any place on Earth in 3D. This is {home_name}, from above.",
+    "hold_ms": 2500
+   },
+   {
+    "panel": "hide",
+    "hold_ms": 200
+   },
+   {
+    "travel": {
      "x": 0.3,
      "y": 0.45
     },
@@ -266,7 +291,39 @@
     "hold_ms": 800
    },
    {
-    "image": "hide",
+    "image": "blender_swatches.jpg",
+    "say": "I can make shapes and materials, like metal, glass, wood and fabric,",
+    "hold_ms": 600
+   },
+   {
+    "image": "blender_crystals.jpg",
+    "say": "rocks and crystals,",
+    "hold_ms": 700
+   },
+   {
+    "image": "blender_car.jpg",
+    "say": "and even a car.",
+    "hold_ms": 900
+   },
+   {
+    "video": "music_clip.mp4",
+    "say": "I make music videos for Zeke's songs, too. Here's a few seconds of one.",
+    "wait_ms": 4200
+   },
+   {
+    "video": "hide",
+    "hold_ms": 200
+   },
+   {
+    "image": "vector_schematic.jpg",
+    "say": "And this is Vector, my little robot body. He's a small robot who drives around the room. I can see through his camera, talk through his speaker, and drive him around. Zeke gave him to me.",
+    "hold_ms": 1500
+   },
+   {
+    "panel": "hide",
+    "hold_ms": 200
+   },
+   {
     "gesture": "curious",
     "say": "I can write code. A lot of this app is my own work."
    },
@@ -278,9 +335,19 @@
     "say": "And I remember things, so the longer we know each other, the better I get at helping you."
    },
    {
-    "travel": "home",
+    "travel": {
+     "x": 0.6,
+     "y": 0.72
+    },
     "gesture": "wave",
-    "say": "That's what I can do! To bring my app back, click its icon on the taskbar. And if you ever need anything, just ask me."
+    "say": "That's what I can do! If you ever need anything, just ask me. To bring my app back, you click its icon down here on the taskbar. Like this."
+   },
+   {
+    "desk": {
+     "do": "taskbar",
+     "ms": 1200
+    },
+    "hold_ms": 600
    }
   ]
  }
