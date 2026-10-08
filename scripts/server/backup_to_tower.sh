@@ -22,7 +22,7 @@ for p in IRIS/state IRIS/memory IRIS/profiles IRIS/faces IRIS/config/private.loc
          .iris_sibling_secret .iris_private.env iris_start.sh iris_console.sh LIVE; do
   [ -e "$p" ] && LIST+=("$p")
 done
-tar --zstd -cf "$OUT" --exclude='IRIS/state/vector/stock_backup' --exclude='*.tmp' \
+tar --zstd -cf "$OUT" --exclude='IRIS/state/vector/stock_backup' --exclude='IRIS/state/little_brain/adapter*' --exclude='IRIS/state/little_brain/*.gguf' --exclude='IRIS/state/little_brain/merged*' --exclude='IRIS/state/little_brain/base*' --exclude='*.tmp' \
     --warning=no-file-changed "${LIST[@]}" || [ $? -eq 1 ]   # rc 1 = a file changed while read: fine
 SIZE=$(stat -c %s "$OUT")
 ssh -o BatchMode=yes "$TOWER" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force '$DEST_WIN' | Out-Null\""
