@@ -59,7 +59,7 @@ def _body_possess(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     import json
     import time as _time
     from pathlib import Path
-    repo = Path(r"D:\Wren-Companion")
+    repo = Path(__file__).resolve().parents[2]
     ctl = repo / "state" / "vector" / "possession.json"
     status_p = repo / "state" / "vector" / "possession_status.json"
     out: dict[str, Any] = {"ok": True}
@@ -436,7 +436,7 @@ def _body_detect(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         if r.get("ok"):
             path = r.get("path")
     if path is None:
-        path = str(params.get("path") or r"D:\Wren-Companion\state\vector\body_view.jpg")
+        path = str(params.get("path") or (__import__("pathlib").Path(__file__).resolve().parents[2] / "state" / "vector" / "body_view.jpg"))
     out = vector_owl.detect(path, prompts,
                             threshold=float(params.get("threshold") or 0.05),
                             bright=bool(params.get("bright", False)))

@@ -33,7 +33,7 @@ import numpy as np
 
 from tools.tool_registry import register_tool
 
-_REPO = Path(r"D:\Wren-Companion")
+_REPO = Path(__file__).resolve().parents[2]
 _VOICE_DIR = _REPO / "voice"
 CONFIG_FILE = _REPO / "scratch" / "voice_id.json"
 

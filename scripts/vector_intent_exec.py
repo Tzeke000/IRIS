@@ -27,7 +27,10 @@ import requests
 REPO = Path(__file__).resolve().parent.parent
 WIREPOD = "http://127.0.0.1:8080"
 MOUTH = "http://127.0.0.1:8769/synth"
-JDOCS = Path.home() / "AppData" / "Roaming" / "wire-pod" / "jdocs" / "botSdkInfo.json"
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+from brain.iris_paths import paths as _iris_paths  # noqa: E402
+JDOCS = _iris_paths.wirepod_sdk_info  # AppData on the tower, ~/wire-pod/chipper/jdocs on Linux
 NERVES = REPO / "state" / "vector" / "nerves.json"
 LAST_SPOKE = REPO / "state" / "vector" / "last_spoke.json"
 

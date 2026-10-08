@@ -26,8 +26,9 @@ from typing import Any
 from tools.tool_registry import register_tool
 
 _WIREPOD = "http://127.0.0.1:8080"
-_JDOCS = Path.home() / "AppData" / "Roaming" / "wire-pod" / "jdocs" / "botSdkInfo.json"
-_FRAME_DIR = Path(r"D:\Wren-Companion\state\vector")
+from brain.iris_paths import paths as _iris_paths
+_JDOCS = _iris_paths.wirepod_sdk_info  # AppData on the tower, ~/wire-pod/chipper/jdocs on Linux
+_FRAME_DIR = Path(__file__).resolve().parents[2] / "state" / "vector"
 
 _MAX_WHEEL = 200      # mm/s per side, sdkapp itself tops out ~190
 _MAX_DRIVE_S = 2.5    # per-call drive burst cap — desk scale, not hallway scale

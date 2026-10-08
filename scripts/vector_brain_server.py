@@ -176,8 +176,8 @@ _EYE_PRESETS = {
 
 def _wp_serial() -> str | None:
     try:
-        data = json.loads((Path.home() / "AppData" / "Roaming" / "wire-pod"
-                           / "jdocs" / "botSdkInfo.json").read_text(
+        from brain.iris_paths import paths as _iris_paths
+        data = json.loads(_iris_paths.wirepod_sdk_info.read_text(
                                encoding="utf-8"))
         robots = data.get("robots") or []
         for rb in robots:
@@ -302,9 +302,8 @@ def _iris_voice_for_local(reply: str) -> str | None:
             pass
         esn = None
         try:
-            data = json.loads((Path.home() / "AppData" / "Roaming" /
-                               "wire-pod" / "jdocs" /
-                               "botSdkInfo.json").read_text(encoding="utf-8"))
+            from brain.iris_paths import paths as _iris_paths
+            data = json.loads(_iris_paths.wirepod_sdk_info.read_text(encoding="utf-8"))
             for rb in data.get("robots") or []:
                 if rb.get("activated"):
                     esn = str(rb.get("esn"))

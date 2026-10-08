@@ -28,7 +28,7 @@ from typing import Any
 
 from tools.tool_registry import register_tool
 
-_ROOT = Path(r"D:\Wren-Companion\state\room_atlas")
+_ROOT = Path(__file__).resolve().parents[2] / "state" / "room_atlas"
 _KEEP_ATLASES = 5
 _GRID_PANS = (-120, -80, -40, 0, 40, 80, 120)
 _GRID_TILTS = (10, -35)

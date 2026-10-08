@@ -41,7 +41,7 @@ MAX_BYTES = 10 * 1024 * 1024        # 10 MB — the 08-03 rule's threshold
 HAZARD_TYPES = ("video/",)
 HAZARD_EXTS = (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".wmv", ".flv",
                ".zip", ".7z", ".rar", ".tar", ".gz", ".iso", ".psd", ".wav")
-LOG = Path(r"D:\Wren-Companion") / "state" / "media_guard.log"
+LOG = Path(__file__).resolve().parents[1] / "state" / "media_guard.log"
 TOOL = "mcp__plugin_discord_discord__download_attachment"
 
 

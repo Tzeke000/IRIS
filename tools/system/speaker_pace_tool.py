@@ -33,7 +33,7 @@ from typing import Any
 
 from tools.tool_registry import register_tool
 
-PACE_FILE = Path(r"D:\Wren-Companion\scratch\speaker_pace.json")
+PACE_FILE = Path(__file__).resolve().parents[2] / "scratch" / "speaker_pace.json"
 
 
 def _read() -> dict[str, Any]:

@@ -873,7 +873,7 @@ async def voice_reader(queue, loop, mic_gate):
     # Deliberate-off gate + failure backoff (2026-07-20, Zeke in Parsec: the
     # month-long voice kill turned this loop into "voice listen failed" spam
     # every 2s — the daemon is dead ON PURPOSE). Flag file wins: sleep quietly.
-    _voff_flag = r"D:\Wren-Companion\state\voice_deliberately_off.json"
+    _voff_flag = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "voice_deliberately_off.json")  # repo-relative (10-07: the D:\ literal never existed on Linux)
     _voff_warned = False
     _fail_streak = 0
     while True:
@@ -2193,7 +2193,7 @@ async def main():
                     # (no-worse-than-before). Voice items ONLY — orb/discord/letters
                     # always wake me.
                     try:
-                        with open(r"D:\Wren-Companion\scratch\voice_control.json",
+                        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "scratch", "voice_control.json"),
                                   encoding="utf-8") as _vcf:
                             _flush_s = float((json.load(_vcf) or {}).get(
                                 "flush_stale_voice_s", 0) or 0)

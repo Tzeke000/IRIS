@@ -319,7 +319,7 @@ def vic_restart() -> tuple[bool, str]:
     if not Path(ssh).exists():
         ssh = "ssh"
     rc, out = _run([ssh, "-i", str(SSH_KEY), "-o", "StrictHostKeyChecking=no",
-                    "-o", "UserKnownHostsFile=NUL", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes",
+                    "-o", f"UserKnownHostsFile={os.devnull}", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes",
                     "-o", "HostKeyAlgorithms=+ssh-rsa", "-o", "PubkeyAcceptedKeyTypes=+ssh-rsa",
                     "-o", "LogLevel=ERROR", f"root@{robot_ip()}",
                     "systemctl restart vic-switchboard vic-cloud; sleep 2; "

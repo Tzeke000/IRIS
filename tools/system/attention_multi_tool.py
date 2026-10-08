@@ -275,7 +275,7 @@ def _attention_multi(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any
             cv2.putText(frame, f"{want}{' (lost)' if dead else ''}",
                         (x, max(14, y - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, c, 1)
         from pathlib import Path
-        d = Path(r"D:\Wren-Companion\state\eyes_debug")
+        d = Path(__file__).resolve().parents[2] / "state" / "eyes_debug"
         d.mkdir(parents=True, exist_ok=True)
         out = d / f"multi_{int(time.time())}.jpg"
         cv2.imwrite(str(out), frame)

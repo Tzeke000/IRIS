@@ -35,7 +35,7 @@ from typing import Any
 
 from tools.tool_registry import register_tool
 
-_LEDGER = Path(r"D:\Wren-Companion\state\pointing_ledger.jsonl")
+_LEDGER = Path(__file__).resolve().parents[2] / "state" / "pointing_ledger.jsonl"
 _MAX_BYTES = 2_000_000
 _SAMPLE_S = 0.35
 _HFOV = 68.0
