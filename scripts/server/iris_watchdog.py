@@ -109,7 +109,10 @@ def main() -> int:
         sup_tail = SUPLOG.read_text(encoding="utf-8", errors="replace").splitlines()[-1]
     except Exception:
         pass
-    in_grace = boot_age < BOOT_GRACE_S or (now - float(st.get("last_restart_flag_ts") or 0.0)) < BOOT_GRACE_S
+    planned = load(ROOT / "state" / "planned_restart.json", {})   # written right before a deliberate restart
+    planned_recent = now - float(planned.get("ts") or 0.0) < BOOT_GRACE_S
+    in_grace = (boot_age < BOOT_GRACE_S or planned_recent
+                or (now - float(st.get("last_restart_flag_ts") or 0.0)) < BOOT_GRACE_S)
 
     # 1. wedge -> restart (only when the runtime process is alive but silent)
     off = bool(load(OFF, {}).get("off"))
@@ -124,7 +127,7 @@ def main() -> int:
             log(f"WEDGE: runtime pid {rt_pid} heartbeat {hb_age:.0f}s old -> restart flag set")
 
     # 2. down / degraded -> tell Zeke
-    if not sup_alive:
+    if not sup_alive and not planned_recent:
         why = "the supervisor stood down after too many restarts" if "STANDING DOWN" in sup_tail else "my supervisor isn't running"
         problems["supervisor"] = why
     if hb_age > STALE_ALERT_S and not in_grace:
