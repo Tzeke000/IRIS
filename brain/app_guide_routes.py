@@ -73,6 +73,11 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
                "status": str(b.get("status") or "")[:40], "note": str(b.get("note") or "")[:300],
                "ts": time.time()}
         _write(st / "app_guide_progress.json", rec)
+        try:  # history, so a quick 'missing' between steps isn't lost (trimmed by the tool)
+            with open(st / "app_guide_progress.jsonl", "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec) + "\n")
+        except Exception:  # noqa: BLE001
+            pass
         return {"ok": True}
 
     async def guide_ui_map(request: Request):
@@ -129,6 +134,13 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "spoken": False, "error": repr(e)[:200]}
 
+    # This module owns these paths: drop older copies so a live re-install picks up edited handlers.
+    mine = {"/api/v1/app/guide", "/api/v1/app/guide/progress", "/api/v1/app/guide/ui_map", "/api/v1/app/guide/say"}
+    try:
+        app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", None) not in mine]
+        existing = {e for e in existing if e.split(" ", 1)[-1] not in mine}
+    except Exception:  # noqa: BLE001
+        pass
     for method, path, fn in (("GET", "/api/v1/app/guide", guide_get),
                              ("POST", "/api/v1/app/guide/progress", guide_progress),
                              ("POST", "/api/v1/app/guide/ui_map", guide_ui_map),

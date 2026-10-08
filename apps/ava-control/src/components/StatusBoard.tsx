@@ -66,7 +66,7 @@ const rate = (mb: number | null | undefined) =>
 
 function Chip({ k, v, sub, title, dim }: { k: string; v: string; sub?: string; title?: string; dim?: boolean }) {
   return (
-    <div className={`sb-chip${dim ? " sb-dim" : ""}`} title={title}>
+    <div className={`sb-chip${dim ? " sb-dim" : ""}`} title={title} data-iris={`chip:${k.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`}>
       <span className="sb-k">{k}</span>
       <span className="sb-v">{v}</span>
       {sub ? <span className="sb-sub">{sub}</span> : null}
@@ -86,7 +86,7 @@ export function StatusTopBar({ sb, mood, moodSub, moodColor }: {
   // Order (Zeke 10-07): my VM's CPU, then the server's two physical CPUs to its right, before RAM;
   // mood sits in the MIDDLE of the same row.
   const moodChip = (
-    <div className="sb-mood" style={{ color: moodColor }} key="mood">
+    <div className="sb-mood" data-iris="chip:mood" style={{ color: moodColor }} key="mood">
       <span className="sb-k">Mood</span>
       <span className="sb-v">{mood || "—"}</span>
       {moodSub ? <span className="sb-sub">with a little {moodSub}</span> : null}
@@ -117,7 +117,7 @@ export function StatusTopBar({ sb, mood, moodSub, moodColor }: {
     <Chip key="net" k="Network" v={b?.net ? `↓${rate(b.net.rx_mbps)} ↑${rate(b.net.tx_mbps)}` : "—"} sub={b?.net ? `Mb/s · ${b.net.iface ?? "?"}` : undefined} dim={dim} title={why} />,
   ];
   return (
-    <div className="sb-top" role="status">
+    <div className="sb-top" data-iris="topbar" role="status">
       <div className="sb-side sb-left">{left}</div>
       {moodChip}
       <div className="sb-side sb-right">{right}</div>
@@ -152,7 +152,7 @@ export function StatusCorner({ sb }: { sb: ReturnType<typeof useStatusBoard> }) 
   const links = b ? order.filter((k) => b.links[k]).map((k) => [k, b.links[k]] as const) : [];
   const rdetail = reachErr ? `the app couldn't check: ${reachErr}` : undefined;
   return (
-    <div className="sb-corner">
+    <div className="sb-corner" data-iris="status-corner">
       <div className="sb-corner-h">Server</div>
       <div className="sb-row" title={rdetail ?? "TCP connect from this PC to the Proxmox web port"}><Dot ok={reach ? reach.proxmox : null} />Proxmox host</div>
       <div className="sb-row" title={rdetail ?? "TCP connect from this PC to iris-home's SSH port"}><Dot ok={reach ? reach.iris_home_ssh : null} />iris-home reachable</div>
