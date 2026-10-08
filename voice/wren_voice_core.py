@@ -920,7 +920,16 @@ def cmd_speak(ctx, args: dict) -> str:
     # the interrupted reply stays silent — later sentences from the same turn would
     # otherwise restart my voice over his. Cleared by cmd_bargein_hold on both edges.
     if getattr(ctx, "bargein_fired", False):
-        return "[voice_speak] dropped (barge-in: reply was interrupted)"
+        # 2026-10-08: a barge at 16:53 left bargein_fired STUCK (the hold window never closed) and every
+        # deliberate voice_speak for 14 min - a whole guide tour - was dropped while voice_speak said ok.
+        # The mute belongs to the reply he interrupted: honour it only inside a live hold window and only
+        # for a short while after the barge; otherwise it's stale - clear it and speak.
+        _age = time.time() - float(getattr(ctx, "bargein_fired_ts", 0) or 0)
+        if getattr(ctx, "bargein_hold", False) and _age < 30.0:
+            return "[voice_speak] dropped (barge-in: reply was interrupted)"
+        print(f"[voice_speak] clearing STALE barge-in mute (age {_age:.0f}s, hold={getattr(ctx, 'bargein_hold', False)})",
+              flush=True)
+        ctx.bargein_fired = False
     _cancel_stall_bridge(ctx)   # a real reply (or a warned pause) suppresses the stall bridge
     # Enqueue BEFORE flipping the flag. The playback worker resets ctx.speaking=False when
     # it observes an empty queue; if we set speaking=True first and the worker's empty-check
@@ -1916,6 +1925,7 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
         cut_chunk = getattr(ctx, "now_playing", None)
         heard_n = len(getattr(ctx, "played_chunks", None) or [])
         ctx.bargein_fired = True          # cmd_speak drops the rest of this reply
+        ctx.bargein_fired_ts = time.time()
         _cancel_stall_bridge(ctx)         # no bridging phrase over his cut-in
         drained = _drain_play_queue(ctx)  # unplayed sentences never start — but
                                           # KEEP them: if this onset turns out to
