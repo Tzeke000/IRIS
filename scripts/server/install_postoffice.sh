@@ -104,7 +104,8 @@ ExecStart=/usr/local/sbin/iris-postoffice-firewall.sh
 WantedBy=multi-user.target
 UNIT_EOF
 sudo systemctl daemon-reload
-sudo systemctl enable --now iris-postoffice-firewall.service
+sudo systemctl enable iris-postoffice-firewall.service
+sudo systemctl restart iris-postoffice-firewall.service
 
 # 5. start
 systemctl --user daemon-reload

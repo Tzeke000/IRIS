@@ -9,7 +9,13 @@ export const BACKENDS: Record<Backend, string> = {
 };
 export const BACKEND_KEY = "iris.backend";
 export function readBackend(): Backend {
-  try { return localStorage.getItem(BACKEND_KEY) === "server" ? "server" : "tower"; } catch { return "tower"; }
+  // Default when nothing is stored: the build's VITE_DEFAULT_BACKEND (the Zorin build sets "server" —
+  // there is no tower runtime on that machine), else the tower.
+  const dflt: Backend = import.meta.env.VITE_DEFAULT_BACKEND === "server" ? "server" : "tower";
+  try {
+    const v = localStorage.getItem(BACKEND_KEY);
+    return v === "server" ? "server" : v === "tower" ? "tower" : dflt;
+  } catch { return dflt; }
 }
 export function setBackend(b: Backend): void {
   try { localStorage.setItem(BACKEND_KEY, b); } catch { /* storage unavailable */ }
