@@ -368,6 +368,29 @@ def _check_post_office() -> tuple[bool | None, str]:
         return False, f"port {port}: {e.__class__.__name__}"
 
 
+def _check_mic_link() -> tuple[bool | None, str]:
+    """My ears' link from the tower (scripts/mic_source.py :8776). The tower's Iris-Mic-Watchdog task checks it every
+    minute and restarts it if it died (10-08: it died silently at 13:14 and I was deaf all afternoon); this reads the
+    watchdog's verdict, so a stale verdict (watchdog itself not running) shows too."""
+    rc, out = _ssh_tower(rf"type {_TOWER_REPO}\state\mic_watchdog.json", timeout=12.0)
+    if rc != 0 or "{" not in out:
+        return None, f"no watchdog verdict yet (rc {rc})"
+    try:
+        import json
+        from datetime import datetime
+        d = json.loads(out[out.index("{"):])
+        ep = d.get("epoch")
+        age = time.time() - (float(ep) if ep else datetime.fromisoformat(str(d.get("ts"))[:26]).timestamp())
+    except Exception as e:  # noqa: BLE001
+        return None, f"unreadable verdict: {e!r}"[:120]
+    if age > 300:
+        return False, f"watchdog silent for {int(age // 60)} min (task Iris-Mic-Watchdog not running?)"
+    extra = f" · restarted {d.get('restarts')}x, last {str(d.get('last_restart') or '')[:16]}" if d.get("restarts") else ""
+    if not d.get("ok"):
+        return False, f"{d.get('detail')}{extra}"
+    return True, ("streaming to my ears" if d.get("streaming") else "listening (no stream right now)") + extra
+
+
 _VOICE_OFF_FLAG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                "state", "voice_deliberately_off.json")
 
@@ -410,6 +433,7 @@ if not _IS_WIN:
         "post_office":    {"label": "Post-office (letters)", "fn": _check_post_office, "every": 30.0},
         "mouth":          {"label": "Mouth service", "fn": _check_unit("iris-mouth", voice=True), "every": 15.0},
         "ears":           {"label": "Ears service", "fn": _check_unit("iris-ears", voice=True), "every": 15.0},
+        "mic_link":       {"label": "Mic link (tower headset)", "fn": _check_mic_link, "every": 60.0},
     }
 
 
