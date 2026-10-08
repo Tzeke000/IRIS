@@ -1601,6 +1601,10 @@ def _attention_smooth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
 
     if action == "start":
         from brain import visual_attention as va
+        # 2026-10-08 (Zeke): the guide tour's head demo turns tracking OFF while it moves my head on purpose —
+        # otherwise the servo (or the sentry re-engaging on motion) fights every move. Refuse until it hands back.
+        if float(g.get("_guide_head_hold_until") or 0) > time.time() and not params.get("force"):
+            return {"ok": False, "error": "the guide tour is moving my head on purpose - tracking resumes after it"}
         # The step-follow loop and this servo must never both drive the gimbal.
         try:
             from tools.system.attention_follow_tool import _attention_follow

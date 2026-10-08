@@ -200,10 +200,48 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
         try:
             import asyncio
             from tools.system.room_map_tool import _look
+            home = abs(pan) < 0.5 and abs(tilt - 10.0) < 0.5
+            if not home:
+                await asyncio.to_thread(_hold_tracking)          # tracking OFF while I move my head on purpose
             r = await asyncio.to_thread(_look, g, {"pan_deg": pan, "tilt_deg": tilt})
-            return {"ok": bool(r.get("ok")), "pan_deg": pan, "tilt_deg": tilt, "error": r.get("error")}
+            if home:
+                _release_tracking()                              # the demo's over: tracking back on
+            return {"ok": bool(r.get("ok")), "pan_deg": pan, "tilt_deg": tilt, "error": r.get("error"),
+                    "tracking": "held" if not home else "resumed"}
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": repr(e)[:200]}
+
+    # ---- tracking hold for the head demo (Zeke 10-08: "you need to turn the camera tracking off") --------------
+    def _hold_tracking() -> None:
+        import threading
+        from tools.system.attention_smooth_tool import _attention_smooth
+        sm = g.get("_attention_smooth") or {}
+        running = bool(sm.get("thread") and sm["thread"].is_alive())
+        if running:
+            tgt = (g.get("_attention_state_obj") or {}).get("target")
+            g["_guide_tracking_was"] = tgt or "zeke"
+            _attention_smooth({"action": "stop", "home": False}, g)
+        g["_guide_head_hold_until"] = time.time() + 90.0       # also blocks the sentry re-engaging
+        old = g.get("_guide_head_timer")
+        if old:
+            old.cancel()
+        t = threading.Timer(92.0, _release_tracking)            # never leave tracking off if the tour dies
+        t.daemon = True
+        g["_guide_head_timer"] = t
+        t.start()
+
+    def _release_tracking() -> None:
+        g["_guide_head_hold_until"] = 0
+        old = g.pop("_guide_head_timer", None)
+        if old:
+            old.cancel()
+        tgt = g.pop("_guide_tracking_was", None)
+        if tgt:
+            try:
+                from tools.system.attention_smooth_tool import _attention_smooth
+                _attention_smooth({"action": "start", "target": tgt}, g)
+            except Exception:  # noqa: BLE001
+                pass
 
     def guide_media(name: str):
         """Pictures the widget shows during a tour (state/guide_media/<name>, png/jpg only)."""
