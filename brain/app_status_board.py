@@ -208,6 +208,114 @@ def _sampler() -> None:
             _SAMPLE.update(s)
 
 
+# ── the server's two physical CPUs (Proxmox host, read-only forced-command key) ──
+# Zeke 10-07: "the servers 2 CPUs please". The VM sees one virtual socket, so per-socket
+# usage + package temps come from the HOST over SSH with ~/.ssh/id_ed25519_pve_stats, whose
+# authorized_keys line FORCES a command that only prints /proc/stat, the cpu->package map and
+# hwmon temps (scratch/pve_stats_key_line.txt). The host address comes from
+# config/private.local.json at runtime. No key / no answer => host_cpus None + the reason.
+_PVE_KEY = os.path.expanduser("~/.ssh/id_ed25519_pve_stats")
+_HOST_CPUS: dict[str, Any] = {"value": None, "error": "not checked yet", "ts": 0.0}
+
+
+def _pve_host() -> str | None:
+    try:
+        import json as _json
+        from pathlib import Path as _P
+        d = _json.loads((_P(__file__).resolve().parents[1] / "config" / "private.local.json")
+                        .read_text(encoding="utf-8"))
+        return str(d.get("proxmox_host") or "") or None
+    except Exception:
+        return None
+
+
+def _parse_host(out: str):
+    stat: dict[int, list[int]] = {}
+    pkg: dict[int, int] = {}
+    hw_name: dict[str, str] = {}
+    labels: dict[str, str] = {}
+    temps: dict[str, float] = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("cpu") and not line.startswith("cpu "):
+            parts = line.split()
+            try:
+                stat[int(parts[0][3:])] = [int(x) for x in parts[1:9]]
+            except ValueError:
+                continue
+        elif "/topology/physical_package_id:" in line:
+            path, _, val = line.rpartition(":")
+            try:
+                pkg[int(path.split("/cpu/cpu")[1].split("/")[0])] = int(val)
+            except (ValueError, IndexError):
+                continue
+        elif line.startswith("/sys/class/hwmon/"):
+            path, _, val = line.partition(":")
+            hw = path.split("/")[4]
+            leaf = path.rsplit("/", 1)[-1]
+            if leaf == "name":
+                hw_name[hw] = val.strip()
+            elif leaf.endswith("_label"):
+                labels[f"{hw}/{leaf[:-6]}"] = val.strip()
+            elif leaf.endswith("_input"):
+                try:
+                    temps[f"{hw}/{leaf[:-6]}"] = int(val) / 1000.0
+                except ValueError:
+                    pass
+    sock_temp: dict[int, float] = {}
+    for key, lab in labels.items():
+        hw = key.split("/")[0]
+        if hw_name.get(hw) == "coretemp" and lab.lower().startswith("package id") and key in temps:
+            try:
+                sock_temp[int(lab.split()[-1])] = temps[key]
+            except ValueError:
+                pass
+    return stat, pkg, sock_temp
+
+
+def _host_cpu_loop() -> None:
+    host = _pve_host()
+    prev: dict[int, list[int]] | None = None
+    while True:
+        if not host or not os.path.isfile(_PVE_KEY):
+            _HOST_CPUS.update({"value": None, "error": "no Proxmox stats key / host configured",
+                               "ts": time.time()})
+            time.sleep(30.0)
+            host = _pve_host()
+            continue
+        rc, out = _run(["ssh", "-i", _PVE_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=4",
+                        "-o", "IdentitiesOnly=yes",
+                        "-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/iris-pve-%r@%h",
+                        "-o", "ControlPersist=120", f"root@{host}", "stats"], 10.0)
+        if rc != 0 or "cpu0 " not in out:
+            msg = "the key isn't installed on the Proxmox host yet" if "Permission denied" in out \
+                else f"no answer (rc {rc}): {out[-100:]}"
+            _HOST_CPUS.update({"value": None, "error": msg, "ts": time.time()})
+            prev = None
+            time.sleep(15.0)
+            continue
+        stat, pkg, sock_temp = _parse_host(out)
+        if prev is not None and pkg:
+            agg: dict[int, list[float]] = {}
+            for cpu, cur in stat.items():
+                old = prev.get(cpu)
+                if old is None or cpu not in pkg:
+                    continue
+                d = [c - o for c, o in zip(cur, old)]
+                total = sum(d)
+                idle = d[3] + d[4]
+                if total > 0:
+                    agg.setdefault(pkg[cpu], []).append(100.0 * (total - idle) / total)
+            sockets = sorted(set(pkg.values()))
+            _HOST_CPUS.update({
+                "value": [{"socket": s, "threads": sum(1 for v in pkg.values() if v == s),
+                           "percent": round(sum(agg[s]) / len(agg[s]), 1) if agg.get(s) else None,
+                           "temp_c": sock_temp.get(s)} for s in sockets],
+                "error": None, "ts": time.time()})
+        prev = stat
+        time.sleep(2.0)
+
+
 # ── link checks: real round-trips, tri-state ─────────────────────────────────
 def _check_tower_ssh() -> tuple[bool | None, str]:
     rc, out = _ssh_tower("echo iris-ok", timeout=12.0)
@@ -303,6 +411,8 @@ def _ensure_started() -> None:
             return
         _STARTED = True
     threading.Thread(target=_sampler, name="status_board_sampler", daemon=True).start()
+    if not _IS_WIN:
+        threading.Thread(target=_host_cpu_loop, name="status_board_host_cpus", daemon=True).start()
     for k, spec in _CHECKS.items():
         threading.Thread(target=_link_loop, args=(k, spec), name=f"status_board_{k}",
                          daemon=True).start()
@@ -340,6 +450,8 @@ def board(g: dict[str, Any] | None = None) -> dict[str, Any]:
         "sample_age_s": None if sample_age is None else round(sample_age, 1),
         "cpu": sample.get("cpu"), "ram": sample.get("ram"), "gpu": sample.get("gpu"),
         "disk": sample.get("disk"), "net": sample.get("net"),
+        "host_cpus": _HOST_CPUS["value"] if now - float(_HOST_CPUS["ts"] or 0.0) < 30.0 else None,
+        "host_cpus_error": _HOST_CPUS["error"],
         "camera_fps": fps,
         "links": links,
     }
