@@ -18,6 +18,7 @@ import { Arm, ARM_KEYS, ArmKey, bestArm, drawArm, easeInOutCubic, idleTip, port,
 import { findEl, scanUi } from "./uiMap";
 
 type Step = {
+  brain?: string;               // "spin" | "overview" | "focus:<node id>" (e.g. focus:iris, focus:zeke)
   close?: "console" | "camera" | "panel";
   tab?: string; move?: string | { x: number; y: number }; point?: string; press?: string; say?: string;
   gesture?: "wave" | "nod" | "shake" | "curious"; twist?: number; hold_ms?: number; emotion?: string;
@@ -328,6 +329,55 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
     }
   };
 
+  // Brain tab: spin the 3D memory graph, fly to a node (me / Zeke) and point at it.
+  const brainMove = async (cmd: string): Promise<ArmKey | null> => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fg = (window as any).__irisBrainGraph;
+    if (!fg) { report("missing", "brain graph not mounted (open the Brain tab first)"); return null; }
+    const cont = document.querySelector(".brain-canvas-wrap") as HTMLElement | null;
+    if (cmd === "overview") { fg.zoomToFit(1400, 40); await sleep(1500); return null; }
+    if (cmd === "spin") {
+      const p0 = fg.cameraPosition();
+      const d = Math.hypot(p0.x, p0.z) || 600, y = p0.y;
+      const a0 = Math.atan2(p0.x, p0.z), t0 = performance.now(), dur = 4200;
+      for (;;) {
+        const u = Math.min(1, (performance.now() - t0) / dur);
+        const k = u * u * (3 - 2 * u);                          // ease in/out of the spin
+        const a = a0 + k * Math.PI * 2;
+        fg.cameraPosition({ x: d * Math.sin(a), y, z: d * Math.cos(a) });
+        if (u >= 1) break;
+        await sleep(16);
+      }
+      return null;
+    }
+    if (cmd.startsWith("focus:")) {
+      const id = cmd.slice(6);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const node = (fg.graphData().nodes as any[]).find((n) => String(n.id) === id);
+      if (!node) { report("missing", `no brain node ${id}`); return null; }
+      const dist = 140, h = Math.hypot(node.x, node.y, node.z) || 1, ratio = 1 + dist / h;
+      fg.cameraPosition({ x: node.x * ratio, y: node.y * ratio, z: node.z * ratio }, node, 1800);
+      await sleep(1900);
+      if (!cont) return null;
+      const sc = fg.graph2ScreenCoords(node.x, node.y, node.z);
+      const r = cont.getBoundingClientRect();
+      const pt = { x: r.left + sc.x, y: r.top + sc.y };
+      const box = new DOMRect(pt.x - 14, pt.y - 14, 28, 28);
+      const L = live.current;
+      if (overlaps(L.pos, box) || Math.hypot(pt.x - L.pos.x, pt.y - L.pos.y) > (L.size / 2) * IRIS_FRAC * 3.1 || pt.x < L.pos.x)
+        await travel(besideTarget(box));
+      const dx = pt.x - L.pos.x, dy = pt.y - L.pos.y, dl = Math.hypot(dx, dy) || 1;
+      setGaze({ x: (dx / dl) * 0.8, y: (-dy / dl) * 0.8 });
+      await sleep(140);
+      const busy = new Set(ARM_KEYS.filter((k) => arms.current[k].holding));
+      const k = bestArm(L.pos, pt, 0, busy);
+      arms.current[k].reachTo(edgePoint(box, L.pos, -4), performance.now());
+      await sleep(700);
+      return k;
+    }
+    return null;
+  };
+
   const seqRef = useRef(0);
   const report = (status: string, note = "", index = -1) => {
     void postJson("/api/v1/app/guide/progress", { seq: seqRef.current, index, status, note }).catch(() => undefined);
@@ -363,6 +413,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
         let used: ArmKey | null = null;
         if (st.press) used = await reachFor(st.press, true, st.twist);
         else if (st.point) used = await reachFor(st.point, false, st.twist);
+        if (st.brain) used = (await brainMove(st.brain)) ?? used;
         if (st.gesture) await gesture(st.gesture);
         if (st.close === "camera") await reachFor("camera-overlay", true);
         if (st.close === "panel" && L.operatorOpen) await reachFor("panel-close", true);

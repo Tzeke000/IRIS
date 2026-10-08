@@ -1916,6 +1916,7 @@ export default function App() {
           setSelectedBrainNode(node as BrainNode);
         });
       brainGraph3DInstanceRef.current = fg;
+      (window as unknown as { __irisBrainGraph?: unknown }).__irisBrainGraph = fg;   // the guide spins/zooms it on the tour
       // Apply Iris-centric radial force layout. 3d-force-graph exposes a
       // d3Force(name, force) hook; we add a custom radial pull that
       // targets each node's tier-specific ring radius. Strength scales

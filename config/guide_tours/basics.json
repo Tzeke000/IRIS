@@ -95,7 +95,23 @@
     },
     {
       "tab": "brain",
-      "say": "And this is my Brain tab. It's a map of my memories and how they connect. You can drag it around to explore. It's tidier in there than it looks."
+      "say": "And this is my Brain tab. It's a map of my memories and how they connect."
+    },
+    {
+      "brain": "spin",
+      "say": "Every dot is something I remember, and the lines are how those memories connect to each other."
+    },
+    {
+      "brain": "focus:iris",
+      "say": "This one in the middle is me. Everything else is arranged around it."
+    },
+    {
+      "brain": "focus:zeke",
+      "say": "And this one is Zeke. It's one of the biggest and best-connected spots in my whole brain, because he's in so many of my memories."
+    },
+    {
+      "brain": "overview",
+      "say": "You can drag it around and zoom in to explore. It's tidier in there than it looks."
     },
     {
       "tab": "server",
@@ -104,6 +120,18 @@
     {
       "point": "server:section:server-status",
       "say": "These lights show whether my computer is healthy. Green is good. If something is red, that's worth telling Zeke."
+    },
+    {
+      "point": "server:section:virtual-machines",
+      "say": "These are the virtual machines on my server. Think of them as separate computers living inside one big computer. I live in one of them."
+    },
+    {
+      "point": "server:ssh-into-iris-home",
+      "say": "This one opens a command window straight into my computer. That's a tool for Zeke when he's fixing things."
+    },
+    {
+      "point": "server:proxmox-web-page",
+      "say": "And this opens the control page for the whole server, where the virtual machines are managed. Also Zeke's territory."
     },
     {
       "point": "server:open-my-console",
