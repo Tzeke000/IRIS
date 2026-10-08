@@ -170,7 +170,7 @@
    {
     "desk": {
      "do": "scroll",
-     "amount": -8,
+     "amount": 8,
      "ms": 380
     },
     "say": "These are all Zeke's songs. He made every single one of them."
@@ -178,7 +178,7 @@
    {
     "desk": {
      "do": "scroll",
-     "amount": 8,
+     "amount": -8,
      "ms": 160
     },
     "hold_ms": 300
