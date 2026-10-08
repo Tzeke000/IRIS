@@ -263,11 +263,44 @@ export default function WidgetApp() {
         <div style={{ position: "absolute", top: eyeY - PANEL.h / 2, left: guide.panelSide === "right" ? WIDGET_BASE.w - 10 : 10,
           width: PANEL.w - 20, height: PANEL.h, borderRadius: 12, overflow: "hidden", background: "#05070c",
           border: "1px solid rgba(120,170,255,0.45)", boxShadow: "0 6px 26px rgba(0,0,0,0.55)", pointerEvents: "none" }}>
-          <img alt="" style={{ width: "100%", height: "100%", objectFit: guide.panel.kind === "camera" ? "cover" : "contain" }}
-            src={guide.panel.kind === "camera" ? `${API_BASE}/api/v1/camera/mjpeg?e=${guide.panel.name ?? "w"}`
-              : `${API_BASE}/api/v1/app/guide/media/${encodeURIComponent(guide.panel.name || "")}`} />
+          {(guide.panel.kind === "camera" || guide.panel.kind === "image") && (
+            <img alt="" style={{ width: "100%", height: "100%", objectFit: guide.panel.kind === "camera" ? "cover" : "contain" }}
+              src={guide.panel.kind === "camera" ? `${API_BASE}/api/v1/camera/mjpeg?e=${guide.panel.name ?? "w"}`
+                : `${API_BASE}/api/v1/app/guide/media/${encodeURIComponent(guide.panel.name || "")}`} />
+          )}
+          {guide.panel.kind === "video" && (
+            // one of my music videos — quietly (Zeke: "have the music come through at a low volume")
+            <video autoPlay playsInline style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000" }}
+              src={`${API_BASE}/api/v1/app/guide/media/${encodeURIComponent(guide.panel.name || "")}`}
+              onLoadedMetadata={(e) => { e.currentTarget.volume = 0.22; void e.currentTarget.play().catch(() => undefined); }} />
+          )}
+          {guide.panel.kind === "map3d" && guide.panel.src && (
+            <iframe title="3D map" src={`${API_BASE}${guide.panel.src}`} style={{ width: "100%", height: "100%", border: 0 }} />
+          )}
+          {guide.panel.kind === "weather" && <WeatherCard d={guide.panel.data || {}} />}
         </div>
       )}
+    </div>
+  );
+}
+
+/** The weather, as a little card beside my eye (the same data my weather tool speaks). */
+function WeatherCard({ d }: { d: Record<string, unknown> }) {
+  const daily = (Array.isArray(d.daily) ? d.daily : []) as { date?: string; summary?: string; high?: number; low?: number; rain_chance_pct?: number }[];
+  const place = String(d.place || "").split(",").slice(0, 2).join(",");
+  return (
+    <div style={{ width: "100%", height: "100%", padding: "14px 18px", boxSizing: "border-box", color: "#e8f0ff",
+      font: "500 13px/1.4 system-ui, sans-serif", background: "linear-gradient(160deg,#0d1730,#060910)" }}>
+      <div style={{ fontSize: 12, opacity: 0.7, letterSpacing: 1, textTransform: "uppercase" }}>Weather</div>
+      <div style={{ fontSize: 17, fontWeight: 700, margin: "2px 0 6px" }}>{place || "—"}</div>
+      <div style={{ fontSize: 30, fontWeight: 700, color: "#9cc4ff" }}>{String(d.now || d.spoken || "unavailable").split(",")[0]}</div>
+      <div style={{ opacity: 0.85, marginBottom: 8 }}>{String(d.now || "").split(",").slice(1).join(",")}</div>
+      {daily.slice(0, 2).map((x, i) => (
+        <div key={i} style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid rgba(120,170,255,0.2)", padding: "4px 0" }}>
+          <span>{i === 0 ? "Today" : "Tomorrow"} · {x.summary}</span>
+          <span>{x.high}° / {x.low}° · {x.rain_chance_pct}% rain</span>
+        </div>
+      ))}
     </div>
   );
 }

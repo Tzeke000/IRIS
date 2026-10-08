@@ -27,8 +27,11 @@ type Desk = { do: string; x?: number; y?: number; w?: number; h?: number; ms?: n
 type WStep = {
   travel?: Vec | "home" | "center"; look?: Vec | null; head?: { pan_deg: number; tilt_deg: number } | "home";
   camera?: "show" | "hide"; image?: string; desk?: Desk; gesture?: "wave" | "nod" | "shake" | "curious";
+  video?: string; weather?: string; map3d?: Map3D | "here" | "hide"; panel?: "hide";
   say?: string; emotion?: string; wait_ms?: number; hold_ms?: number;
 };
+type Map3D = { lat: number; lon: number; zoom?: number; pitch?: number; bearing?: number; mode?: string };
+export type PanelKind = { kind: "camera" | "image" | "video" | "weather" | "map3d"; name?: string; data?: Record<string, unknown>; src?: string };
 type Script = { seq: number; steps: WStep[]; stop?: boolean; silent?: boolean; issued_ts?: number };
 
 export type WidgetLayout = { w: number; h: number; eye: Vec; eyeSize: number };
@@ -44,10 +47,12 @@ export function useWidgetGuide() {
   const [gaze, setGaze] = useState<Pose>(undefined);
   const trail = useRef(new Trail());
   const winRef = useRef({ x: 0, y: 0, k: 1 });            // where my window is (physical px) — the trail draws relative to it
-  const [panel, setPanel] = useState<{ kind: "camera" | "image"; name?: string } | null>(null);
+  const [panel, setPanel] = useState<PanelKind | null>(null);
+  const lastPlace = useRef<{ lat: number; lon: number } | null>(null);
   const [panelSide, setPanelSide] = useState<"right" | "left">("right");
   const [running, setRunning] = useState(false);
-  const live = useRef({ seq: -1, running: false, stop: false, home: null as Vec | null, panelSide: "right" as "right" | "left" });
+  const live = useRef({ seq: -1, running: false, stop: false, home: null as Vec | null, panelSide: "right" as "right" | "left",
+    touched: 0, warnedAt: 0, lockTimer: 0 });
 
   const report = (seq: number, status: string, note = "", index = -1) => {
     void postJson("/api/v1/app/guide/progress", { seq, index, status, note, client: "widget" }).catch(() => undefined);
@@ -146,6 +151,14 @@ export function useWidgetGuide() {
           break;
         }
         case "open": await invoke("desk_open", { app: dk.app ?? "", arg: dk.arg ?? null }); break;
+        case "taskbar": {                                   // click MY app's icon on the taskbar, like a person would
+          const t = await getJson<{ ok: boolean; x?: number; y?: number; error?: string }>("/api/v1/app/guide/taskbar_icon");
+          if (!t?.ok || t.x === undefined || t.y === undefined) { report(seq, "note", `taskbar: ${t?.error}`); break; }
+          await glideMouse({ x: t.x, y: t.y }, dk.ms ?? 1100);
+          await sleep(250);
+          await invoke("desk_click", { button: "left", double: false });
+          break;
+        }
         case "snap": await invoke("desk_snap"); break;
         case "place": {                                     // put the window I just opened where I know it is
           const p = at(dk.x ?? 0, dk.y ?? 0)!;
@@ -161,7 +174,7 @@ export function useWidgetGuide() {
   };
 
   // ------------------------------------------------------------- panel (camera / picture) beside the eye
-  const showPanel = async (p: { kind: "camera" | "image"; name?: string } | null) => {
+  const showPanel = async (p: PanelKind | null) => {
     const w = await win();
     const cw = w.getCurrentWindow();
     const k = await cw.scaleFactor();
@@ -235,6 +248,16 @@ export function useWidgetGuide() {
       const w = await win();
       const cw = w.getCurrentWindow();
       await cw.setIgnoreCursorEvents(true);               // nobody can grab me mid-tour
+      // and nobody can grab the MOUSE while I'm driving (Zeke 10-08): a lock that expires on its own unless refreshed
+      L.touched = 0;
+      const lockTick = async () => {
+        try {
+          const [c, mv] = await invoke<[number, number]>("desk_lock", { ttlMs: 4000 });
+          if (c > 0 || mv > 12) L.touched += 1;
+        } catch { /* not supported here */ }
+      };
+      await lockTick();
+      L.lockTimer = window.setInterval(() => void lockTick(), 700);
       L.home = await eyeScreen();
       const m = await monitor();
       for (let i = 0; i < s.steps.length; i++) {
@@ -253,6 +276,27 @@ export function useWidgetGuide() {
         if (st.head) void postJson("/api/v1/app/guide/head", st.head === "home" ? HEAD_HOME : st.head).catch(() => undefined);
         if (st.camera) await showPanel(st.camera === "show" ? { kind: "camera" } : null);
         if (st.image) await showPanel(st.image === "hide" ? null : { kind: "image", name: st.image });
+        if (st.panel === "hide") await showPanel(null);
+        if (st.video) await showPanel(st.video === "hide" ? null : { kind: "video", name: st.video });
+        if (st.weather !== undefined) {
+          if (st.weather === "hide") await showPanel(null);
+          else {
+            const w = await getJson<Record<string, unknown>>(`/api/v1/app/weather?days=2&place=${encodeURIComponent(st.weather)}`).catch(() => null);
+            if (w && typeof w.lat === "number" && typeof w.lon === "number") lastPlace.current = { lat: w.lat as number, lon: w.lon as number };
+            await showPanel({ kind: "weather", data: w ?? { ok: false } });
+          }
+        }
+        if (st.map3d) {
+          if (st.map3d === "hide") await showPanel(null);
+          else {
+            const m3 = st.map3d === "here" ? (lastPlace.current ? { ...lastPlace.current } : null) : st.map3d;
+            if (m3) {
+              const q = new URLSearchParams({ lat: String(m3.lat), lon: String(m3.lon), zoom: String((m3 as Map3D).zoom ?? 15.5),
+                pitch: String((m3 as Map3D).pitch ?? 62), bearing: String((m3 as Map3D).bearing ?? -25), mode: (m3 as Map3D).mode ?? "satellite" });
+              await showPanel({ kind: "map3d", src: `/api/v1/app/map3d?${q.toString()}` });
+            } else report(s.seq, "note", "map3d: no place yet (show the weather first)");
+          }
+        }
         if (st.gesture) await gesture(st.gesture);
         let armKey: string | null = null;
         if (st.desk && st.desk.x !== undefined && st.desk.y !== undefined && ["move", "click"].includes(st.desk.do))
@@ -269,11 +313,21 @@ export function useWidgetGuide() {
         if (armKey) eyeArms.get("widget")?.release(armKey as "up");
         if (st.look === undefined) setGaze(undefined);
         setCaption("");
+        if (L.touched > 0 && performance.now() - L.warnedAt > 8000) {       // someone tried the mouse
+          L.touched = 0; L.warnedAt = performance.now();
+          await gesture("shake");
+          const line = "Hey, please don't touch the mouse while I'm showing you. I've got it.";
+          setCaption(line);
+          await speakLine(line, { emotion: "calm", silent: s.silent });
+          setCaption("");
+        } else L.touched = 0;
       }
       if (!L.stop) report(s.seq, "done", "", s.steps.length);
     } catch (e) {
       report(s.seq, "error", String(e).slice(0, 200));
     } finally {
+      window.clearInterval(L.lockTimer);
+      try { await invoke("desk_lock", { ttlMs: 0 }); } catch { /* fine */ }   // his mouse back, always
       setCaption("");
       setGaze(undefined);
       try { if (panelRef.current) await showPanel(null); } catch { /* fine */ }

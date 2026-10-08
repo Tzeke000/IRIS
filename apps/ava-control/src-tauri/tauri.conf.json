@@ -16,7 +16,8 @@
         "title": "Iris",
         "width": 1320,
         "height": 880,
-        "resizable": true
+        "resizable": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required"
       },
       {
         "label": "widget",
@@ -31,7 +32,8 @@
         "skipTaskbar": true,
         "visible": false,
         "backgroundColor": "#00000000",
-        "shadow": false
+        "shadow": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required"
       }
     ],
     "security": {

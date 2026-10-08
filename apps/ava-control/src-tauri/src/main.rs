@@ -523,6 +523,102 @@ foreach ($w in $global:wins) {
         .map_err(|e| format!("desk windows {mode}: {e}"))
 }
 
+// ─────────────────────────────────────────────────────────────── mouse LOCK (2026-10-08)
+// Zeke: "when you're in the widget make sure the person doesn't have control of the mouse — I was able to move it
+// and stopped you showing off scrolling". A low-level mouse hook swallows PHYSICAL mouse input (moves, clicks,
+// wheel) while the lock is on; my own enigo moves arrive flagged LLMHF_INJECTED and pass. The lock EXPIRES on its
+// own (the tour refreshes it every step), so a crashed tour can never leave his mouse dead. Ctrl+Alt+Del and the
+// keyboard always still work.
+#[cfg(windows)]
+mod mouselock {
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, GetMessageW, SetWindowsHookExW, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_MOUSE_LL,
+        WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+    };
+
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    static UNTIL_MS: AtomicI64 = AtomicI64::new(0);
+    pub static CLICKS: AtomicU32 = AtomicU32::new(0);
+    pub static MOVES: AtomicU32 = AtomicU32::new(0);
+
+    fn now_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0) }
+    pub fn locked() -> bool { now_ms() < UNTIL_MS.load(Ordering::Relaxed) }
+
+    unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code >= 0 && locked() {
+            let info = &*(lparam as *const MSLLHOOKSTRUCT);
+            if info.flags & LLMHF_INJECTED == 0 {
+                let m = wparam as u32;
+                if m == WM_MOUSEMOVE { MOVES.fetch_add(1, Ordering::Relaxed); }
+                else if m == WM_LBUTTONDOWN || m == WM_RBUTTONDOWN || m == WM_MBUTTONDOWN || m == WM_MOUSEWHEEL {
+                    CLICKS.fetch_add(1, Ordering::Relaxed);
+                }
+                return 1;                                   // swallowed: the person's mouse does nothing
+            }
+        }
+        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    }
+
+    pub fn set(ttl_ms: i64) {
+        UNTIL_MS.store(if ttl_ms > 0 { now_ms() + ttl_ms.min(120_000) } else { 0 }, Ordering::Relaxed);
+        if ttl_ms > 0 && !STARTED.swap(true, Ordering::SeqCst) {
+            std::thread::spawn(|| unsafe {
+                let h = SetWindowsHookExW(WH_MOUSE_LL, Some(hook), GetModuleHandleW(std::ptr::null()), 0);
+                if h.is_null() { STARTED.store(false, Ordering::SeqCst); return; }
+                let mut msg: MSG = std::mem::zeroed();
+                while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {}
+            });
+        }
+    }
+}
+
+/// Lock the person's mouse for `ttl_ms` (0 = unlock). Returns (clicks, moves) swallowed since the last call.
+#[tauri::command]
+fn desk_lock(ttl_ms: i64) -> (u32, u32) {
+    #[cfg(windows)]
+    {
+        mouselock::set(ttl_ms);
+        use std::sync::atomic::Ordering;
+        return (mouselock::CLICKS.swap(0, Ordering::Relaxed), mouselock::MOVES.swap(0, Ordering::Relaxed));
+    }
+    #[cfg(not(windows))]
+    { let _ = ttl_ms; (0, 0) }
+}
+
+/// Where my app's button sits on the taskbar (physical px x, y, w, h), via UI Automation — so the tour can end by
+/// clicking it like a person would. None if it isn't there.
+#[tauri::command]
+fn desk_find_taskbar(name: String) -> Result<Option<(i32, i32, i32, i32)>, String> {
+    #[cfg(windows)]
+    {
+        const PS: &str = r#"param($name)
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+$AE = [System.Windows.Automation.AutomationElement]; $TS = [System.Windows.Automation.TreeScope]
+$tray = $AE::RootElement.FindFirst($TS::Children, (New-Object System.Windows.Automation.PropertyCondition($AE::ClassNameProperty, 'Shell_TrayWnd')))
+if (-not $tray) { exit 2 }
+$btns = $tray.FindAll($TS::Descendants, (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)))
+foreach ($b in $btns) { $n = $b.Current.Name
+  if ($n -eq $name -or $n -like "$name - *") { $r = $b.Current.BoundingRectangle; "{0},{1},{2},{3}" -f [int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height; exit 0 } }
+exit 3
+"#;
+        let tmp = std::env::var("TEMP").unwrap_or_else(|_| r"C:\Windows\Temp".into());
+        let script = format!(r"{tmp}\iris_taskbar_find.ps1");
+        std::fs::write(&script, PS).map_err(|e| format!("could not write helper: {e}"))?;
+        let out = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script.as_str(), name.as_str()])
+            .quiet().output().map_err(|e| format!("{e}"))?;
+        let s = String::from_utf8_lossy(&out.stdout);
+        let v: Vec<i32> = s.trim().split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        return Ok(if v.len() == 4 { Some((v[0], v[1], v[2], v[3])) } else { None });
+    }
+    #[cfg(not(windows))]
+    { let _ = name; Ok(None) }
+}
+
 /// Start me ON THE SERVER (Zeke 2026-10-07: buttons in the app "so that I won't even have to log
 /// into Zorin"). mode = cli | opus | fable. Runs scripts/server/iris_start_detached.sh over SSH:
 /// the ONE-OF-ME gate decides first and its verdict text comes back to the panel either way.
@@ -562,7 +658,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![server_vms, server_vm_power, server_reach, server_open, server_close, server_start_iris,
-            desk_cursor, desk_move, desk_click, desk_scroll, desk_type, desk_keys, desk_open, desk_close_new, desk_snap, desk_place])
+            desk_cursor, desk_move, desk_click, desk_scroll, desk_type, desk_keys, desk_open, desk_close_new, desk_snap, desk_place, desk_lock, desk_find_taskbar])
         .build(tauri::generate_context!())
         .expect("error while building Iris Control")
         .run(|app, event| {
