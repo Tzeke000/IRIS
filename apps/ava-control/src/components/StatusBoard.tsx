@@ -109,8 +109,8 @@ export function StatusTopBar({ sb, mood, moodSub, moodColor }: {
   ];
   const right = [
     <Chip key="ram" k="RAM" v={b?.ram ? `${fmt(b.ram.used_gb, 1)}/${fmt(b.ram.total_gb, 0)} GB` : "—"} dim={dim} title={why} />,
-    <Chip key="gpu" k="GPU" v={g ? `${fmt(g.util_pct, 0, "%")}` : "—"}
-      sub={g ? `${fmt(g.mem_used_mb / 1024, 1)}/${fmt(g.mem_total_mb / 1024, 0)} GB · ${fmt(g.temp_c, 0, "°C")}` : undefined}
+    <Chip key="gpu" k="GPU" v={g ? `${fmt(g.util_pct, 0, "%")} busy` : "—"}
+      sub={g ? `VRAM ${fmt(g.mem_used_mb / 1024, 1)}/${fmt(g.mem_total_mb / 1024, 0)} GB · ${fmt(g.temp_c, 0, "°C")}` : undefined}
       dim={dim} title={why ?? g?.name} />,
     <Chip key="ssd" k="SSD" v={b?.disk ? `${fmt(b.disk.used_gb, 0)}/${fmt(b.disk.total_gb, 0)} GB` : "—"}
       sub={b?.disk ? `R ${rate(b.disk.read_mb_s)} · W ${rate(b.disk.write_mb_s)} MB/s` : undefined} dim={dim} title={why} />,
@@ -165,7 +165,8 @@ export function StatusCorner({ sb }: { sb: ReturnType<typeof useStatusBoard> }) 
       {links.map(([k, l]) => (
         <div key={k} className="sb-row" title={`${l.detail}${l.checked_ts ? ` · checked ${ago(l.age_s)}` : ""}`}>
           <Dot ok={stale ? null : l.ok} />{l.label}
-          {!stale && l.ok === false ? <span className="sb-why"> · {l.detail.slice(0, 60)}</span> : null}
+          {!stale && (l.ok === false || (l.ok === null && l.detail.startsWith("inactive because")))
+            ? <span className="sb-why"> · {l.detail.slice(0, 60)}</span> : null}
         </div>
       ))}
       <button type="button" className="btn primary sb-console" onClick={() => void openConsole()}>Open my console</button>
