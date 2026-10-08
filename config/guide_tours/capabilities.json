@@ -26,6 +26,10 @@
     "say": "Here I am! This little eye is me too. I float on top of everything, so I'm always nearby."
    },
    {
+    "approach": true,
+    "say": "And when I really want your attention, I can come right up close."
+   },
+   {
     "desk": {
      "do": "circle",
      "r": 170,

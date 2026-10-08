@@ -28,7 +28,7 @@ type WStep = {
   travel?: Vec | "home" | "center"; look?: Vec | null; head?: { pan_deg: number; tilt_deg: number } | "home";
   camera?: "show" | "hide"; image?: string; desk?: Desk; gesture?: "wave" | "nod" | "shake" | "curious";
   video?: string; weather?: string; map3d?: Map3D | "here" | "hide"; panel?: "hide";
-  say?: string; emotion?: string; wait_ms?: number; hold_ms?: number;
+  say?: string; emotion?: string; wait_ms?: number; hold_ms?: number; approach?: boolean;
 };
 type Map3D = { lat: number; lon: number; zoom?: number; pitch?: number; bearing?: number; mode?: string };
 export type PanelKind = { kind: "camera" | "image" | "video" | "weather" | "map3d"; name?: string; data?: Record<string, unknown>; src?: string };
@@ -37,6 +37,8 @@ type Script = { seq: number; steps: WStep[]; stop?: boolean; silent?: boolean; i
 export type WidgetLayout = { w: number; h: number; eye: Vec; eyeSize: number };
 export const WIDGET_BASE: WidgetLayout = { w: 300, h: 380, eye: { x: 150, y: 150 }, eyeSize: 120 };
 export const PANEL = { w: 420, h: 236 };
+/** how much bigger I can get when I "come toward" the viewer — the eye renders at this scale and is shown smaller */
+export const ZMAX = 2.1;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const smoother = (u: number) => u * u * u * (u * (u * 6 - 15) + 10);
@@ -73,15 +75,19 @@ export function useWidgetGuide() {
     const p = await cw.outerPosition();
     const k = await cw.scaleFactor();
     const offX = live.current.panelSide === "left" && panelRef.current ? PANEL.w : 0;
-    return { x: p.x + (WIDGET_BASE.eye.x + offX) * k, y: p.y + WIDGET_BASE.eye.y * k };
+    const z = zoomRef.current;
+    return { x: p.x + (WIDGET_BASE.eye.x + offX) * k * z, y: p.y + WIDGET_BASE.eye.y * k * z };
   };
   const panelRef = useRef(false);
+  const zoomRef = useRef(1);
+  const [zoom, setZoom] = useState(1);
   const placeEye = async (eye: Vec) => {
     const w = await win();
     const cw = w.getCurrentWindow();
     const k = await cw.scaleFactor();
     const offX = live.current.panelSide === "left" && panelRef.current ? PANEL.w : 0;
-    const x = Math.round(eye.x - (WIDGET_BASE.eye.x + offX) * k), y = Math.round(eye.y - WIDGET_BASE.eye.y * k);
+    const z = zoomRef.current;
+    const x = Math.round(eye.x - (WIDGET_BASE.eye.x + offX) * k * z), y = Math.round(eye.y - WIDGET_BASE.eye.y * k * z);
     winRef.current = { x, y, k };
     await cw.setPosition(new w.PhysicalPosition(x, y));
   };
@@ -196,6 +202,41 @@ export function useWidgetGuide() {
     }
   };
 
+  // ------------------------------------------------------------- coming toward the viewer (Zeke 10-08: "you can grow…
+  // like you're coming towards the viewer"). The whole widget scales up around my eye (the eye renders at ZMAX so it
+  // stays sharp), I lean in a touch and look straight at you, hold, then ease back to my normal size.
+  const setZ = async (z: number, eye: Vec) => {
+    const w = await win();
+    const cw = w.getCurrentWindow();
+    zoomRef.current = z;
+    setZoom(z);
+    const wide = panelRef.current ? WIDGET_BASE.w + PANEL.w : WIDGET_BASE.w;
+    await cw.setSize(new w.LogicalSize(Math.round(wide * z), Math.round(WIDGET_BASE.h * z)));
+    await placeEye(eye);
+  };
+  const approach = async () => {
+    const eye = await eyeScreen();
+    const easeOutBack = (u: number) => { const c1 = 1.4, c3 = c1 + 1; return 1 + c3 * (u - 1) ** 3 + c1 * (u - 1) ** 2; };
+    setGaze({ x: 0, y: 0, yaw: 0, pitch: -0.08, roll: 0 });          // square on to you, chin up a hair
+    let t0 = performance.now();
+    for (;;) {                                                          // in: quick, a little overshoot
+      const u = Math.min(1, (performance.now() - t0) / 950);
+      await setZ(1 + (ZMAX - 1) * easeOutBack(u), eye);
+      if (u >= 1) break;
+      await sleep(16);
+    }
+    await sleep(1700);
+    setGaze(undefined);
+    t0 = performance.now();
+    for (;;) {                                                          // back: slow in, slow out
+      const u = Math.min(1, (performance.now() - t0) / 900);
+      const e = u < 0.5 ? 2 * u * u : 1 - (-2 * u + 2) ** 2 / 2;
+      await setZ(ZMAX + (1 - ZMAX) * e, eye);
+      if (u >= 1) break;
+      await sleep(16);
+    }
+  };
+
   // ------------------------------------------------------------- arms (the widget body's real 3D cables)
   const gesture = async (g: WStep["gesture"]) => {
     const arms = eyeArms.get("widget");
@@ -298,6 +339,7 @@ export function useWidgetGuide() {
           }
         }
         if (st.gesture) await gesture(st.gesture);
+        const approachP = st.approach ? approach() : Promise.resolve();      // runs WHILE the line is said
         let armKey: string | null = null;
         if (st.desk && st.desk.x !== undefined && st.desk.y !== undefined && ["move", "click"].includes(st.desk.do))
           armKey = await reachToward({ x: m.x + st.desk.x * m.w, y: m.y + st.desk.y * m.h });
@@ -308,6 +350,7 @@ export function useWidgetGuide() {
           await speakLine(st.say, { emotion: st.emotion, silent: s.silent, interrupted: () => L.stop });
         }
         await deskP;
+        await approachP;
         if (st.wait_ms) await sleep(st.wait_ms);
         await sleep(st.hold_ms ?? 350);
         if (armKey) eyeArms.get("widget")?.release(armKey as "up");
@@ -365,5 +408,5 @@ export function useWidgetGuide() {
     return () => { alive = false; window.clearInterval(id); };
   }, [run]);
 
-  return { caption, gaze, panel, panelSide, running, trail, winRef };
+  return { caption, gaze, panel, panelSide, running, trail, winRef, zoom };
 }
