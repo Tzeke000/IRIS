@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import base64
+import json
 import os
 import sys
 import threading
@@ -123,10 +124,40 @@ def _foreign_origin(origin: str | None) -> bool:
     return bool(origin) and origin.rstrip("/") not in _APP_ORIGINS
 
 
+# Host allow-list (hardening 10-07): blocks DNS rebinding — a web page on the tower whose domain
+# re-resolves to this machine would otherwise read GETs (camera frames, chat, memories) because a
+# same-origin GET carries no Origin header. Allowed: loopback + IRIS_ORB_ALLOWED_HOSTS (comma list
+# in ~/.config/iris/stack.env, kept out of the repo). Unset => no host check (fail-open, logged once).
+_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]"} | {
+    h.strip().lower() for h in os.environ.get("IRIS_ORB_ALLOWED_HOSTS", "").split(",") if h.strip()}
+_HOST_CHECK = bool(os.environ.get("IRIS_ORB_ALLOWED_HOSTS", "").strip())
+if not _HOST_CHECK:
+    print("[orb_http] IRIS_ORB_ALLOWED_HOSTS unset - Host header NOT checked", file=sys.stderr, flush=True)
+
+
+def _host_ok(host: str | None) -> bool:
+    if not _HOST_CHECK:
+        return True
+    h = (host or "").strip().lower()
+    if h.startswith("["):
+        h = h.split("]")[0] + "]"
+    else:
+        h = h.split(":")[0]
+    return h in _ALLOWED_HOSTS
+
+
 @app.middleware("http")
 async def _origin_guard(request, call_next):
+    if not _host_ok(request.headers.get("host")):
+        return JSONResponse({"ok": False, "error": "host not allowed"}, status_code=421)
     if request.method not in ("GET", "HEAD", "OPTIONS") and _foreign_origin(request.headers.get("origin")):
         return JSONResponse({"ok": False, "error": "origin not allowed"}, status_code=403)
+    # body-size cap (hardening 10-07): nothing the app sends is near 1 MB
+    try:
+        if int(request.headers.get("content-length") or 0) > 1_000_000:
+            return JSONResponse({"ok": False, "error": "request too large"}, status_code=413)
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "bad content-length"}, status_code=400)
     return await call_next(request)
 
 
@@ -684,7 +715,7 @@ def voice_input_state() -> dict:
 
 
 @app.post("/api/v1/voice_input/toggle")
-async def voice_input_toggle(payload: dict = Body(default={})) -> dict:
+def voice_input_toggle(payload: dict = Body(default={})) -> dict:
     """Set (payload {"muted": bool}) or flip (empty payload) the ear mute."""
     want = payload.get("muted") if isinstance(payload, dict) else None
     muted = (not _voice_input_muted()) if want is None else bool(want)
@@ -728,7 +759,7 @@ def identity_proposals() -> dict:
 
 
 @app.post("/api/v1/identity/proposals/approve")
-async def identity_proposals_approve(payload: dict = Body(default={})) -> dict:
+def identity_proposals_approve(payload: dict = Body(default={})) -> dict:
     """Per birth-ethics decision (D1 gated last): approve does NOT execute
     a write to ava_core/IDENTITY.md or SOUL.md. Records the approval
     intent to state/identity_proposals.jsonl with approved=True. Future
@@ -869,7 +900,7 @@ def vision_latest_frame() -> Response:
 
 # Tier 4 — control buttons. Most delegate to the live engines.
 @app.post("/api/v1/tts/toggle")
-async def tts_toggle() -> dict:
+def tts_toggle() -> dict:
     # 2026-07-22 fix: this used to flip only "_tts_enabled" (underscore) while
     # every auto-speak consumer (question_engine, proactive, scheduler, heartbeat)
     # reads "tts_enabled" — the orb button never actually silenced anything.
@@ -881,7 +912,7 @@ async def tts_toggle() -> dict:
 
 
 @app.post("/api/v1/tts/speak")
-async def tts_speak(payload: dict | None = None) -> dict:
+def tts_speak(payload: dict | None = None) -> dict:
     text = (payload or {}).get("text", "")
     if not text or _tts_ref is None:
         return {"ok": False, "error": "no text or tts unavailable"}
@@ -893,7 +924,7 @@ async def tts_speak(payload: dict | None = None) -> dict:
 
 
 @app.post("/api/v1/stt/listen")
-async def stt_listen() -> dict:
+def stt_listen() -> dict:
     return {"ok": True, "listening": True}
 
 
@@ -924,7 +955,7 @@ def stt_result() -> dict:
 
 
 @app.post("/api/v1/shutdown")
-async def shutdown() -> dict:
+def shutdown() -> dict:
     """Run brain.shutdown_ritual to compose a goodbye + handoff pickup
     note, save to state/pickup_note.json for next-session restore.
     Doesn't actually kill iris_runtime — that's CC's call. This is the
@@ -976,7 +1007,7 @@ def memory_mem0() -> dict:
 
 
 @app.post("/api/v1/memory/mem0/search")
-async def memory_mem0_search(payload: dict = Body(default={})) -> dict:
+def memory_mem0_search(payload: dict = Body(default={})) -> dict:
     """Phase 18: prefer semantic search via ChromaDB. Falls back to substring
     on iris_memory.jsonl if semantic isn't ready."""
     q = str(payload.get("query") or "").strip()
@@ -1003,7 +1034,7 @@ async def memory_mem0_search(payload: dict = Body(default={})) -> dict:
 
 
 @app.delete("/api/v1/memory/mem0/{entry_id}")
-async def memory_mem0_delete(entry_id: str) -> dict:
+def memory_mem0_delete(entry_id: str) -> dict:
     mem = _g.get("_iris_memory")
     if mem is None:
         return {"ok": False, "error": "memory not available"}
@@ -1064,7 +1095,7 @@ def plans_list() -> dict:
 
 
 @app.post("/api/v1/plans/create")
-async def plans_create(payload: dict = Body(default={})) -> dict:
+def plans_create(payload: dict = Body(default={})) -> dict:
     """Create a plan. goal is required. context is optional. Plan creation
     asks Iris (via iris_llm) to decompose into 3-6 steps; on Iris timeout
     falls back to a single-step plan."""
@@ -1082,7 +1113,7 @@ async def plans_create(payload: dict = Body(default={})) -> dict:
 
 
 @app.post("/api/v1/plans/{plan_id}/pause")
-async def plans_pause(plan_id: str) -> dict:
+def plans_pause(plan_id: str) -> dict:
     try:
         from brain.planner import get_planner
         planner = get_planner(_root)
@@ -1092,7 +1123,7 @@ async def plans_pause(plan_id: str) -> dict:
 
 
 @app.post("/api/v1/plans/{plan_id}/resume")
-async def plans_resume(plan_id: str) -> dict:
+def plans_resume(plan_id: str) -> dict:
     try:
         from brain.planner import get_planner
         planner = get_planner(_root)
@@ -1300,7 +1331,7 @@ def profiles_list() -> dict:
 
 
 @app.post("/api/v1/profile/{person_id}/refresh")
-async def profile_refresh(person_id: str) -> dict:
+def profile_refresh(person_id: str) -> dict:
     """Reload a person profile from disk and re-trigger insightface
     update_known_faces so any new enrollment photos take effect without
     a full restart."""
@@ -1378,7 +1409,7 @@ def emil_status() -> dict:
 
 
 @app.post("/api/v1/emil/ping")
-async def emil_ping() -> dict:
+def emil_ping() -> dict:
     try:
         br = _emil_bridge()
         res = br.ping_emil()
@@ -1389,7 +1420,7 @@ async def emil_ping() -> dict:
 
 
 @app.post("/api/v1/emil/send")
-async def emil_send(payload: dict = Body(default={})) -> dict:
+def emil_send(payload: dict = Body(default={})) -> dict:
     try:
         br = _emil_bridge()
         if not _emil_identity_ok(br):
@@ -1433,7 +1464,7 @@ def ui_tab() -> dict:
 
 
 @app.post("/api/v1/ui/tab")
-async def ui_tab_set(payload: dict = Body(default={})) -> dict:
+def ui_tab_set(payload: dict = Body(default={})) -> dict:
     """Iris's setter — call when she wants the orb to switch tab."""
     tab = str(payload.get("tab") or "").strip()
     p = _root / "state" / "orb_active_tab.txt"
@@ -1482,7 +1513,7 @@ def images_list() -> dict:
 
 
 @app.post("/api/v1/images/generate")
-async def images_generate(payload: dict = Body(default={})) -> dict:
+def images_generate(payload: dict = Body(default={})) -> dict:
     """Try local ComfyUI first, then Pollinations.ai cloud fallback. Returns
     saved path on success."""
     prompt = str(payload.get("prompt") or "").strip()
@@ -1505,7 +1536,7 @@ async def images_generate(payload: dict = Body(default={})) -> dict:
 
 
 @app.delete("/api/v1/images/{filename}")
-async def images_delete(filename: str) -> dict:
+def images_delete(filename: str) -> dict:
     """Delete a generated image. Path-traversal protected — only filename, no /."""
     if "/" in filename or "\\" in filename or ".." in filename:
         return {"ok": False, "error": "invalid filename"}
@@ -1559,7 +1590,7 @@ def workbench_proposals() -> dict:
 
 
 @app.post("/api/v1/workbench/approve")
-async def workbench_approve(payload: dict = Body(default={})) -> dict:
+def workbench_approve(payload: dict = Body(default={})) -> dict:
     """Approve a proposal. Currently logs the approval — full execute path
     via brain/workbench_execute is heavy (file modifications + rollback)
     and Iris-side wiring is deferred until needed."""
@@ -1573,14 +1604,14 @@ async def workbench_approve(payload: dict = Body(default={})) -> dict:
 
 
 @app.post("/api/v1/workbench/reject")
-async def workbench_reject(payload: dict = Body(default={})) -> dict:
+def workbench_reject(payload: dict = Body(default={})) -> dict:
     proposal_id = str(payload.get("proposal_id") or "").strip()
     print(f"[workbench] rejection logged for proposal {proposal_id}")
     return {"ok": True, "message": "rejected", "proposal_id": proposal_id}
 
 
 @app.post("/api/v1/routing/override")
-async def routing_override(payload: dict = Body(default={})) -> dict:
+def routing_override(payload: dict = Body(default={})) -> dict:
     """Ava-era model-routing override. Not applicable for Iris — cognition
     is Claude managed by Anthropic. Stub responds politely."""
     return {
@@ -1590,7 +1621,7 @@ async def routing_override(payload: dict = Body(default={})) -> dict:
 
 
 @app.post("/api/v1/camera/calibrate_gaze")
-async def camera_calibrate_gaze() -> dict:
+def camera_calibrate_gaze() -> dict:
     """Run the eye_tracker's 9-point calibration. Pops up a tkinter window;
     user looks at each point. Saves to state/gaze_calibration.json.
 
@@ -1621,10 +1652,10 @@ async def camera_calibrate_gaze() -> dict:
 
 
 @app.post("/api/v1/clap/calibrate")
-async def clap_calibrate(payload: dict = Body(default={})) -> dict:
+def clap_calibrate(payload: dict = Body(default={})) -> dict:
     """Run a 2s ambient noise calibration and persist threshold to
     state/clap_calibration.json. Returns measured ambient + new threshold."""
-    duration = float(payload.get("duration_seconds", 2.0))
+    duration = max(0.5, min(10.0, float(payload.get("duration_seconds", 2.0))))   # clamp (hardening 10-07)
     try:
         from brain.clap_detector import calibrate_clap_threshold
         result = calibrate_clap_threshold(_g, duration_seconds=duration)
@@ -1638,11 +1669,20 @@ async def clap_calibrate(payload: dict = Body(default={})) -> dict:
 # stubs, so the app's Start Onboarding button did nothing. Pattern ported from
 # operator_server (the old avaagent-era server that actually wired it).
 @app.post("/api/v1/onboarding/start")
-async def onboarding_start(payload: dict = Body(default={})) -> dict:
+def onboarding_start(payload: dict = Body(default={})) -> dict:
     try:
         import uuid as _uuid
         from brain.person_onboarding import start_onboarding, get_onboarding_status
         person_id = str(payload.get("person_id") or f"person_{_uuid.uuid4().hex[:8]}")
+        # 2026-10-07 hardening: person_id becomes a FILE PATH (profiles/, faces/) and an identity —
+        # "zeke" would reset his trust + enroll whoever is on camera as him; "../.." writes outside
+        # the repo. New people only, safe characters only.
+        import re as _re
+        if not _re.fullmatch(r"[a-z0-9_]{1,40}", person_id):
+            return {"ok": False, "error": "person_id must be 1-40 chars of a-z, 0-9, _"}
+        if ((_root / "profiles" / person_id).exists() or (_root / "profiles" / f"{person_id}.json").exists()
+                or (_root / "faces" / person_id).exists()):
+            return {"ok": False, "error": f"'{person_id}' already exists — onboarding only creates NEW people"}
         name_hint = str(payload.get("name") or "").strip() or None
         flow = start_onboarding(person_id, _root, name_hint=name_hint)
         _g["_onboarding_flow"] = flow
@@ -1655,7 +1695,7 @@ async def onboarding_start(payload: dict = Body(default={})) -> dict:
 
 
 @app.post("/api/v1/onboarding/step")
-async def onboarding_step(payload: dict = Body(default={})) -> dict:
+def onboarding_step(payload: dict = Body(default={})) -> dict:
     try:
         from brain.person_onboarding import run_onboarding_step, get_onboarding_status
         user_input = str(payload.get("input") or "").strip()
@@ -1703,7 +1743,7 @@ def finetune_log() -> dict:
 
 
 @app.post("/api/v1/finetune/prepare")
-async def finetune_prepare() -> dict:
+def finetune_prepare() -> dict:
     try:
         mgr = _finetune_mgr()
         count = int(mgr.dataset_builder.build_dataset(person_id="zeke", min_turns=50))
@@ -1722,7 +1762,7 @@ async def finetune_prepare() -> dict:
 
 
 @app.post("/api/v1/finetune/start")
-async def finetune_start() -> dict:
+def finetune_start() -> dict:
     try:
         mgr = _finetune_mgr()
         pre = mgr.check_prerequisites()
@@ -1762,7 +1802,7 @@ def widget_position() -> dict:
 
 
 @app.post("/api/v1/widget/position")
-async def widget_position_set(payload: dict = Body(default={})) -> dict:
+def widget_position_set(payload: dict = Body(default={})) -> dict:
     try:
         import json as _j
         x = int(payload.get("x", 0))
@@ -1798,7 +1838,7 @@ def widget_body() -> dict:
 # so future inner-monologue / proactive logic can know whether the user is
 # actively watching or has tucked Iris away in the widget.
 @app.post("/api/v1/orb/window_state")
-async def orb_window_state(payload: dict = Body(default={})) -> dict:
+def orb_window_state(payload: dict = Body(default={})) -> dict:
     state = str(payload.get("state") or "").lower()  # "main" | "minimized" | "widget" | "hidden"
     _g["_orb_window_state"] = state
     _g["_orb_window_state_ts"] = time.time()
