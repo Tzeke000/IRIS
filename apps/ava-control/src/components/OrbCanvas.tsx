@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from "react";
+import CyborgEye from "./CyborgEye";
 import IrisBody, { type IrisBodyProps } from "./IrisBody";
 import * as THREE from "three";
 
@@ -857,11 +858,15 @@ const ClassicOrb = memo(OrbCanvasInner, (prev, next) => (
 // ── Body switch (2026-10-06): the iris is my body now; the classic orb stays one click away. ──
 // Stored in localStorage so the main window and the widget (same origin) agree, and a change
 // in one window re-renders the other live via the `storage` event.
-export type BodyStyle = "iris" | "classic";
-export const BODY_STYLE_KEY = "iris.bodyStyle";
+export type BodyStyle = "cyborg" | "iris" | "classic";
+// v2 key (2026-10-08): the 3D cyborg eye became the default, so an old stored "iris" must not pin the flat one.
+export const BODY_STYLE_KEY = "iris.bodyStyle.v2";
 export const BODY_STYLE_EVENT = "iris-body-style";
 export function readBodyStyle(): BodyStyle {
-  try { return localStorage.getItem(BODY_STYLE_KEY) === "classic" ? "classic" : "iris"; } catch { return "iris"; }
+  try {
+    const v = localStorage.getItem(BODY_STYLE_KEY);
+    return v === "classic" || v === "iris" ? v : "cyborg";
+  } catch { return "cyborg"; }
 }
 export function setBodyStyle(style: BodyStyle) {
   try { localStorage.setItem(BODY_STYLE_KEY, style); } catch { /* storage unavailable */ }
@@ -878,13 +883,15 @@ export function useBodyStyle(): BodyStyle {
   return style;
 }
 
-function OrbCanvas(props: IrisBodyProps) {
+function OrbCanvas(props: IrisBodyProps & { portsKey?: string }) {
   const style = useBodyStyle();
+  const { portsKey, ...rest } = props;
   if (style === "classic") {
-    const { gaze: _gaze, bodyScale: _bs, blinkTrigger: _bt, ...classic } = props;
+    const { gaze: _gaze, bodyScale: _bs, blinkTrigger: _bt, ...classic } = rest;
     return <ClassicOrb {...classic} />;
   }
-  return <IrisBody {...props} />;
+  if (style === "cyborg") return <CyborgEye {...rest} portsKey={portsKey} />;
+  return <IrisBody {...rest} />;
 }
 
 export default OrbCanvas;

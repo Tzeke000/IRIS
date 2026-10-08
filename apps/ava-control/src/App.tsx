@@ -2365,6 +2365,7 @@ export default function App() {
               emotionColor={effectiveOrbColor}
               state={shutdownInProgress ? "offline" : (orbPulseMode as any)}
               size={eyeSize}
+              portsKey="home"
               amplitude={ttsAmplitude}
               energy={moodEnergy}
               recenterTrigger={orbRecenterCounter}
@@ -3126,6 +3127,7 @@ export default function App() {
               <Section title="Body">
                 <p className="op-muted">How I look. The iris is my body; the classic orb is kept one click away.</p>
                 <div style={{ display: "flex", gap: 8 }}>
+                  <button type="button" className={bodyStyle === "cyborg" ? "btn primary" : "btn ghost"} onClick={() => setBodyStyle("cyborg")}>Cyborg eye</button>
                   <button type="button" className={bodyStyle === "iris" ? "btn primary" : "btn ghost"} onClick={() => setBodyStyle("iris")}>Iris</button>
                   <button type="button" className={bodyStyle === "classic" ? "btn primary" : "btn ghost"} onClick={() => setBodyStyle("classic")}>Classic orb</button>
                 </div>
