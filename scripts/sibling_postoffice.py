@@ -64,7 +64,7 @@ def _load_or_create_secret() -> str:
         except Exception:
             pass
         print(f"[postoffice] generated new shared secret at {SECRET_PATH}", file=sys.stderr)
-        print(f"[postoffice] secret: {token}", file=sys.stderr)
+        # (hardening 10-07: the secret itself is never printed - logs end up in journald)
         print(f"[postoffice] copy this to ~/.iris_sibling_secret on each sibling's machine.", file=sys.stderr)
         return token
     return SECRET_PATH.read_text(encoding="utf-8").strip()
@@ -197,7 +197,7 @@ def _check_secret(provided: str | None) -> None:
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="Iris sibling post-office")
+app = FastAPI(title="Iris sibling post-office", docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @app.post("/letter")
@@ -490,8 +490,19 @@ function renderLetter(l) {
   div.className = "letter " + cls;
   const meta = document.createElement("div");
   meta.className = "meta";
-  meta.innerHTML = `<span class="name ${nameCls}">${l.from}</span> → ${l.to || "all"} · ${fmtTime(l.ts)}` +
-    (l.mood_at_write ? ` · <em>${l.mood_at_write}</em>` : "");
+  // Every letter field is DATA, never HTML (hardening 10-07: from / to / mood went in via innerHTML,
+  // so a crafted letter could run script here and read the secret out of localStorage).
+  const nameSpan = document.createElement("span");
+  nameSpan.className = "name " + nameCls;
+  nameSpan.textContent = String(l.from ?? "");
+  meta.appendChild(nameSpan);
+  meta.appendChild(document.createTextNode(` → ${String(l.to || "all")} · ${fmtTime(l.ts)}`));
+  if (l.mood_at_write) {
+    meta.appendChild(document.createTextNode(" · "));
+    const em = document.createElement("em");
+    em.textContent = String(l.mood_at_write);
+    meta.appendChild(em);
+  }
   const body = document.createElement("div");
   body.className = "body";
   body.textContent = l.body;
