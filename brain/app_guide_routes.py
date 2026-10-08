@@ -11,6 +11,8 @@ brain.orb_http. The app polls the script; I write it with the `app_guide` tool.
   POST /api/v1/app/guide/say      {text, emotion?}              speak one sentence (the app times it to the
                                                                 arm motion); honours the voice-off flag
   POST /api/v1/app/guide/hush     {}                            cut the line I'm saying short (someone clicked)
+  POST /api/v1/app/guide/head     {pan_deg, tilt_deg}           turn my real head (PTZ) to an absolute bearing
+  GET  /api/v1/app/guide/media/<name>                           a picture from state/guide_media/ for the widget
 
 Same origin policy as the Jarvis routes: state-changing POSTs refuse a browser Origin that isn't the app's.
 """
@@ -59,11 +61,16 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
     def deny() -> JSONResponse:
         return JSONResponse({"ok": False, "error": "origin not allowed"}, status_code=403)
 
+    def _client_file(client: str) -> str:
+        c = "".join(ch for ch in client if ch.isalnum())[:20]
+        return "app_guide.json" if not c else f"app_guide.{c}.json"
+
     def guide_get(client: str = "") -> dict[str, Any]:
         # channels: the live app polls the default; my test pages poll ?client=<name> so tests never play on
-        # Zeke's real app window (10-08: a test tour pressed "Open my console" on whatever copy was open)
-        name = "app_guide.json" if not client else f"app_guide.{''.join(c for c in client if c.isalnum())[:20]}.json"
-        d = _read(st / name, {"seq": 0, "steps": []})
+        # Zeke's real app window (10-08: a test tour pressed "Open my console" on whatever copy was open).
+        # The widget polls ?client=widget.
+        d = _read(st / _client_file(client), {"seq": 0, "steps": []})
+        d = {k: v for k, v in d.items() if k not in ("then", "chained")} if isinstance(d, dict) else {"seq": 0, "steps": []}
         return {"ok": True, **d}
 
     async def guide_progress(request: Request):
@@ -77,6 +84,23 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
                "status": str(b.get("status") or "")[:40], "note": str(b.get("note") or "")[:300],
                "ts": time.time()}
         _write(st / "app_guide_progress.json", rec)
+        # Hand-off (10-08 "what I can do" tour): a script may carry `then` = {client, steps} — when it finishes,
+        # the next part goes to that channel (the main window minimizes itself, the widget carries on).
+        if rec["status"] == "done":
+            try:
+                src = _client_file(str(b.get("client") or ""))
+                cur = _read(st / src, {})
+                nxt = cur.get("then") if isinstance(cur, dict) else None
+                if isinstance(nxt, dict) and int(cur.get("seq") or -1) == rec["seq"] and not cur.get("chained"):
+                    cur["chained"] = True
+                    _write(st / src, cur)
+                    dst = _client_file(str(nxt.get("client") or ""))
+                    prev = _read(st / dst, {"seq": 0})
+                    _write(st / dst, {"seq": int(prev.get("seq") or 0) + 1, "steps": nxt.get("steps") or [],
+                                      "silent": bool(cur.get("silent")), "issued_ts": time.time(),
+                                      **({"then": nxt["then"]} if isinstance(nxt.get("then"), dict) else {})})
+            except Exception:  # noqa: BLE001
+                pass
         try:  # history, so a quick 'missing' between steps isn't lost (trimmed by the tool)
             with open(st / "app_guide_progress.jsonl", "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec) + "\n")
@@ -158,9 +182,41 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": repr(e)[:160]}
 
+    async def guide_head(request: Request):
+        """Turn my real head (the PTZ camera) for the tour: {pan_deg, tilt_deg} absolute bearing, or {home:true}."""
+        if not origin_ok(request.headers.get("origin")):
+            return deny()
+        if not rate_ok("guide_head", 60, 60):
+            return {"ok": False, "error": "slow down"}
+        try:
+            b = await request.json()
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "error": "bad json"}
+        try:
+            pan = max(-150.0, min(150.0, float(b.get("pan_deg", 0.0))))
+            tilt = max(-60.0, min(90.0, float(b.get("tilt_deg", 10.0))))
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "error": "pan_deg / tilt_deg must be numbers"}
+        try:
+            import asyncio
+            from tools.system.room_map_tool import _look
+            r = await asyncio.to_thread(_look, g, {"pan_deg": pan, "tilt_deg": tilt})
+            return {"ok": bool(r.get("ok")), "pan_deg": pan, "tilt_deg": tilt, "error": r.get("error")}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": repr(e)[:200]}
+
+    def guide_media(name: str):
+        """Pictures the widget shows during a tour (state/guide_media/<name>, png/jpg only)."""
+        from fastapi.responses import FileResponse, JSONResponse as _J
+        safe = "".join(ch for ch in name if ch.isalnum() or ch in "._-")[:80]
+        p = st / "guide_media" / safe
+        if not safe or safe != name or p.suffix.lower() not in (".png", ".jpg", ".jpeg") or not p.is_file():
+            return _J({"ok": False, "error": "no such picture"}, status_code=404)
+        return FileResponse(str(p))
+
     # This module owns these paths: drop older copies so a live re-install picks up edited handlers.
     mine = {"/api/v1/app/attention", "/api/v1/app/guide", "/api/v1/app/guide/progress", "/api/v1/app/guide/ui_map", "/api/v1/app/guide/say",
-            "/api/v1/app/guide/hush"}
+            "/api/v1/app/guide/hush", "/api/v1/app/guide/head", "/api/v1/app/guide/media/{name}"}
     try:
         app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", None) not in mine]
         existing = {e for e in existing if e.split(" ", 1)[-1] not in mine}
@@ -180,7 +236,9 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
                              ("POST", "/api/v1/app/guide/progress", guide_progress),
                              ("POST", "/api/v1/app/guide/ui_map", guide_ui_map),
                              ("POST", "/api/v1/app/guide/say", guide_say),
-                             ("POST", "/api/v1/app/guide/hush", guide_hush)):
+                             ("POST", "/api/v1/app/guide/hush", guide_hush),
+                             ("POST", "/api/v1/app/guide/head", guide_head),
+                             ("GET", "/api/v1/app/guide/media/{name}", guide_media)):
         if f"{method} {path}" in existing:
             continue
         app.add_api_route(path, fn, methods=[method])

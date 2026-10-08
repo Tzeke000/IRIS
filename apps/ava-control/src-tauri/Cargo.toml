@@ -13,6 +13,8 @@ tauri = { version = "2", features = [] }
 # stacking a new process. Without it the app piled up 9 orphan instances over
 # 4 days (2026-06-29 diagnosis). Must be registered as the FIRST plugin.
 tauri-plugin-single-instance = "2"
+# The guide's HANDS on the desktop (2026-10-08 "what I can do" tour): glide the mouse, click, type, scroll.
+enigo = "0.2"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

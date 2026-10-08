@@ -1,8 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Ava Control — window management and event capabilities",
-  "windows": ["main", "widget"],
+  "description": "Ava Control \u2014 window management and event capabilities",
+  "windows": [
+    "main",
+    "widget"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-show",
@@ -20,6 +23,14 @@
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "core:event:allow-emit",
-    "core:event:allow-emit-to"
+    "core:event:allow-emit-to",
+    "core:window:allow-set-ignore-cursor-events",
+    "core:window:allow-cursor-position",
+    "core:window:allow-primary-monitor",
+    "core:window:allow-current-monitor",
+    "core:window:allow-outer-position",
+    "core:window:allow-available-monitors",
+    "core:window:allow-scale-factor",
+    "core:window:allow-inner-size"
   ]
 }
