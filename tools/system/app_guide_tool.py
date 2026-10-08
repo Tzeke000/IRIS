@@ -28,7 +28,7 @@ actions:
           travel: {x,y}|"home"      glide the widget across the screen (fractions of the primary monitor)
           look:   {x,y}|null        point my gaze (-1..1)
           desk:   {do: move|circle|click|type|keys|scroll|open|snap|place|close_new, x,y,w,h (fractions), ms, r, text, combo,
-                   amount, app (chrome|notepad|calculator|explorer|url), arg (https url), pattern, button, double}
+                   amount (scroll: + = down), app (chrome|notepad|calculator|explorer|url), arg (https url), pattern, button, double}
           head:   {pan_deg, tilt_deg}|"home"   turn my REAL head (the PTZ camera)
           camera: show|hide         open my live camera view beside the widget eye
           image:  "<file in state/guide_media>"|"hide"   show a picture beside the eye

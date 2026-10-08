@@ -30,7 +30,8 @@
         "resizable": false,
         "skipTaskbar": true,
         "visible": false,
-        "backgroundColor": "#00000000"
+        "backgroundColor": "#00000000",
+        "shadow": false
       }
     ],
     "security": {
