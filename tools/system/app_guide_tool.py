@@ -9,6 +9,8 @@ data-iris="<id>").
 
 actions:
   ui_map                      what the app says is on screen: [{id, label, kind, tab, visible}] + active tab
+  (every action takes client?: a TEST channel — only app pages opened with ?guide_client=<name> listen;
+   omit it to play on the real app windows)
   run   {steps: [...], silent?} start a script (silent = captions only, never speak — tests / nobody home). Each step (all keys optional, run in this order):
           tab:   "<tab id>"         switch the panel tab first (the arm presses the tab button)
           move:  "home"|"center"|"<element id>"|{x,y}   where the eye floats to (fractions of the window)
@@ -112,23 +114,25 @@ def _app_guide(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
             return {"ok": False, "error": f"no tour {name!r} (action=tours lists them)"}
         params = {**params, "steps": t.get("steps"), "action": "run"}
         action = "run"
+    client = "".join(c for c in str(params.get("client") or "") if c.isalnum())[:20]
+    gfile = ST / (f"app_guide.{client}.json" if client else "app_guide.json")
     if action == "run":
         steps, errs = _clean_steps(params.get("steps"))
         if errs and not steps:
             return {"ok": False, "errors": errs}
-        cur = _read(ST / "app_guide.json", {"seq": 0})
+        cur = _read(gfile, {"seq": 0})
         seq = int(cur.get("seq") or 0) + 1
-        _write(ST / "app_guide.json", {"seq": seq, "issued_ts": time.time(), "steps": steps,
+        _write(gfile, {"seq": seq, "issued_ts": time.time(), "steps": steps,
                                        "silent": bool(params.get("silent"))})
         return {"ok": True, "seq": seq, "n_steps": len(steps), "warnings": errs,
                 "note": "the app picks this up within ~0.5 s; check action=status for progress"}
     if action == "stop":
-        cur = _read(ST / "app_guide.json", {"seq": 0})
+        cur = _read(gfile, {"seq": 0})
         seq = int(cur.get("seq") or 0) + 1
-        _write(ST / "app_guide.json", {"seq": seq, "issued_ts": time.time(), "steps": [], "stop": True})
+        _write(gfile, {"seq": seq, "issued_ts": time.time(), "steps": [], "stop": True})
         return {"ok": True, "seq": seq}
     if action == "status":
-        cur = _read(ST / "app_guide.json", {"seq": 0, "steps": []})
+        cur = _read(gfile, {"seq": 0, "steps": []})
         prog = _read(ST / "app_guide_progress.json", None)
         hist = []
         try:

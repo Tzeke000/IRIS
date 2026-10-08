@@ -29,6 +29,9 @@ export type GuideOverlayProps = {
   onFloatingChange: (floating: boolean) => void;
 };
 
+// test pages open the app with ?guide_client=<name> and listen ONLY to that channel; the real app listens to
+// the default channel. So my test tours never play on Zeke's live window.
+const GUIDE_CLIENT = (() => { try { return new URLSearchParams(window.location.search).get("guide_client") || ""; } catch { return ""; } })();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const IRIS_FRAC = 0.546;          // iris radius / half canvas (IrisBody: 0.72 world of a 1.319 half-width)
 
@@ -355,7 +358,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
     let alive = true;
     const tick = async () => {
       try {
-        const s = await getJson<Script>("/api/v1/app/guide");
+        const s = await getJson<Script>(`/api/v1/app/guide${GUIDE_CLIENT ? `?client=${encodeURIComponent(GUIDE_CLIENT)}` : ""}`);
         const L = live.current;
         if (!alive || !s || typeof s.seq !== "number") return;
         if (L.seq < 0) { L.seq = s.seq; return; }                // never replay an old script at startup

@@ -58,8 +58,11 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
     def deny() -> JSONResponse:
         return JSONResponse({"ok": False, "error": "origin not allowed"}, status_code=403)
 
-    def guide_get() -> dict[str, Any]:
-        d = _read(st / "app_guide.json", {"seq": 0, "steps": []})
+    def guide_get(client: str = "") -> dict[str, Any]:
+        # channels: the live app polls the default; my test pages poll ?client=<name> so tests never play on
+        # Zeke's real app window (10-08: a test tour pressed "Open my console" on whatever copy was open)
+        name = "app_guide.json" if not client else f"app_guide.{''.join(c for c in client if c.isalnum())[:20]}.json"
+        d = _read(st / name, {"seq": 0, "steps": []})
         return {"ok": True, **d}
 
     async def guide_progress(request: Request):
