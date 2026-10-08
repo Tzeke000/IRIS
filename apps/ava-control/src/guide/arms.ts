@@ -171,7 +171,7 @@ export class Arm {
   tipDir(): Vec { return norm(sub(this.p[N - 1], this.p[N - 3])); }
 }
 
-export type ArmStyle = { light: string; copper: string; copperDark: string; scale: number; dpr: number };
+export type ArmStyle = { light: string; copper: string; copperDark: string; scale: number; dpr: number; glow?: boolean };
 
 /** Smooth path through the chain (midpoint quadratic). */
 function trace(ctx: CanvasRenderingContext2D, pts: Vec[]) {
@@ -221,7 +221,7 @@ export function drawArm(ctx: CanvasRenderingContext2D, arm: Arm, st: ArmStyle) {
     const lw = 2.6 * s;
     if (isLight) {
       ctx.shadowColor = st.light;
-      ctx.shadowBlur = 10 * s;
+      ctx.shadowBlur = st.glow === false ? 0 : 10 * s;     // blur is the expensive part on software canvases
       ctx.strokeStyle = st.light;
       ctx.lineWidth = lw;
       trace(ctx, pts);

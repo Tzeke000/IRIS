@@ -890,7 +890,9 @@ function OrbCanvas(props: IrisBodyProps & { portsKey?: string }) {
     const { gaze: _gaze, bodyScale: _bs, blinkTrigger: _bt, ...classic } = rest;
     return <ClassicOrb {...classic} />;
   }
-  if (style === "cyborg") return <CyborgEye {...rest} portsKey={portsKey} />;
+  let tooSlow = false;
+  try { tooSlow = Boolean(sessionStorage.getItem("iris.cy.tooSlow")); } catch { /* none */ }
+  if (style === "cyborg" && !tooSlow) return <CyborgEye {...rest} portsKey={portsKey} />;
   return <IrisBody {...rest} />;
 }
 

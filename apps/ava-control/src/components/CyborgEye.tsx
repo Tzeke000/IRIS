@@ -52,8 +52,20 @@ function CyborgEyeInner(props: CyborgEyeProps) {
   useEffect(() => {
     const container = mountRef.current;
     if (!container) return;
-    const dpr = Math.min(window.devicePixelRatio, 2);
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    let DBG = ""; try { DBG = localStorage.getItem("iris.cy.debug") || ""; } catch { /* none */ }
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
+    // Quality: software GL (no GPU, e.g. llvmpipe on a VM desktop) starts LOW; a frame-rate monitor steps
+    // down further at runtime and, as a last resort, hands the body back to the flat iris (Zeke 10-08: "1 frame a
+    // second… needs to be at least 30, 60 is better").
+    let rendererName = "";
+    try {
+      const gl = renderer.getContext();
+      const ext = gl.getExtension("WEBGL_debug_renderer_info");
+      rendererName = String(ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
+    } catch { /* unknown */ }
+    const software = /llvmpipe|swiftshader|softpipe|software|basic render/i.test(rendererName);
+    let quality: "high" | "low" = software || DBG.includes("low") ? "low" : "high";
+    const dpr = quality === "high" ? Math.min(window.devicePixelRatio, 2) : 1;
     renderer.setSize(size, size);
     renderer.setPixelRatio(dpr);
     renderer.setClearColor(0x000000, 0);
@@ -95,6 +107,19 @@ function CyborgEyeInner(props: CyborgEyeProps) {
       cornea: new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.02, transmission: 1, thickness: 0.05, ior: 1.4,
         iridescence: 0.35, iridescenceIOR: 1.38, iridescenceThicknessRange: [300, 420], transparent: true }),
     };
+    const lowCeramic = new THREE.MeshStandardMaterial({ color: 0xcfcfcb, roughness: 0.35, metalness: 0 });
+    const lowCornea = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.05, metalness: 0, transparent: true, opacity: 0.12 });
+    const applyQuality = () => {
+      if (quality !== "low") return;
+      renderer.setPixelRatio(1);
+      byName.Ceramic = lowCeramic; byName.Cornea = lowCornea;
+      ball.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        if (mesh.material === M.ceramic) mesh.material = lowCeramic;
+        if (mesh.material === M.cornea) mesh.material = lowCornea;
+      });
+    };
     const byName: Record<string, THREE.Material> = {
       Ceramic: M.ceramic, Gunmetal: M.gunmetal, CoreChannels: M.core, SeamGlow: M.seam, StripGlow: M.strip,
       ScrewSteel: M.screw, ScrewSocket: M.socket, Ink: M.ink, Etched: M.etched, Cornea: M.cornea,
@@ -129,11 +154,16 @@ function CyborgEyeInner(props: CyborgEyeProps) {
           mesh.material = m;
         }
       });
+      if (DBG.includes("notrans")) M.cornea.transmission = 0;
+      if (DBG.includes("nobody")) body.visible = false;
       ball.add(body);
+      applyQuality();
+      fpsWatchFrom = performance.now() + 1500;   // let shaders compile before judging
     }).catch(() => { /* model missing: the disc alone still shows the iris */ });
 
     // gaze: the whole ball turns (critically damped); a little idle life
     const rot = { x: 0, y: 0, vx: 0, vy: 0 };
+    let fpsWatchFrom = Infinity, frames = 0, gaveUp = false;
     const v3 = new THREE.Vector3();
     let raf = 0, last = performance.now(), paused = false;
     const loop = (now: number) => {
@@ -170,9 +200,23 @@ function CyborgEyeInner(props: CyborgEyeProps) {
           irisTex.colorSpace = THREE.SRGBColorSpace;
           irisMat.map = irisTex; irisMat.needsUpdate = true;
         }
-        irisTex.needsUpdate = true;
+        if (!DBG.includes("notex")) irisTex.needsUpdate = true;
       }
       renderer.render(scene, camera);
+      // frame-rate guard: judge 2.5 s windows after the model is up
+      if (now > fpsWatchFrom && !gaveUp) {
+        frames++;
+        if (now - fpsWatchFrom > 2500) {
+          const fps = frames / ((now - fpsWatchFrom) / 1000);
+          frames = 0; fpsWatchFrom = now;
+          if (fps < 40 && quality === "high") { quality = "low"; applyQuality(); }
+          else if (fps < 24 && quality === "low") {
+            gaveUp = true;                         // this machine can't carry the 3D body: flat iris instead
+            try { sessionStorage.setItem("iris.cy.tooSlow", String(Math.round(fps))); } catch { /* none */ }
+            window.dispatchEvent(new Event("iris-body-style"));
+          }
+        }
+      }
       // publish the ports (page px) for the cable-arms
       if (portsKey && container) {
         const r = container.getBoundingClientRect();
