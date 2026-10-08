@@ -883,15 +883,50 @@ export function useBodyStyle(): BodyStyle {
   return style;
 }
 
+/** The failsafe FOR the failsafe (Zeke 10-08: "when everything is working and good again it goes back to the cyborg
+ *  eye"). While I'm on the flat iris because the 3D body was too slow (his game was hogging the GPU), measure how
+ *  smoothly the page runs; once it's been smooth for 10 s and a cool-down has passed (1, 2, 4… up to 15 min — so a
+ *  machine that really can't carry it doesn't flip back and forth), clear the flag and try the cyborg again. */
+function useCyborgRecovery(): boolean {
+  const read = () => { try { return sessionStorage.getItem("iris.cy.tooSlow"); } catch { return null; } };
+  const [flag, setFlag] = useState<string | null>(read);
+  useEffect(() => {
+    const sync = () => setFlag(read());
+    window.addEventListener(BODY_STYLE_EVENT, sync);
+    return () => window.removeEventListener(BODY_STYLE_EVENT, sync);
+  }, []);
+  useEffect(() => {
+    if (!flag) return;
+    let info = { ts: 0, n: 1 };
+    try { const j = JSON.parse(flag); if (j && typeof j === "object") info = { ts: Number(j.ts) || 0, n: Number(j.n) || 1 }; } catch { /* old plain value */ }
+    const cooldown = Math.min(15 * 60_000, 60_000 * 2 ** Math.max(0, info.n - 1));
+    let raf = 0, last = performance.now(), smoothSince = 0;
+    const loop = (now: number) => {
+      raf = requestAnimationFrame(loop);
+      const dt = now - last; last = now;
+      if (document.hidden || dt > 250) { smoothSince = 0; return; }   // paused/throttled ≠ evidence either way
+      if (dt > 1000 / 45) { smoothSince = 0; return; }                // a slow frame: not recovered yet
+      if (!smoothSince) smoothSince = now;
+      if (now - smoothSince > 10_000 && Date.now() - info.ts > cooldown) {
+        try { sessionStorage.removeItem("iris.cy.tooSlow"); } catch { /* none */ }
+        cancelAnimationFrame(raf);
+        window.dispatchEvent(new Event(BODY_STYLE_EVENT));
+      }
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [flag]);
+  return Boolean(flag);
+}
+
 function OrbCanvas(props: IrisBodyProps & { portsKey?: string }) {
   const style = useBodyStyle();
+  const tooSlow = useCyborgRecovery();
   const { portsKey, ...rest } = props;
   if (style === "classic") {
     const { gaze: _gaze, bodyScale: _bs, blinkTrigger: _bt, ...classic } = rest;
     return <ClassicOrb {...classic} />;
   }
-  let tooSlow = false;
-  try { tooSlow = Boolean(sessionStorage.getItem("iris.cy.tooSlow")); } catch { /* none */ }
   if (style === "cyborg" && !tooSlow) return <CyborgEye {...rest} portsKey={portsKey} />;
   return <IrisBody {...rest} />;
 }

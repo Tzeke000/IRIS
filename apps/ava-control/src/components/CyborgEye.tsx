@@ -174,7 +174,7 @@ function CyborgEyeInner(props: CyborgEyeProps) {
     const rot = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0 };
     let softUntil = 0;                                   // after a body turn, ease back (no snap)
     let prevState = "", avertX = 0, avertY = 0, avertUntil = 0;    // the BODY looks away to think now
-    let fpsWatchFrom = Infinity, frames = 0, gaveUp = false, badLow = 0, badHigh = 0;
+    let fpsWatchFrom = Infinity, frames = 0, gaveUp = false, badLow = 0, badHigh = 0, goodLow = 0;
     const v3 = new THREE.Vector3();
     let raf = 0, last = performance.now(), paused = false;
     const loop = (now: number) => {
@@ -244,16 +244,23 @@ function CyborgEyeInner(props: CyborgEyeProps) {
       // frame-rate guard: judge 2.5 s windows after the model is up
       if (now > fpsWatchFrom && !gaveUp) {
         frames++;
-        if (now - fpsWatchFrom > 2500) {
+        if (document.hidden) { frames = 0; fpsWatchFrom = now; }   // a hidden/minimized window isn't slow, it's paused
+        else if (now - fpsWatchFrom > 2500) {
           const fps = frames / ((now - fpsWatchFrom) / 1000);
           frames = 0; fpsWatchFrom = now;
           // two bad windows in a row before stepping down (a heavy tab or a screen recorder can dip one window)
           badHigh = fps < 30 && quality === "high" ? badHigh + 1 : 0;
           badLow = fps < 18 && quality === "low" ? badLow + 1 : 0;
+          // …and the way BACK UP (Zeke 10-08: "a failsafe for the failsafe"): low quality only because something else
+          // was hogging the GPU (his game) → once it runs smooth again, return to full quality
+          goodLow = fps >= 55 && quality === "low" && !software ? goodLow + 1 : 0;
           if (badHigh >= 2) { quality = "low"; applyQuality(); }
+          else if (goodLow >= 4) { quality = "high"; goodLow = 0; applyQuality(); }
           else if (badLow >= 3) {
-            gaveUp = true;                         // this machine can't carry the 3D body: flat iris instead
-            try { sessionStorage.setItem("iris.cy.tooSlow", String(Math.round(fps))); } catch { /* none */ }
+            gaveUp = true;                         // can't carry the 3D body right now: flat iris until it recovers
+            let n = 0;
+            try { n = Number(JSON.parse(sessionStorage.getItem("iris.cy.tooSlow") || "{}").n || 0); } catch { /* none */ }
+            try { sessionStorage.setItem("iris.cy.tooSlow", JSON.stringify({ fps: Math.round(fps), ts: Date.now(), n: n + 1 })); } catch { /* none */ }
             window.dispatchEvent(new Event("iris-body-style"));
           }
         }
