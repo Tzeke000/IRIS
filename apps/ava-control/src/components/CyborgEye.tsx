@@ -12,6 +12,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import IrisBody, { type IrisBodyProps } from "./IrisBody";
 import { deriveBlendColors, getCfg } from "./orbShared";
+import { EyeArms3D, controllerFor, eyeArms } from "./eyeArms3d";
 
 export type PortKey = "right" | "down" | "left" | "up";
 export type PortInfo = { x: number; y: number; nx: number; ny: number };
@@ -36,6 +37,8 @@ const IRIS_DISC_R = 0.57;
 const IRIS_FRAC = 0.546;         // IrisBody: iris radius / half canvas
 const BALL_FIT = 1.18;           // ball radius incl. bezel lip, for framing
 // port positions on the ball (Blender ±X, ±Z  →  three ±X, ±Y), at the collar tips
+// The canvas is bigger than the eye so the real 3D cables have room around the body (the layout box stays `size`).
+const CANVAS_K = 2.5;
 const PORT_POS: Record<PortKey, THREE.Vector3> = {
   right: new THREE.Vector3(1.08, 0, 0), left: new THREE.Vector3(-1.08, 0, 0),
   up: new THREE.Vector3(0, 1.08, 0), down: new THREE.Vector3(0, -1.08, 0),
@@ -65,8 +68,9 @@ function CyborgEyeInner(props: CyborgEyeProps) {
     } catch { /* unknown */ }
     const software = /llvmpipe|swiftshader|softpipe|software|basic render/i.test(rendererName);
     let quality: "high" | "low" = software || DBG.includes("low") ? "low" : "high";
-    const dpr = quality === "high" ? Math.min(window.devicePixelRatio, 2) : 1;
-    renderer.setSize(size, size);
+    const dpr = quality === "high" ? Math.min(window.devicePixelRatio, 1.25) : 1;   // the canvas is 2.5× the eye: keep the pixel count sane
+    const CS = Math.round(size * CANVAS_K);
+    renderer.setSize(CS, CS);
     renderer.setPixelRatio(dpr);
     renderer.setClearColor(0x000000, 0);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -85,12 +89,17 @@ function CyborgEyeInner(props: CyborgEyeProps) {
     rim.position.set(2.5, 1.5, -3);
     scene.add(rim);
 
-    const fov = 28;
+    const fov0 = 28;                                    // framing as if the canvas were `size`…
+    const fov = (2 * Math.atan(CANVAS_K * Math.tan((fov0 / 2) * Math.PI / 180))) * 180 / Math.PI;   // …widened for the cables
     const camera = new THREE.PerspectiveCamera(fov, 1, 0.1, 50);
-    camera.position.z = BALL_FIT / Math.sin((fov / 2) * Math.PI / 180) * 1.22;   // leave room around the ball
+    camera.position.z = BALL_FIT / Math.sin((fov0 / 2) * Math.PI / 180) * 1.22;   // leave room around the ball
 
     const ball = new THREE.Group();
     scene.add(ball);
+    const arms3d = new EyeArms3D();
+    scene.add(arms3d.group);
+    if (portsKey) eyeArms.set(portsKey, controllerFor(arms3d));
+    const ray = new THREE.Raycaster(), plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), ndc = new THREE.Vector2();
 
     // materials (rebuilt in three: the GLB carries names + the emblem texture; the Cycles node graphs don't port)
     const mood = { light: new THREE.Color("#6aa3ff"), base: new THREE.Color("#1a6cf5") };
@@ -212,6 +221,16 @@ function CyborgEyeInner(props: CyborgEyeProps) {
         }
         if (!DBG.includes("notex")) irisTex.needsUpdate = true;
       }
+      // page px → world (the z=0 plane through the ball centre), for the guide's arm targets
+      const cr = container.getBoundingClientRect();
+      arms3d.toWorld = (x: number, y: number) => {
+        ndc.set(((x - cr.left) / cr.width) * 2 - 1, -(((y - cr.top) / cr.height) * 2 - 1));
+        ray.setFromCamera(ndc, camera);
+        const hit = new THREE.Vector3();
+        return ray.ray.intersectPlane(plane, hit) ?? hit;
+      };
+      ball.updateMatrixWorld();
+      arms3d.step(now, ball, camera.position, mood.light, glow);
       renderer.render(scene, camera);
       // frame-rate guard: judge 2.5 s windows after the model is up
       if (now > fpsWatchFrom && !gaveUp) {
@@ -220,7 +239,7 @@ function CyborgEyeInner(props: CyborgEyeProps) {
           const fps = frames / ((now - fpsWatchFrom) / 1000);
           frames = 0; fpsWatchFrom = now;
           // two bad windows in a row before stepping down (a heavy tab or a screen recorder can dip one window)
-          badHigh = fps < 40 && quality === "high" ? badHigh + 1 : 0;
+          badHigh = fps < 30 && quality === "high" ? badHigh + 1 : 0;
           badLow = fps < 18 && quality === "low" ? badLow + 1 : 0;
           if (badHigh >= 2) { quality = "low"; applyQuality(); }
           else if (badLow >= 3) {
@@ -256,7 +275,8 @@ function CyborgEyeInner(props: CyborgEyeProps) {
       disposed = true;
       cancelAnimationFrame(raf);
       document.removeEventListener("visibilitychange", onVis);
-      if (portsKey) eyePorts.delete(portsKey);
+      if (portsKey) { eyePorts.delete(portsKey); eyeArms.delete(portsKey); }
+      arms3d.dispose();
       irisTex?.dispose();
       envTex.dispose(); pmrem.dispose();
       Object.values(M).forEach((m) => m.dispose());
@@ -274,7 +294,8 @@ function CyborgEyeInner(props: CyborgEyeProps) {
         style={{ position: "absolute", left: 0, top: 0, width: IRIS_TEX, height: IRIS_TEX, opacity: 0, pointerEvents: "none", overflow: "hidden" }}>
         <IrisBody {...irisProps} embedded shapeOverride={shapeOverride === "pointer" ? undefined : shapeOverride} size={IRIS_TEX} />
       </div>
-      <div ref={mountRef} style={{ position: "absolute", inset: 0 }} />
+      <div ref={mountRef} style={{ position: "absolute", left: -((CANVAS_K - 1) / 2) * size, top: -((CANVAS_K - 1) / 2) * size,
+        width: size * CANVAS_K, height: size * CANVAS_K, pointerEvents: "none" }} />
     </div>
   );
 }
