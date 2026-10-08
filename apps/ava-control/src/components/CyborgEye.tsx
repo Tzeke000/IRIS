@@ -163,7 +163,7 @@ function CyborgEyeInner(props: CyborgEyeProps) {
 
     // gaze: the whole ball turns (critically damped); a little idle life
     const rot = { x: 0, y: 0, vx: 0, vy: 0 };
-    let fpsWatchFrom = Infinity, frames = 0, gaveUp = false;
+    let fpsWatchFrom = Infinity, frames = 0, gaveUp = false, badLow = 0, badHigh = 0;
     const v3 = new THREE.Vector3();
     let raf = 0, last = performance.now(), paused = false;
     const loop = (now: number) => {
@@ -209,8 +209,11 @@ function CyborgEyeInner(props: CyborgEyeProps) {
         if (now - fpsWatchFrom > 2500) {
           const fps = frames / ((now - fpsWatchFrom) / 1000);
           frames = 0; fpsWatchFrom = now;
-          if (fps < 40 && quality === "high") { quality = "low"; applyQuality(); }
-          else if (fps < 24 && quality === "low") {
+          // two bad windows in a row before stepping down (a heavy tab or a screen recorder can dip one window)
+          badHigh = fps < 40 && quality === "high" ? badHigh + 1 : 0;
+          badLow = fps < 18 && quality === "low" ? badLow + 1 : 0;
+          if (badHigh >= 2) { quality = "low"; applyQuality(); }
+          else if (badLow >= 3) {
             gaveUp = true;                         // this machine can't carry the 3D body: flat iris instead
             try { sessionStorage.setItem("iris.cy.tooSlow", String(Math.round(fps))); } catch { /* none */ }
             window.dispatchEvent(new Event("iris-body-style"));
