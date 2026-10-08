@@ -135,13 +135,13 @@
    {
     "desk": {
      "do": "type",
-     "text": "Tzeke000 SoundCloud\n"
+     "text": "Tzeke000 Studios\n"
     },
     "say": "I'll search for Zeke's music.",
     "wait_ms": 1200
    },
    {
-    "say": "There it is. Let me open his SoundCloud page."
+    "say": "There it is. Let me open his website."
    },
    {
     "desk": {
@@ -153,9 +153,22 @@
    {
     "desk": {
      "do": "type",
-     "text": "soundcloud.com/producer-tzeke000\n"
+     "text": "tzeke000.github.io"
     },
-    "say": "Here we go.",
+    "say": "Here we go."
+   },
+   {
+    "desk": {
+     "do": "keys",
+     "combo": "delete"
+    },
+    "hold_ms": 150
+   },
+   {
+    "desk": {
+     "do": "keys",
+     "combo": "enter"
+    },
     "wait_ms": 2500
    },
    {
@@ -173,7 +186,7 @@
      "amount": 8,
      "ms": 380
     },
-    "say": "These are all Zeke's songs. He made every single one of them."
+    "say": "This is Tzeke000 Studios, Zeke's own music site. He made every song on it."
    },
    {
     "desk": {
