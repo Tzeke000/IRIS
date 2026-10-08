@@ -241,6 +241,9 @@ export function useWidgetGuide() {
         if (L.stop) { report(s.seq, "stopped", "", i); break; }
         const st = s.steps[i];
         report(s.seq, "step", st.say?.slice(0, 80) || st.desk?.do || "", i);
+        // window chores first (open / snapshot / place), so I fly up to a window that's already where it belongs
+        let deskDone = false;
+        if (st.desk && ["place", "snap"].includes(st.desk.do)) { await doDesk(s.seq, st.desk); deskDone = true; }
         if (st.travel) {
           const to = st.travel === "home" ? L.home! : st.travel === "center" ? { x: m.x + m.w / 2, y: m.y + m.h / 2 }
             : { x: m.x + st.travel.x * m.w, y: m.y + st.travel.y * m.h };
@@ -254,7 +257,7 @@ export function useWidgetGuide() {
         let armKey: string | null = null;
         if (st.desk && st.desk.x !== undefined && st.desk.y !== undefined && ["move", "click"].includes(st.desk.do))
           armKey = await reachToward({ x: m.x + st.desk.x * m.w, y: m.y + st.desk.y * m.h });
-        const deskP = st.desk ? doDesk(s.seq, st.desk) : Promise.resolve();
+        const deskP = st.desk && !deskDone ? doDesk(s.seq, st.desk) : Promise.resolve();
         if (st.say) {
           setCaption(st.say);
           report(s.seq, "say", st.say.slice(0, 200));
