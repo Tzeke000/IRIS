@@ -93,6 +93,17 @@ class _IrisPaths:
         return self.root / ".cache" / "huggingface"
 
     @property
+    def wirepod_sdk_info(self) -> Path:
+        """wire-pod's botSdkInfo.json (ESN/GUID). Windows tray install keeps it
+        under %APPDATA%; the Linux server builds wire-pod from source in
+        ~/wire-pod/chipper. First one that exists wins; Windows path otherwise."""
+        win = Path.home() / "AppData" / "Roaming" / "wire-pod" / "jdocs" / "botSdkInfo.json"
+        for p in (win, Path.home() / "wire-pod" / "chipper" / "jdocs" / "botSdkInfo.json"):
+            if p.exists():
+                return p
+        return win
+
+    @property
     def scratch_dir(self) -> Path:
         return self.root / "scratch"
 

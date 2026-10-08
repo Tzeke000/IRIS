@@ -721,7 +721,7 @@ def _interoception_loop() -> None:
             p = _sp.run(
                 [ssh_bin, "-i", str(_SSH_KEY),
                  "-o", "StrictHostKeyChecking=no",
-                 "-o", "UserKnownHostsFile=NUL",
+                 "-o", f"UserKnownHostsFile={os.devnull}",
                  "-o", "ConnectTimeout=8", "-o", "BatchMode=yes",
                  "-o", "HostKeyAlgorithms=+ssh-rsa",
                  "-o", "PubkeyAcceptedKeyTypes=+ssh-rsa",

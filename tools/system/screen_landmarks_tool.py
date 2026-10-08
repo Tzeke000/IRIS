@@ -35,7 +35,7 @@ from typing import Any
 from tools.tool_registry import register_tool
 from tools.system.widget_spatial_tool import point_widget_at
 
-LANDMARK_FILE = Path(r"D:\Wren-Companion\state\screen_landmarks.json")
+LANDMARK_FILE = Path(__file__).resolve().parents[2] / "state" / "screen_landmarks.json"
 
 
 def _load() -> dict[str, Any]:

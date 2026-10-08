@@ -176,7 +176,7 @@ def _send(obj: dict) -> None:
 
 def _default_reference() -> str:
     # Bundled reference: Kokoro Bella's phonetic-rich sample we used for testing
-    candidate = r"D:\Wren-Companion\.tmp\voice_test\kokoro_samples\reference.wav"
+    candidate = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".tmp", "voice_test", "kokoro_samples", "reference.wav")
     return candidate if os.path.exists(candidate) else ""
 
 

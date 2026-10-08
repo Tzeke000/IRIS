@@ -15,7 +15,7 @@ import json
 import sys
 from pathlib import Path
 
-REPO = Path(r"D:\Wren-Companion")
+REPO = Path(__file__).resolve().parents[1]
 
 
 def main() -> int:

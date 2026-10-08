@@ -32,8 +32,9 @@ from typing import Any
 
 from tools.tool_registry import register_tool
 
-_KEY = Path(r"D:\Wren-Companion\state\vector\dev\ssh_root_key")
-_JDOCS = Path.home() / "AppData" / "Roaming" / "wire-pod" / "jdocs" / "botSdkInfo.json"
+_KEY = Path(__file__).resolve().parents[2] / "state" / "vector" / "dev" / "ssh_root_key"
+from brain.iris_paths import paths as _iris_paths
+_JDOCS = _iris_paths.wirepod_sdk_info  # AppData on the tower, ~/wire-pod/chipper/jdocs on Linux
 
 # Community dev key source (kercre123/unlocking-vector). Fetched once to _KEY.
 _KEY_URL = "https://raw.githubusercontent.com/kercre123/unlocking-vector/main/ssh_root_key"

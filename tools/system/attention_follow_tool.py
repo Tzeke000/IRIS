@@ -31,7 +31,7 @@ from tools.tool_registry import register_tool
 # you") — every lock appends WHERE a person was seen (bearing-tagged), so
 # searches can check real hotspots (desk, bed) before blind-sweeping, and I can
 # ask attention_report "what have my eyes seen lately" any time.
-_SIGHTINGS_PATH = Path(r"D:\Wren-Companion\state\attention_sightings.jsonl")
+_SIGHTINGS_PATH = Path(__file__).resolve().parents[2] / "state" / "attention_sightings.jsonl"
 _SIGHTING_MIN_GAP_S = 10.0
 _SIGHTINGS_MAX_BYTES = 2_000_000
 

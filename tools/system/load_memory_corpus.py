@@ -73,7 +73,7 @@ _MEMORY_DIR = _resolve_memory_dir()
 # Repo root fallback for the profiles/ tree (Iris's people/things model). Same
 # defensive-fallback rationale as _IRIS_FALLBACK: if env/cwd resolution misses,
 # this still works on the machine this was built on.
-_REPO_FALLBACK = Path(r"D:\Wren-Companion")
+_REPO_FALLBACK = Path(__file__).resolve().parents[2]
 
 
 def _resolve_profiles_dir() -> Path:

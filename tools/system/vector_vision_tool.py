@@ -106,7 +106,7 @@ def _body_trail(params: dict, g: dict) -> dict:
     changes (stitch points), and current/last fix."""
     import json as _json
     from pathlib import Path
-    path = Path(r"D:\Wren-Companion\state\vector\pose_trail.jsonl")
+    path = Path(__file__).resolve().parents[2] / "state" / "vector" / "pose_trail.jsonl"
     if not path.exists():
         return {"ok": False, "error": "no trail yet — daemon writes it after "
                                       "its next restart (or robot hasn't moved)"}

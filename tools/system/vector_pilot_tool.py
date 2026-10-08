@@ -236,7 +236,7 @@ def _body_macro(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         try:
             import json as _json
             from pathlib import Path as _P
-            n = _json.loads((_P(r"D:\Wren-Companion\state\vector\nerves.json")
+            n = _json.loads((_P(__file__).resolve().parents[2] / "state" / "vector" / "nerves.json"
                              ).read_text(encoding="utf-8"))
             if not n.get("charger_seen"):
                 return {"ok": False, "error": "charger bearing unknown (engine "

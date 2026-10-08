@@ -19,7 +19,7 @@ from typing import Any
 
 from tools.tool_registry import register_tool
 
-_OUT_DIR = Path(r"D:\Wren-Companion\state\eyes_debug")
+_OUT_DIR = Path(__file__).resolve().parents[2] / "state" / "eyes_debug"
 _KEEP = 20  # newest snapshots kept; older ones pruned
 
 
