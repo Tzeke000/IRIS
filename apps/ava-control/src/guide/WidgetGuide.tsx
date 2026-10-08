@@ -18,6 +18,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { getJson, postJson } from "../api";
 import { eyeArms } from "../components/eyeArms3d";
 import { speakLine } from "./speech";
+import { fly, type Pose } from "./flight";
+import { Trail } from "./trail";
 
 type Vec = { x: number; y: number };
 type Desk = { do: string; x?: number; y?: number; w?: number; h?: number; ms?: number; r?: number; text?: string; combo?: string;
@@ -39,7 +41,9 @@ const HEAD_HOME = { pan_deg: 0, tilt_deg: 10 };
 
 export function useWidgetGuide() {
   const [caption, setCaption] = useState("");
-  const [gaze, setGaze] = useState<Vec | undefined>(undefined);
+  const [gaze, setGaze] = useState<Pose>(undefined);
+  const trail = useRef(new Trail());
+  const winRef = useRef({ x: 0, y: 0, k: 1 });            // where my window is (physical px) — the trail draws relative to it
   const [panel, setPanel] = useState<{ kind: "camera" | "image"; name?: string } | null>(null);
   const [panelSide, setPanelSide] = useState<"right" | "left">("right");
   const [running, setRunning] = useState(false);
@@ -72,26 +76,21 @@ export function useWidgetGuide() {
     const cw = w.getCurrentWindow();
     const k = await cw.scaleFactor();
     const offX = live.current.panelSide === "left" && panelRef.current ? PANEL.w : 0;
-    await cw.setPosition(new w.PhysicalPosition(Math.round(eye.x - (WIDGET_BASE.eye.x + offX) * k), Math.round(eye.y - WIDGET_BASE.eye.y * k)));
+    const x = Math.round(eye.x - (WIDGET_BASE.eye.x + offX) * k), y = Math.round(eye.y - WIDGET_BASE.eye.y * k);
+    winRef.current = { x, y, k };
+    await cw.setPosition(new w.PhysicalPosition(x, y));
   };
 
-  /** Glide my eye to a screen point on a gentle arc (Disney: anticipation, slow in/out, arcs). */
+  /** FLY my eye to a screen point: side-on, leaning into it, thrust from the back (guide/flight.ts). */
   const travelTo = async (to: Vec) => {
     const from = await eyeScreen();
-    const d = Math.hypot(to.x - from.x, to.y - from.y);
-    if (d < 3) return;
-    const dir = { x: (to.x - from.x) / d, y: (to.y - from.y) / d };
-    setGaze({ x: dir.x * 0.85, y: -dir.y * 0.85 });
-    const dur = Math.min(1900, 700 + d * 0.6), t0 = performance.now();
-    const bulge = Math.min(90, d * 0.1) * (dir.x >= 0 ? -1 : 1);
-    for (;;) {
-      const u = Math.min(1, (performance.now() - t0) / dur);
-      const s = smoother(u), b = bulge * Math.sin(Math.PI * u);
-      await placeEye({ x: from.x + (to.x - from.x) * s - dir.y * b, y: from.y + (to.y - from.y) * s + dir.x * b });
-      if (u >= 1) break;
-      await sleep(16);
-    }
-    setGaze(undefined);
+    const k = await (await win()).getCurrentWindow().scaleFactor();
+    await fly(from, to, {
+      place: placeEye,
+      pose: (g) => setGaze(g),
+      trail: (p, back, sp) => trail.current.emit(p, back, sp, WIDGET_BASE.eyeSize * 0.42 * k),
+      scale: k,
+    });
   };
 
   // ------------------------------------------------------------- the real mouse
@@ -309,5 +308,5 @@ export function useWidgetGuide() {
     return () => { alive = false; window.clearInterval(id); };
   }, [run]);
 
-  return { caption, gaze, panel, panelSide, running };
+  return { caption, gaze, panel, panelSide, running, trail, winRef };
 }

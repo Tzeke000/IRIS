@@ -18,6 +18,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { Arm, ARM_KEYS, ArmKey, bestArm, drawArm, easeInOutCubic, idleTip, port, Vec } from "./arms";
 import { findEl, scanUi } from "./uiMap";
 import { speakLine } from "./speech";
+import { fly, type Pose } from "./flight";
+import { Trail } from "./trail";
 
 type Step = {
   brain?: string;               // "spin" | "overview" | "focus:<node id>" (e.g. focus:iris, focus:zeke)
@@ -64,7 +66,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
   };
   const [floating, setFloating] = useState(false);
   const [caption, setCaption] = useState("");
-  const [gaze, setGaze] = useState<{ x: number; y: number } | undefined>(undefined);
+  const [gaze, setGaze] = useState<Pose>(undefined);
   const [eyePos, setEyePos] = useState<Vec>({ x: 0, y: 0 });
   const live = useRef({ floating: false, pos: { x: 0, y: 0 } as Vec, offset: { x: 0, y: 0 } as Vec, operatorOpen, activeTab,
     size: 180, stop: false, running: false, seq: -1, clicked: 0, warnedAt: 0 });
@@ -102,6 +104,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, W, H);
       const L = live.current;
+      if (trail.current.puffs.length) trail.current.draw(ctx, colorRef.current.lightColor || "#6aa3ff");
       let center: Vec, size: number;
       if (L.floating) {
         center = { x: L.pos.x + L.offset.x, y: L.pos.y + L.offset.y };
@@ -143,33 +146,15 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
   }, []);
 
   // ---------------------------------------------------------------- eye travel (Disney timing)
+  const trail = useRef(new Trail());
   const travel = useCallback(async (to: Vec) => {
-    // Glide: a small, soft wind-up, then accelerate → cruise → decelerate (no 0→100→0 jumps)
+    // FLY, don't glide (Zeke 10-08): side-on, leaning into it, thrust from the back — see guide/flight.ts
     const L = live.current;
-    const from = { ...L.pos };
-    const d = Math.hypot(to.x - from.x, to.y - from.y);
-    if (d < 2) return;
-    const dir = { x: (to.x - from.x) / d, y: (to.y - from.y) / d };
-    const ANT = 180, dur = Math.min(1600, 650 + d * 0.75);
-    const back = Math.min(8, d * 0.03);
-    const t0 = performance.now();
-    setGaze({ x: dir.x * 0.85, y: -dir.y * 0.85 });            // the eye looks where it's going, first
-    const smoother = (u: number) => u * u * u * (u * (u * 6 - 15) + 10);   // smootherstep: zero accel at both ends
-    for (;;) {
-      const t = performance.now() - t0;
-      if (t < ANT) {
-        const k = 0.5 - 0.5 * Math.cos((t / ANT) * Math.PI);
-        L.pos = { x: from.x - dir.x * back * k, y: from.y - dir.y * back * k };
-      } else if (t < ANT + dur) {
-        const u = smoother((t - ANT) / dur);
-        const s0 = { x: from.x - dir.x * back, y: from.y - dir.y * back };
-        // travel on a gentle ARC, not a ruler line (curved = friendly): bulge sideways, peaking mid-flight
-        const bulge = Math.min(60, d * 0.09) * Math.sin(Math.PI * u) * (dir.x >= 0 ? -1 : 1);
-        L.pos = { x: s0.x + (to.x - s0.x) * u - dir.y * bulge, y: s0.y + (to.y - s0.y) * u + dir.x * bulge };
-      } else break;
-      setEyePos({ ...L.pos });
-      await sleep(16);
-    }
+    await fly({ ...L.pos }, to, {
+      place: (p) => { L.pos = p; setEyePos({ ...p }); },
+      pose: (g) => setGaze(g),
+      trail: (p, back, sp) => trail.current.emit(p, back, sp, (L.size / 2) * IRIS_FRAC),
+    });
     L.pos = { ...to };
     setEyePos({ ...to });
   }, []);
