@@ -284,6 +284,27 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": repr(e)[:200]}
 
+    def guide_map3d(lat: float, lon: float, zoom: float = 15.5, pitch: float = 62, bearing: float = -25,
+                    mode: str = "satellite"):
+        """The 3D map, SHOWN OFF (Zeke 10-08: "zoom in from an area… spin it around so you can show you can actually
+        maneuver it"): starts high and flat over the region, flies down and tilts in, then circles the spot once."""
+        from fastapi.responses import HTMLResponse, JSONResponse as _J
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180) or mode not in ("buildings", "satellite"):
+            return _J({"ok": False, "error": "bad lat/lon/mode"}, status_code=400)
+        from brain.app_jarvis_routes import MAP3D_HTML
+        zoom = max(3.0, min(18.5, zoom)); pitch = max(0.0, min(80.0, pitch)); bearing = max(-180.0, min(180.0, bearing))
+        p = {"lat": lat, "lon": lon, "zoom": max(3.0, zoom - 5.0), "pitch": 0, "bearing": bearing - 60, "mode": mode}
+        show = ("map.once('idle', () => { setTimeout(() => {"
+                f" map.flyTo({{center: [{lon}, {lat}], zoom: {zoom}, pitch: {pitch}, bearing: {bearing}, duration: 5200,"
+                " curve: 1.3, essential: true});"
+                " map.once('moveend', () => { const b0 = map.getBearing(), t0 = performance.now(), dur = 11000;"
+                " const spin = (now) => { const u = Math.min(1, (now - t0) / dur);"
+                " const e = u < 0.5 ? 2*u*u : 1 - Math.pow(-2*u + 2, 2)/2;"
+                " map.setBearing(b0 + 360 * e); if (u < 1) requestAnimationFrame(spin); };"
+                " requestAnimationFrame(spin); }); }, 600); });")
+        html = MAP3D_HTML.replace("__P__", json.dumps(p)).replace("</script></body>", show + "</script></body>")
+        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
     def guide_media(name: str):
         """Pictures the widget shows during a tour (state/guide_media/<name>, png/jpg only)."""
         from fastapi.responses import FileResponse, JSONResponse as _J
@@ -296,7 +317,7 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
     # This module owns these paths: drop older copies so a live re-install picks up edited handlers.
     mine = {"/api/v1/app/attention", "/api/v1/app/guide", "/api/v1/app/guide/progress", "/api/v1/app/guide/ui_map", "/api/v1/app/guide/say",
             "/api/v1/app/guide/hush", "/api/v1/app/guide/head", "/api/v1/app/guide/media/{name}",
-            "/api/v1/app/guide/taskbar_icon"}
+            "/api/v1/app/guide/taskbar_icon", "/api/v1/app/guide/map3d"}
     try:
         app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", None) not in mine]
         existing = {e for e in existing if e.split(" ", 1)[-1] not in mine}
@@ -319,7 +340,8 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
                              ("POST", "/api/v1/app/guide/hush", guide_hush),
                              ("POST", "/api/v1/app/guide/head", guide_head),
                              ("GET", "/api/v1/app/guide/media/{name}", guide_media),
-                             ("GET", "/api/v1/app/guide/taskbar_icon", guide_taskbar_icon)):
+                             ("GET", "/api/v1/app/guide/taskbar_icon", guide_taskbar_icon),
+                             ("GET", "/api/v1/app/guide/map3d", guide_map3d)):
         if f"{method} {path}" in existing:
             continue
         app.add_api_route(path, fn, methods=[method])

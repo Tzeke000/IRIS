@@ -293,7 +293,7 @@ export function useWidgetGuide() {
             if (m3) {
               const q = new URLSearchParams({ lat: String(m3.lat), lon: String(m3.lon), zoom: String((m3 as Map3D).zoom ?? 15.5),
                 pitch: String((m3 as Map3D).pitch ?? 62), bearing: String((m3 as Map3D).bearing ?? -25), mode: (m3 as Map3D).mode ?? "satellite" });
-              await showPanel({ kind: "map3d", src: `/api/v1/app/map3d?${q.toString()}` });
+              await showPanel({ kind: "map3d", src: `/api/v1/app/guide/map3d?${q.toString()}` });   // flies in + circles
             } else report(s.seq, "note", "map3d: no place yet (show the weather first)");
           }
         }
