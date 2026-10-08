@@ -29,7 +29,7 @@ from typing import Any
 
 from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 import uvicorn
 
 
@@ -65,8 +65,15 @@ def _read_identity(name: str) -> str:
         return ""
 
 
-def _grab_camera_frame_b64() -> tuple[str | None, float]:
-    """Return (b64_jpeg, age_seconds) from the shared frame buffer.
+_DISPLAY_JPEG: dict = {"ts": 0.0, "jpg": None}
+_DISPLAY_LOCK = threading.Lock()
+
+
+def _display_jpeg() -> tuple[bytes | None, float, float]:
+    """(jpeg_bytes, age_seconds, capture_ts) for the newest buffered frame, annotated for display.
+
+    Encoded ONCE per captured frame and shared by every viewer (2026-10-07): the JSON poll and
+    each MJPEG stream used to annotate + imencode their own copy per request.
 
     The capture thread (started by iris_runtime) is the SOLE owner of the
     cv2.VideoCapture handle — opening a second handle here for fallback led
@@ -78,26 +85,40 @@ def _grab_camera_frame_b64() -> tuple[str | None, float]:
         from brain.frame_store import get_buffered_frame
         meta = get_buffered_frame(max_age_sec=2.0)
         if meta.frame is None:
-            return None, 0.0
-        import cv2  # noqa: WPS433
-        # Annotate a COPY at serve time (2026-08-21): the buffer holds CLEAN
-        # frames (vision consumers must never see drawn overlays — the tracker
-        # chased its own hand-dot graphics once). Display-only, this endpoint.
-        # NOTE: the same fix in operator_server.py was the WRONG server — the
-        # orb talks to THIS module on :5876.
-        frame = meta.frame
-        try:
-            from brain.camera_annotator import annotate_display as _annotate
-            frame = _annotate(frame.copy(), _g.get("_face_results"), _g)
-        except Exception:
-            pass  # raw frame beats no frame
-        ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-        if not ok:
-            return None, 0.0
-        return base64.b64encode(jpg.tobytes()).decode("ascii"), float(meta.age_sec)
+            return None, 0.0, 0.0
+        ts = float(meta.capture_ts)
+        with _DISPLAY_LOCK:
+            if _DISPLAY_JPEG["jpg"] is not None and _DISPLAY_JPEG["ts"] == ts:
+                return _DISPLAY_JPEG["jpg"], float(meta.age_sec), ts
+            import cv2  # noqa: WPS433
+            # Annotate a COPY at serve time (2026-08-21): the buffer holds CLEAN
+            # frames (vision consumers must never see drawn overlays — the tracker
+            # chased its own hand-dot graphics once). Display-only.
+            # NOTE: the same fix in operator_server.py was the WRONG server — the
+            # orb talks to THIS module on :5876.
+            frame = meta.frame
+            try:
+                from brain.camera_annotator import annotate_display as _annotate
+                frame = _annotate(frame.copy(), _g.get("_face_results"), _g)
+            except Exception:
+                pass  # raw frame beats no frame
+            ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+            if not ok:
+                return None, 0.0, 0.0
+            data = jpg.tobytes()
+            _DISPLAY_JPEG.update({"ts": ts, "jpg": data})
+            return data, float(meta.age_sec), ts
     except Exception as e:
         print(f"[orb_http] frame_store read failed: {e!r}", file=sys.stderr, flush=True)
+        return None, 0.0, 0.0
+
+
+def _grab_camera_frame_b64() -> tuple[str | None, float]:
+    """Return (b64_jpeg, age_seconds) — the JSON-poll form of _display_jpeg()."""
+    jpg, age, _ts = _display_jpeg()
+    if jpg is None:
         return None, 0.0
+    return base64.b64encode(jpg).decode("ascii"), age
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
@@ -888,6 +909,42 @@ def connectivity() -> dict:
 def camera_live_frame() -> dict:
     b64, age = _grab_camera_frame_b64()
     return {"ok": b64 is not None, "b64": b64, "age_sec": age}
+
+
+_MJPEG_MAX_FPS = 30.0
+
+
+@app.get("/api/v1/camera/mjpeg")
+async def camera_mjpeg() -> StreamingResponse:
+    """Live camera as one multipart/x-mixed-replace stream (2026-10-07, Zeke: feed choppy on the tower).
+
+    The app's JSON poll paid a round trip + base64 + JSON per frame and waited for each answer
+    before asking again (~12-15 fps from the tower, with occasional ~400 ms stalls). Here the
+    server pushes each NEW captured frame as soon as it exists; an <img src> renders it natively.
+    """
+    async def frames():
+        last_ts = 0.0
+        min_gap = 1.0 / _MJPEG_MAX_FPS
+        last_sent = 0.0
+        from brain import frame_store as _fs
+        while True:
+            # cheap check on the loop first: only hop to a thread (annotate+encode, shared and
+            # cached per frame) when the capture thread has pushed a NEW frame.
+            if _fs._buffer_ts != last_ts and time.monotonic() - last_sent >= min_gap * 0.9:
+                jpg, _age, ts = await asyncio.to_thread(_display_jpeg)
+                if jpg is not None and ts != last_ts:
+                    last_ts, last_sent = ts, time.monotonic()
+                    yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                           + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n")
+                    continue
+                if jpg is None:
+                    await asyncio.sleep(0.25)  # no live frame: idle, keep the connection
+                    continue
+            await asyncio.sleep(0.008)
+
+    return StreamingResponse(
+        frames(), media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/v1/vision/latest_frame")
