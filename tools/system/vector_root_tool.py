@@ -34,7 +34,7 @@ from tools.tool_registry import register_tool
 
 _KEY = Path(__file__).resolve().parents[2] / "state" / "vector" / "dev" / "ssh_root_key"
 from brain.iris_paths import paths as _iris_paths
-_JDOCS = _iris_paths.wirepod_sdk_info  # AppData on the tower, ~/wire-pod/chipper/jdocs on Linux
+_JDOCS = getattr(_iris_paths, "wirepod_sdk_info", None) or (Path.home() / "AppData" / "Roaming" / "wire-pod" / "jdocs" / "botSdkInfo.json")  # live runtimes may hold an older iris_paths
 
 # Community dev key source (kercre123/unlocking-vector). Fetched once to _KEY.
 _KEY_URL = "https://raw.githubusercontent.com/kercre123/unlocking-vector/main/ssh_root_key"

@@ -27,7 +27,7 @@ from tools.tool_registry import register_tool
 
 _WIREPOD = "http://127.0.0.1:8080"
 from brain.iris_paths import paths as _iris_paths
-_JDOCS = _iris_paths.wirepod_sdk_info  # AppData on the tower, ~/wire-pod/chipper/jdocs on Linux
+_JDOCS = getattr(_iris_paths, "wirepod_sdk_info", None) or (Path.home() / "AppData" / "Roaming" / "wire-pod" / "jdocs" / "botSdkInfo.json")  # live runtimes may hold an older iris_paths
 _FRAME_DIR = Path(__file__).resolve().parents[2] / "state" / "vector"
 
 _MAX_WHEEL = 200      # mm/s per side, sdkapp itself tops out ~190
