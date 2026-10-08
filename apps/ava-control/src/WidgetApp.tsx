@@ -212,6 +212,30 @@ export default function WidgetApp() {
     return () => cancelAnimationFrame(raf);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // Panels pop OUT of me (squash-and-stretch entrance with a little overshoot) and shrink back INTO me on exit.
+  const panelEl = useRef<HTMLDivElement | null>(null);
+  const panelKey = guide.panel ? `${guide.panel.kind}:${guide.panel.name ?? guide.panel.src ?? ""}` : "";
+  useEffect(() => {
+    if (!panelKey || !panelEl.current) return;
+    try {
+      panelEl.current.animate([
+        { transform: "scale(0.12, 0.3)", opacity: 0 },
+        { transform: "scale(1.06, 0.97)", opacity: 1, offset: 0.65 },
+        { transform: "scale(0.99, 1.01)", offset: 0.85 },
+        { transform: "scale(1, 1)", opacity: 1 },
+      ], { duration: 460, easing: "cubic-bezier(0.2, 0, 0, 1)" });
+    } catch { /* fine */ }
+  }, [panelKey]);
+  useEffect(() => {
+    if (!guide.panelClosing || !panelEl.current) return;
+    try {
+      panelEl.current.animate([
+        { transform: "scale(1, 1)", opacity: 1 },
+        { transform: "scale(1.03, 0.98)", opacity: 1, offset: 0.2 },
+        { transform: "scale(0.1, 0.3)", opacity: 0 },
+      ], { duration: 270, easing: "cubic-bezier(0.4, 0, 1, 1)", fill: "forwards" });
+    } catch { /* fine */ }
+  }, [guide.panelClosing]);
   const emitColorRef = useRef("#6aa3ff");
   emitColorRef.current = String(emotionColor || "#6aa3ff");
 
@@ -265,7 +289,8 @@ export default function WidgetApp() {
           boxShadow: "0 4px 18px rgba(0,0,0,0.45)", pointerEvents: "none" }}>{guide.caption}</div>
       )}
       {guide.panel && (
-        <div style={{ position: "absolute", top: eyeY - PANEL.h / 2, left: guide.panelSide === "right" ? WIDGET_BASE.w - 10 : 10,
+        <div ref={panelEl} key={`${guide.panel.kind}:${guide.panel.name ?? guide.panel.src ?? ""}`} style={{ position: "absolute", top: eyeY - PANEL.h / 2,
+          transformOrigin: guide.panelSide === "right" ? "0% 50%" : "100% 50%", left: guide.panelSide === "right" ? WIDGET_BASE.w - 10 : 10,
           width: PANEL.w - 20, height: PANEL.h, borderRadius: 12, overflow: "hidden", background: "#05070c",
           border: "1px solid rgba(120,170,255,0.45)", boxShadow: "0 6px 26px rgba(0,0,0,0.55)", pointerEvents: "none" }}>
           {(guide.panel.kind === "camera" || guide.panel.kind === "image") && (
@@ -275,9 +300,9 @@ export default function WidgetApp() {
           )}
           {guide.panel.kind === "video" && (
             // one of my music videos — quietly (Zeke: "have the music come through at a low volume")
-            <video autoPlay playsInline style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000" }}
+            <video autoPlay muted playsInline style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000" }}
               src={`${API_BASE}/api/v1/app/guide/media/${encodeURIComponent(guide.panel.name || "")}`}
-              onLoadedMetadata={(e) => { e.currentTarget.volume = 0.22; void e.currentTarget.play().catch(() => undefined); }} />
+              onLoadedMetadata={(e) => { void e.currentTarget.play().catch(() => undefined); }} />
           )}
           {guide.panel.kind === "map3d" && guide.panel.src && (
             <iframe title="3D map" src={`${API_BASE}${guide.panel.src}`} style={{ width: "100%", height: "100%", border: 0 }} />
