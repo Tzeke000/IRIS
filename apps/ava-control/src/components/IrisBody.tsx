@@ -33,7 +33,7 @@ import { type OrbState, type OrbProps, getCfg, deriveBlendColors, STATE_TINT } f
 
 export interface IrisBodyProps extends OrbProps {
   /** Where the person I'm looking at is, -1..1 on each axis (x right, y up). Optional. */
-  gaze?: { x: number; y: number };
+  gaze?: { x: number; y: number; yaw?: number; pitch?: number; roll?: number };   // yaw/pitch/roll (rad): a BODY heading (3D body only) — e.g. turning side-on to fly
   /** My chosen size, 0.35..1.35 (1 = default). Eased; never allowed to push the eye past the canvas. */
   bodyScale?: number;
   /** Increments on each deliberate blink (like recenterTrigger). */

@@ -171,7 +171,8 @@ function CyborgEyeInner(props: CyborgEyeProps) {
     }).catch(() => { /* model missing: the disc alone still shows the iris */ });
 
     // gaze: the whole ball turns (critically damped); a little idle life
-    const rot = { x: 0, y: 0, vx: 0, vy: 0 };
+    const rot = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0 };
+    let softUntil = 0;                                   // after a body turn, ease back (no snap)
     let prevState = "", avertX = 0, avertY = 0, avertUntil = 0;    // the BODY looks away to think now
     let fpsWatchFrom = Infinity, frames = 0, gaveUp = false, badLow = 0, badHigh = 0;
     const v3 = new THREE.Vector3();
@@ -202,11 +203,19 @@ function CyborgEyeInner(props: CyborgEyeProps) {
       const av = t < avertUntil;
       const gx = (L.gaze ? L.gaze.x : 0.05 * Math.sin(t * 0.37)) + (av ? avertX : 0);
       const gy = (L.gaze ? L.gaze.y : 0.04 * Math.sin(t * 0.29 + 1.3)) + (av ? avertY : 0);
-      const ty = gx * 0.34, tx = -gy * 0.28;
-      const K = 140, C = 2 * Math.sqrt(K) * 0.9;              // snappy like a saccade, no wobble
+      // A BODY heading (10-08, Zeke: "your propulsion is coming from the back of you — show your profile when you
+      // move left and right, so it doesn't look like you're just gliding"): yaw/pitch/roll turn the whole body on a
+      // softer, heavier spring that slightly overshoots (follow-through); plain gaze stays a quick saccade.
+      const H = L.gaze as { yaw?: number; pitch?: number; roll?: number } | undefined;
+      const turning = H && H.yaw !== undefined;
+      if (turning) softUntil = t + 0.9;
+      const ty = turning ? H!.yaw! : gx * 0.34, tx = turning ? (H!.pitch ?? 0) : -gy * 0.28, tz = turning ? (H!.roll ?? 0) : 0;
+      const soft = turning || t < softUntil;
+      const K = soft ? 34 : 140, C = 2 * Math.sqrt(K) * (soft ? 0.62 : 0.9);
       rot.vy += (K * (ty - rot.y) - C * rot.vy) * dt; rot.y += rot.vy * dt;
       rot.vx += (K * (tx - rot.x) - C * rot.vx) * dt; rot.x += rot.vx * dt;
-      ball.rotation.set(rot.x, rot.y, 0);
+      rot.vz += (K * (tz - rot.z) - C * rot.vz) * dt; rot.z += rot.vz * dt;
+      ball.rotation.set(rot.x, rot.y, rot.z);
       if (portsKey) (window as unknown as Record<string, unknown>)[`__cy_${portsKey}`] = { gx, gy, ty, tx, rx: rot.x, ry: rot.y, dt, ball, camera };
       const s = Math.max(0.35, Math.min(1.35, Number(L.bodyScale ?? 1)));
       ball.scale.setScalar(s);

@@ -191,6 +191,30 @@ export default function WidgetApp() {
     return () => { alive = false; window.clearInterval(id); };
   }, [guide.running, eyeX, eyeY, ES]);
 
+  // the thrust trail behind me while I fly (drawn in window coordinates; the particles live in screen px)
+  const trailCv = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    let raf = 0;
+    const loop = () => {
+      raf = requestAnimationFrame(loop);
+      const cv = trailCv.current;
+      if (!cv) return;
+      const W = window.innerWidth, H = window.innerHeight, dpr = window.devicePixelRatio || 1;
+      if (cv.width !== Math.round(W * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+      const ctx = cv.getContext("2d");
+      if (!ctx) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, W, H);
+      const tr = guide.trail.current;
+      if (tr.puffs.length) { const w = guide.winRef.current; tr.draw(ctx, emitColorRef.current, { x: w.x, y: w.y }, w.k); }
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const emitColorRef = useRef("#6aa3ff");
+  emitColorRef.current = String(emotionColor || "#6aa3ff");
+
   return (
     <div
       style={{
@@ -205,6 +229,7 @@ export default function WidgetApp() {
         left: 0,
       }}
     >
+      <canvas ref={trailCv} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }} />
       {/* the drag handle is my eye itself */}
       <div data-tauri-drag-region style={{ position: "absolute", left: eyeX - ES * 0.55, top: eyeY - ES * 0.55,
         width: ES * 1.1, height: ES * 1.1, borderRadius: "50%", cursor: "grab", zIndex: 3 }} />

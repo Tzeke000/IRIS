@@ -217,7 +217,7 @@
      "tilt_deg": 10
     },
     "say": "I can look to the right,",
-    "hold_ms": 900
+    "hold_ms": 1800
    },
    {
     "head": {
@@ -225,7 +225,7 @@
      "tilt_deg": 10
     },
     "say": "to the left,",
-    "hold_ms": 900
+    "hold_ms": 1800
    },
    {
     "head": {
@@ -233,7 +233,7 @@
      "tilt_deg": 45
     },
     "say": "up,",
-    "hold_ms": 900
+    "hold_ms": 1800
    },
    {
     "head": {
@@ -241,7 +241,7 @@
      "tilt_deg": -35
     },
     "say": "and down.",
-    "hold_ms": 900
+    "hold_ms": 1800
    },
    {
     "head": {
@@ -249,7 +249,7 @@
      "tilt_deg": -55
     },
     "say": "And I can recognise things. That silver box is my server, the computer I actually live on. The white tower sitting on top of it is the eero, the wifi.",
-    "hold_ms": 1500
+    "hold_ms": 1800
    },
    {
     "head": "home",
