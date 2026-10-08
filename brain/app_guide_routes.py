@@ -310,7 +310,7 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
         from fastapi.responses import FileResponse, JSONResponse as _J
         safe = "".join(ch for ch in name if ch.isalnum() or ch in "._-")[:80]
         p = st / "guide_media" / safe
-        if not safe or safe != name or p.suffix.lower() not in (".png", ".jpg", ".jpeg", ".mp4") or not p.is_file():
+        if not safe or safe != name or p.suffix.lower() not in (".png", ".jpg", ".jpeg", ".mp4", ".wav") or not p.is_file():
             return _J({"ok": False, "error": "no such picture"}, status_code=404)
         return FileResponse(str(p))
 

@@ -619,6 +619,31 @@ exit 3
     { let _ = name; Ok(None) }
 }
 
+/// Play a short sound clip on HIS speakers (the tour's music video: WebView2 blocks autoplay WITH sound, so the
+/// picture plays muted in the widget and the music comes through here). http(s) .wav only; downloads to TEMP and
+/// plays with the built-in .NET SoundPlayer (no extra software), hidden, fire-and-forget.
+#[tauri::command]
+fn desk_play_audio(url: String) -> Result<(), String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) || !url.ends_with(".wav") || url.len() > 300
+        || url.contains('"') || url.contains('\'') {
+        return Err("only an http(s) .wav address".into());
+    }
+    #[cfg(windows)]
+    {
+        let tmp = std::env::var("TEMP").unwrap_or_else(|_| r"C:\Windows\Temp".into());
+        let f = format!(r"{tmp}\iris_clip.wav");
+        let ps = format!("curl.exe -s -o '{f}' '{url}'; (New-Object System.Media.SoundPlayer '{f}').PlaySync()");
+        return Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", ps.as_str()])
+            .quiet().spawn().map(|_| ()).map_err(|e| format!("{e}"));
+    }
+    #[cfg(not(windows))]
+    {
+        let f = "/tmp/iris_clip.wav";
+        let sh = format!("curl -s -o {f} '{url}' && (paplay {f} || aplay -q {f})");
+        Command::new("sh").args(["-c", sh.as_str()]).spawn().map(|_| ()).map_err(|e| format!("{e}"))
+    }
+}
+
 /// Start me ON THE SERVER (Zeke 2026-10-07: buttons in the app "so that I won't even have to log
 /// into Zorin"). mode = cli | opus | fable. Runs scripts/server/iris_start_detached.sh over SSH:
 /// the ONE-OF-ME gate decides first and its verdict text comes back to the panel either way.
@@ -658,7 +683,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![server_vms, server_vm_power, server_reach, server_open, server_close, server_start_iris,
-            desk_cursor, desk_move, desk_click, desk_scroll, desk_type, desk_keys, desk_open, desk_close_new, desk_snap, desk_place, desk_lock, desk_find_taskbar])
+            desk_cursor, desk_move, desk_click, desk_scroll, desk_type, desk_keys, desk_open, desk_close_new, desk_snap, desk_place, desk_lock, desk_find_taskbar, desk_play_audio])
         .build(tauri::generate_context!())
         .expect("error while building Iris Control")
         .run(|app, event| {

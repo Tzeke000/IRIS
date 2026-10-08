@@ -15,7 +15,7 @@
 //   gesture · say · wait_ms · hold_ms
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getJson, postJson } from "../api";
+import { API_BASE, getJson, postJson } from "../api";
 import { eyeArms } from "../components/eyeArms3d";
 import { speakLine } from "./speech";
 import { fly, type Pose } from "./flight";
@@ -52,6 +52,7 @@ export function useWidgetGuide() {
   const [panel, setPanel] = useState<PanelKind | null>(null);
   const lastPlace = useRef<{ lat: number; lon: number } | null>(null);
   const [panelSide, setPanelSide] = useState<"right" | "left">("right");
+  const [panelClosing, setPanelClosing] = useState(false);
   const [running, setRunning] = useState(false);
   const live = useRef({ seq: -1, running: false, stop: false, home: null as Vec | null, panelSide: "right" as "right" | "left",
     touched: 0, warnedAt: 0, lockTimer: 0 });
@@ -186,6 +187,11 @@ export function useWidgetGuide() {
     const k = await cw.scaleFactor();
     const eye = await eyeScreen();
     const m = await monitor();
+    if (!p && panelRef.current) {                           // Disney exit: the panel shrinks back into me first
+      setPanelClosing(true);
+      await sleep(280);
+      setPanelClosing(false);
+    }
     if (p) {
       const side: "right" | "left" = eye.x + (WIDGET_BASE.w / 2 + PANEL.w + 20) * k > m.x + m.w ? "left" : "right";
       live.current.panelSide = side;
@@ -194,6 +200,11 @@ export function useWidgetGuide() {
       await cw.setSize(new w.LogicalSize(WIDGET_BASE.w + PANEL.w, WIDGET_BASE.h));
       await placeEye(eye);                                  // the eye stays put; the window grows beside it
       setPanel(p);
+      if (p.kind === "video" && p.name) {                   // the music: autoplay-with-sound is blocked in the
+        const wav = p.name.replace(/\.mp4$/, ".wav");       // webview, so the picture plays muted and the sound
+        void invoke("desk_play_audio", { url: `${API_BASE}/api/v1/app/guide/media/${encodeURIComponent(wav)}` })   // comes through his speakers
+          .catch(() => undefined);
+      }
     } else {
       setPanel(null);
       panelRef.current = false;
@@ -226,12 +237,26 @@ export function useWidgetGuide() {
       await sleep(16);
     }
     await sleep(1700);
+    // going away = turn AROUND first (you see my back, where the thrust comes from), then fly off (Zeke)
+    setGaze({ x: 0, y: 0, yaw: Math.PI, pitch: 0.1, roll: 0 });
+    await sleep(650);
+    t0 = performance.now();
+    const FAR = 0.72;                                                   // Zeke: "go back away, shrink a little smaller"
+    for (;;) {                                                          // away: slow in, slow out, past normal size
+      const u = Math.min(1, (performance.now() - t0) / 1100);
+      const e = u < 0.5 ? 2 * u * u : 1 - (-2 * u + 2) ** 2 / 2;
+      await setZ(ZMAX + (FAR - ZMAX) * e, eye);
+      if (u >= 1) break;
+      await sleep(16);
+    }
+    setGaze({ x: 0, y: 0, yaw: 0, pitch: 0, roll: 0 });                // turn back to face you…
+    await sleep(700);
     setGaze(undefined);
     t0 = performance.now();
-    for (;;) {                                                          // back: slow in, slow out
-      const u = Math.min(1, (performance.now() - t0) / 900);
+    for (;;) {                                                          // …and settle back to my normal size
+      const u = Math.min(1, (performance.now() - t0) / 700);
       const e = u < 0.5 ? 2 * u * u : 1 - (-2 * u + 2) ** 2 / 2;
-      await setZ(ZMAX + (1 - ZMAX) * e, eye);
+      await setZ(FAR + (1 - FAR) * e, eye);
       if (u >= 1) break;
       await sleep(16);
     }
@@ -408,5 +433,5 @@ export function useWidgetGuide() {
     return () => { alive = false; window.clearInterval(id); };
   }, [run]);
 
-  return { caption, gaze, panel, panelSide, running, trail, winRef, zoom };
+  return { caption, gaze, panel, panelSide, panelClosing, running, trail, winRef, zoom };
 }
