@@ -192,7 +192,7 @@ export class Arm {
   tipDir(): Vec { return norm(sub(this.p[N - 1], this.p[N - 3])); }
 }
 
-export type ArmStyle = { light: string; copper: string; copperDark: string; scale: number; dpr: number; glow?: boolean };
+export type ArmStyle = { light: string; copper: string; copperDark: string; scale: number; dpr: number; glow?: boolean; width?: number };
 
 /** Smooth path through the chain (midpoint quadratic). */
 function trace(ctx: CanvasRenderingContext2D, pts: Vec[]) {
@@ -210,14 +210,14 @@ export function drawArm(ctx: CanvasRenderingContext2D, arm: Arm, st: ArmStyle) {
   const P = arm.p;
   if (P.length < 2) return;
   const s = st.scale;
-  const width = 3.0 * s * WIRES;         // ribbon width (px)
+  const width = st.width ?? 3.0 * s * WIRES;         // ribbon width (px) — the 3D eye passes its collar size
   // per-node normal + twist profile
   const nrm: Vec[] = P.map((_, i) => {
     const a = P[Math.max(0, i - 1)], b = P[Math.min(P.length - 1, i + 1)];
     const t = norm(sub(b, a));
     return { x: -t.y, y: t.x };
   });
-  const turns = 0.25 + arm.twist * 0.9;
+  const turns = arm.twist * 0.9;                 // flat by default: twisting reads as "two cables" / knots
   const prof = P.map((_, i) => Math.cos((i / (P.length - 1)) * Math.PI * 2 * turns));
   // bind near the root and the connector (clamp + sleeve); loosen in the middle
   const loose = P.map((_, i) => { const u = i / (P.length - 1); return 0.55 + 0.45 * Math.sin(Math.PI * Math.min(1, u / 0.92)); });
@@ -239,7 +239,7 @@ export function drawArm(ctx: CanvasRenderingContext2D, arm: Arm, st: ArmStyle) {
   for (let w = 0; w < WIRES; w++) {
     const pts = wirePts[w];
     const isLight = w === Math.floor(WIRES / 2) - 1 || w === Math.floor(WIRES / 2);
-    const lw = 2.6 * s;
+    const lw = Math.max(2.6 * s, (width / WIRES) * 1.05);
     if (isLight) {
       ctx.shadowColor = st.light;
       ctx.shadowBlur = st.glow === false ? 0 : 10 * s;     // blur is the expensive part on software canvases

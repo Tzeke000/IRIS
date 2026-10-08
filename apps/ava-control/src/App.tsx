@@ -14,6 +14,7 @@ import { CUBE_MORPH_ENABLED, EMOTION_VISUALS, deriveOrbEmotion, deriveOrbSleep, 
 import OrbCanvas, { setBodyStyle, useBodyStyle } from "./components/OrbCanvas";
 import { listen } from "@tauri-apps/api/event";
 import GuideOverlay from "./guide/GuideOverlay";
+import { useAttentionGaze } from "./guide/useAttentionGaze";
 
 /** Operator HTTP API aggregate (brain/operator_server.py — started from avaagent.py). */
 type Snapshot = Record<string, unknown>;
@@ -500,6 +501,7 @@ export default function App() {
   const [backendShutdownDetected, setBackendShutdownDetected] = useState(false);
   const [operatorOpen, setOperatorOpen] = useState(false);
   const [guideFloating, setGuideFloating] = useState(false);   // my eye has lifted onto the guide layer
+  const homeGaze = useAttentionGaze();                          // the whole ball turns toward who I'm following
   const [cameraOverlayOpen, setCameraOverlayOpen] = useState(false);
 
   // Connectivity state
@@ -2366,6 +2368,7 @@ export default function App() {
               state={shutdownInProgress ? "offline" : (orbPulseMode as any)}
               size={eyeSize}
               portsKey="home"
+              gaze={homeGaze}
               amplitude={ttsAmplitude}
               energy={moodEnergy}
               recenterTrigger={orbRecenterCounter}

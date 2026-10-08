@@ -138,13 +138,23 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
             return {"ok": False, "spoken": False, "error": repr(e)[:200]}
 
     # This module owns these paths: drop older copies so a live re-install picks up edited handlers.
-    mine = {"/api/v1/app/guide", "/api/v1/app/guide/progress", "/api/v1/app/guide/ui_map", "/api/v1/app/guide/say"}
+    mine = {"/api/v1/app/attention", "/api/v1/app/guide", "/api/v1/app/guide/progress", "/api/v1/app/guide/ui_map", "/api/v1/app/guide/say"}
     try:
         app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", None) not in mine]
         existing = {e for e in existing if e.split(" ", 1)[-1] not in mine}
     except Exception:  # noqa: BLE001
         pass
-    for method, path, fn in (("GET", "/api/v1/app/guide", guide_get),
+    def attention() -> dict[str, Any]:
+        """Where the person I'm following is, for the app eye's GAZE (the whole ball turns toward them)."""
+        d = _read(st / "attention" / "attention_state.json", {})
+        b = d.get("bearing") or {}
+        off = d.get("offset") or {}
+        return {"ok": True, "status": d.get("status"), "target": d.get("target_label"),
+                "pan_deg": b.get("pan_deg"), "tilt_deg": b.get("tilt_deg"),
+                "dx": off.get("dx"), "dy": off.get("dy"), "age_s": round(time.time() - float(d.get("ts") or 0), 2)}
+
+    for method, path, fn in (("GET", "/api/v1/app/attention", attention),
+                             ("GET", "/api/v1/app/guide", guide_get),
                              ("POST", "/api/v1/app/guide/progress", guide_progress),
                              ("POST", "/api/v1/app/guide/ui_map", guide_ui_map),
                              ("POST", "/api/v1/app/guide/say", guide_say)):
