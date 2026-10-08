@@ -19,7 +19,8 @@ export type Board = {
   model: string | null;
   sample_age_s: number | null;
   cpu: { percent: number | null; cores: number; temp_c: number | null } | null;
-  host_cpus?: { socket: number; percent: number | null; temp_c: number | null }[] | null;
+  host_cpus?: { socket: number; threads?: number; percent: number | null; temp_c: number | null }[] | null;
+  host_cpus_error?: string | null;
   ram: { used_gb: number; total_gb: number; percent: number } | null;
   gpu: { name: string; util_pct: number; mem_used_mb: number; mem_total_mb: number; temp_c: number }[] | null;
   disk: { path: string; used_gb: number; total_gb: number; percent: number; read_mb_s: number | null; write_mb_s: number | null } | null;
@@ -88,12 +89,14 @@ export function StatusTopBar({ sb, mood, moodSub, moodColor }: {
       <Chip k="Model" v={b?.model ?? "—"} dim={dim} title={why ?? "read from the live process's --model flag"} />
       {cpus && cpus.length > 0 ? (
         cpus.map((c) => (
-          <Chip key={c.socket} k={`CPU ${c.socket + 1}`} v={fmt(c.percent, 0, "%")} sub={c.temp_c !== null ? `${fmt(c.temp_c, 0, "°C")}` : undefined} dim={dim} title={why} />
+          <Chip key={c.socket} k={`CPU ${c.socket + 1}`} v={fmt(c.percent, 0, "%")}
+            sub={`${c.temp_c !== null ? fmt(c.temp_c, 0, "°C") : "temp —"}${c.threads ? ` · ${c.threads} threads` : ""}`}
+            dim={dim} title={why ?? "physical Xeon on the R740 (read from the Proxmox host)"} />
         ))
       ) : (
         <Chip k={b?.host.role === "server" ? "CPU (my VM)" : "CPU"} v={fmt(b?.cpu?.percent, 0, "%")}
           sub={b?.cpu ? `${b.cpu.cores} cores${b.cpu.temp_c !== null ? ` · ${fmt(b.cpu.temp_c, 0, "°C")}` : ""}` : undefined}
-          dim={dim} title={why ?? (b?.host.role === "server" ? "Per-CPU numbers for the two physical Xeons need read access to the Proxmox host — not set up yet" : undefined)} />
+          dim={dim} title={why ?? (b?.host.role === "server" ? `My VM's share only. The two physical Xeons: ${b?.host_cpus_error ?? "no reading"}` : undefined)} />
       )}
       <Chip k="RAM" v={b?.ram ? `${fmt(b.ram.used_gb, 1)}/${fmt(b.ram.total_gb, 0)} GB` : "—"} dim={dim} title={why} />
       <Chip k="GPU" v={g ? `${fmt(g.util_pct, 0, "%")}` : "—"}
