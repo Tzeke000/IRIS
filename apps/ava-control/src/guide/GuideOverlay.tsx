@@ -440,7 +440,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       for (let i = 0; i < s.steps.length; i++) {
         if (L.stop) { report("stopped", "", i); break; }
         const st = s.steps[i];
-        const clicksAtStep = L.clicked;
+        let clicksAtStep = L.clicked;
         report("step", st.say?.slice(0, 80) || st.point || st.press || st.tab || "", i);
         if (st.tab) {
           if (!L.operatorOpen) { await reachFor("panel", true); openedPanel = true; await sleep(500); }
@@ -472,6 +472,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
             if (done || L.stop) break;
             report("clicked", st.say.slice(0, 80), i);
             await warnNoClick(s.silent);                    // then say the line again, from the top
+            clicksAtStep = L.clicked;                       // that click is answered — don't warn twice for it
             setCaption(st.say);
           }
         }
