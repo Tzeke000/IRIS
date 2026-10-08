@@ -13,7 +13,7 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import OrbCanvas from "./components/OrbCanvas";
-import { API_BASE, getJson } from "./api";
+import { API_BASE, getJson, postJson } from "./api";
 import { CUBE_MORPH_ENABLED, deriveOrbEmotion, deriveOrbSleep, deriveOrbState } from "./orbDerive";
 import { PANEL, WIDGET_BASE, ZMAX, useWidgetGuide } from "./guide/WidgetGuide";
 import type { OrbState } from "./components/orbShared";
@@ -302,7 +302,8 @@ export default function WidgetApp() {
             // one of my music videos — quietly (Zeke: "have the music come through at a low volume")
             <video autoPlay muted playsInline style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000" }}
               src={`${API_BASE}/api/v1/app/guide/media/${encodeURIComponent(guide.panel.name || "")}`}
-              onLoadedMetadata={(e) => { void e.currentTarget.play().catch(() => undefined); }} />
+              onLoadedMetadata={(e) => { void e.currentTarget.play().catch(() => undefined); }}
+              onPlay={(e) => measureVideoFps(e.currentTarget)} />
           )}
           {guide.panel.kind === "map3d" && guide.panel.src && (
             <iframe title="3D map" src={`${API_BASE}${guide.panel.src}`} style={{ width: "100%", height: "100%", border: 0 }} />
@@ -334,4 +335,26 @@ function WeatherCard({ d }: { d: Record<string, unknown> }) {
       ))}
     </div>
   );
+}
+
+/** Count the frames the webview ACTUALLY presents (requestVideoFrameCallback) and report the real rate, so a
+ *  choppy video is a number in my log, not a guess (Zeke 10-08: "not even 30 FPS"). */
+function measureVideoFps(v: HTMLVideoElement) {
+  const vv = v as HTMLVideoElement & { requestVideoFrameCallback?: (cb: (now: number, meta: { presentedFrames: number }) => void) => number };
+  if (!vv.requestVideoFrameCallback) return;
+  let first: { t: number; n: number } | null = null, last = { t: 0, n: 0 };
+  const tick = (now: number, meta: { presentedFrames: number }) => {
+    if (!first) first = { t: now, n: meta.presentedFrames };
+    last = { t: now, n: meta.presentedFrames };
+    if (!v.paused && !v.ended && v.isConnected) vv.requestVideoFrameCallback!(tick);
+  };
+  vv.requestVideoFrameCallback(tick);
+  const done = () => {
+    if (!first || last.t - first.t < 500) return;
+    const fps = ((last.n - first.n) * 1000) / (last.t - first.t);
+    void postJson("/api/v1/app/guide/progress", { seq: 0, index: -1, status: "note", client: "widget",
+      note: `video fps ${fps.toFixed(1)} (${last.n - first.n} frames / ${((last.t - first.t) / 1000).toFixed(1)} s, src ${v.videoWidth}x${v.videoHeight})` }).catch(() => undefined);
+  };
+  v.addEventListener("ended", done, { once: true });
+  window.setTimeout(done, 3500);                   // the tour usually closes the panel before it ends
 }
