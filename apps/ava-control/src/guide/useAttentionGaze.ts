@@ -7,7 +7,7 @@ type Att = { ok?: boolean; status?: string; pan_deg?: number | null; tilt_deg?: 
 
 // Camera and screen both face the person. A person to the camera's right sits on the screen's own right, which is
 // the viewer's LEFT — so the eye (x = viewer's right) looks the opposite way. Flip here if it ever looks away.
-const PAN_TO_GAZE = -1 / 40;      // per degree of bearing
+const PAN_TO_GAZE = 1 / 40;       // per degree of bearing — sign VERIFIED by Zeke 10-08 (−1 turned away from him)
 const TILT_TO_GAZE = 1 / 40;
 const HFOV_HALF_DEG = 40;         // in-frame offset dx (−1..1) → degrees
 

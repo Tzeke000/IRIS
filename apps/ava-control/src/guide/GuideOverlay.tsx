@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import OrbCanvas from "../components/OrbCanvas";
 import { eyePorts } from "../components/CyborgEye";
+import { eyeArms } from "../components/eyeArms3d";
 import type { IrisBodyProps } from "../components/IrisBody";
 import { deriveBlendColors, getCfg } from "../components/orbShared";
 import { getJson, postJson } from "../api";
@@ -41,6 +42,23 @@ const IRIS_FRAC = 0.546;          // iris radius / half canvas (IrisBody: 0.72 w
 export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingChange }: GuideOverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const arms = useRef<Record<ArmKey, Arm>>(Object.fromEntries(ARM_KEYS.map((k, i) => [k, new Arm(k, i)])) as Record<ArmKey, Arm>);
+  // One handle per arm: the 3D cyborg body's real cables when it's up (CyborgEye registers them in `eyeArms`),
+  // the 2D overlay arms otherwise (flat iris / classic body).
+  type ArmHandle = { holding: boolean; twistGoal: number; reachTo: (p: Vec, now: number, o?: { press?: boolean; onContact?: () => void; dur?: number }) => void;
+    follow: (path: (t: number) => Vec, now: number, dur: number) => void; release: () => void };
+  const armH = (k: ArmKey): ArmHandle => {
+    const c = eyeArms.get(live.current.floating ? "guide" : "home");
+    const a2 = arms.current[k];
+    if (!c) return a2 as unknown as ArmHandle;
+    return {
+      get holding() { return c.holding(k); },
+      get twistGoal() { return 0; },
+      set twistGoal(v: number) { c.setTwist(k, v); },
+      reachTo: (p, _now, o) => c.reachTo(k, p.x, p.y, o),
+      follow: (path, _now, dur) => c.follow(k, path, dur),
+      release: () => c.release(k),
+    };
+  };
   const [floating, setFloating] = useState(false);
   const [caption, setCaption] = useState("");
   const [gaze, setGaze] = useState<{ x: number; y: number } | undefined>(undefined);
@@ -90,6 +108,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
         if (!h) return;                      // at home the arms sit on the body's layer: the panel / camera view cover them
         center = h.c; size = h.size;
       }
+      if (eyeArms.has(L.floating ? "guide" : "home")) return;   // the 3D body draws its own real cables
       // the 3D cyborg eye publishes its real collar positions (they move as the ball turns)
       const ep = eyePorts.get(L.floating ? "guide" : "home");
       const live3d = ep && performance.now() - ep.ts < 400 ? ep : null;
@@ -235,9 +254,9 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
     const dx = tg.c.x - L.pos.x, dy = tg.c.y - L.pos.y, dl = Math.hypot(dx, dy) || 1;
     setGaze({ x: (dx / dl) * 0.8, y: (-dy / dl) * 0.8 });       // eye leads: look first…
     await sleep(140);                                             // …then the arm goes
-    const busy = new Set(ARM_KEYS.filter((k) => arms.current[k].holding));
+    const busy = new Set(ARM_KEYS.filter((k) => armH(k).holding));
     const k = bestArm(L.pos, tg.c, 0, busy);
-    const a = arms.current[k];
+    const a = armH(k);
     if (twist !== undefined) a.twistGoal = twist;
     let contacted = false;
     const aim = big
@@ -305,7 +324,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       setGaze(undefined);
     } else if (g === "wave") {
       // a smooth wave: the hand rises, then swings on an ARC (pendulum about a pivot), then settles back
-      const a = arms.current["up"].holding ? arms.current["right"] : arms.current["up"];
+      const a = armH("up").holding ? armH("right") : armH("up");
       const R = (L.size / 2) * IRIS_FRAC;
       const pivot = { x: base.x + R * 1.1, y: base.y - R * 1.2 };
       const rad = R * 1.35, dur = 2600;
@@ -318,7 +337,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       await sleep(dur);
       a.release();
     } else if (g === "curious") {
-      const a = arms.current["up"];
+      const a = armH("up");
       setGaze({ x: 0.35, y: 0.4 });
       a.twistGoal = 0.6;
       a.reachTo({ x: base.x + 30, y: base.y - (L.size / 2) * IRIS_FRAC * 2.6 }, performance.now(), { dur: 600 });
@@ -369,9 +388,9 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       const dx = pt.x - L.pos.x, dy = pt.y - L.pos.y, dl = Math.hypot(dx, dy) || 1;
       setGaze({ x: (dx / dl) * 0.8, y: (-dy / dl) * 0.8 });
       await sleep(140);
-      const busy = new Set(ARM_KEYS.filter((k) => arms.current[k].holding));
+      const busy = new Set(ARM_KEYS.filter((k) => armH(k).holding));
       const k = bestArm(L.pos, pt, 0, busy);
-      arms.current[k].reachTo(edgePoint(box, L.pos, -4), performance.now());
+      armH(k).reachTo(edgePoint(box, L.pos, -4), performance.now());
       await sleep(700);
       return k;
     }
@@ -400,7 +419,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
           if (!L.operatorOpen) { await reachFor("panel", true); openedPanel = true; await sleep(500); }
           await reachFor(`tab:${st.tab}`, true);
           await sleep(350);
-          for (const k of ARM_KEYS) arms.current[k].release();
+          for (const k of ARM_KEYS) armH(k).release();
         }
         if (st.move) {
           let to: Vec | null = null;
@@ -422,7 +441,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
         }
         if (st.say) await speak(st.say, st.emotion, s.silent);
         await sleep(st.hold_ms ?? 400);
-        if (used) { arms.current[used].release(); arms.current[used].twistGoal = 0; }
+        if (used) { const h = armH(used); h.release(); h.twistGoal = 0; }
         setCaption("");
       }
       if (openedPanel && L.operatorOpen && !L.stop) {   // leave the app the way I found it
@@ -433,7 +452,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
     } catch (e) {
       report("error", String(e).slice(0, 200));
     } finally {
-      for (const k of ARM_KEYS) arms.current[k].release();
+      for (const k of ARM_KEYS) armH(k).release();
       setCaption("");
       await land();
       L.running = false;
