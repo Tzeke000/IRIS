@@ -568,10 +568,11 @@ def _escalate_to_zeke_discord(sense: str, text: str) -> None:
     try:
         import subprocess
         script = str(Path(__file__).resolve().parent / "discord_dm_user.py")
-        py = str(Path(__file__).resolve().parents[1] / ".venv" / "Scripts" / "python.exe")
+        py = sys.executable   # was the Windows .venv path (2026-10-07 Linux move)
         msg = (f"🚨 [Vector body alarm — direct from the inhabit daemon; "
                f"Iris's session may be frozen] {text}")
         subprocess.Popen([py, script, _ZEKE_USER_ID, msg],
+                         env={**os.environ, "USERPROFILE": os.environ.get("USERPROFILE") or str(Path.home())},
                          stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)

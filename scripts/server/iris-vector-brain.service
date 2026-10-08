@@ -1,0 +1,15 @@
+# iris-vector-brain - Vector's brain server (:8772, loopback; wire-pod's knowledge endpoint). Honors the
+# little-brain park flag (state/little_brain/pilot_deliberately_off.json). 2026-10-07 Vector move.
+[Unit]
+Description=Iris Vector brain server (:8772)
+After=iris-wirepod.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/IRIS
+ExecStart=%h/venvs/iris-v100/bin/python -u %h/IRIS/scripts/vector_brain_server.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
