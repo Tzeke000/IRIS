@@ -116,3 +116,12 @@ apps/ava-control/dev/room.jpg
 *.bmp
 *.heic
 !apps/ava-control/src-tauri/icons/**
+
+# 2026-10-07 hardening pass (repo is PUBLIC): env files, any *.local.* file type, exported model
+# weights, Tauri's generated schemas
+.env
+.env.*
+*.local.*
+models/pose/*.onnx
+models/yolox/*.onnx
+apps/ava-control/src-tauri/gen/
