@@ -921,7 +921,7 @@ export default function App() {
     };
   }, [_innerLifeThoughtFromSnap]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Live camera feed — polls /api/v1/camera/live_frame at ~30fps. Always running,
+  // Live camera feed — MJPEG stream when the runtime has it, else polls /api/v1/camera/live_frame at ~30fps. Always running,
   // not gated by active tab, so any view that displays the camera always has a
   // fresh frame ready. Bumped from 5fps (200ms) to 30fps (33ms) 2026-05-20 to
   // match the capture loop's 30fps target — smoother feed for human eyes which
@@ -933,6 +933,26 @@ export default function App() {
     }
     let active = true;
     let timeoutId: number;
+    // 2026-10-07: prefer the server-pushed MJPEG stream (/api/v1/camera/mjpeg) — the JSON poll
+    // below paid a round trip + base64 per frame and ran ~12-15 fps from the tower. Probe that
+    // the runtime has the endpoint (older runtimes 404) and fall back to polling if not. The
+    // epoch query makes every reconnect (runtime restart -> online flips) open a fresh stream.
+    const tryStream = async (): Promise<boolean> => {
+      const url = `${API_BASE}/api/v1/camera/mjpeg?e=${Date.now()}`;
+      const ctl = new AbortController();
+      const timer = window.setTimeout(() => ctl.abort(), 4000);
+      try {
+        const res = await fetch(url, { signal: ctl.signal });
+        const ok = res.ok && (res.headers.get("content-type") || "").startsWith("multipart/x-mixed-replace");
+        ctl.abort();
+        if (ok && active) setLiveFrameSrc(`${API_BASE}/api/v1/camera/mjpeg?e=${Date.now()}`);
+        return ok;
+      } catch {
+        return false;
+      } finally {
+        window.clearTimeout(timer);
+      }
+    };
     const fetchFrame = async () => {
       try {
         const r = await getJson<{ ok: boolean; b64?: string; age_sec?: number }>("/api/v1/camera/live_frame");
@@ -946,7 +966,9 @@ export default function App() {
       } catch { /* ignore */ }
       if (active) timeoutId = window.setTimeout(fetchFrame, 33);
     };
-    timeoutId = window.setTimeout(fetchFrame, 0);
+    void tryStream().then((streaming) => {
+      if (active && !streaming) timeoutId = window.setTimeout(fetchFrame, 0);
+    });
     return () => { active = false; window.clearTimeout(timeoutId); };
   }, [online]);
 
