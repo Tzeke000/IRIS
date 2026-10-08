@@ -17,6 +17,7 @@ actions:
           point: "<element id>"     an arm reaches to it and holds while the line is spoken
           press: "<element id>"     an arm taps it, and the app clicks it AT the contact frame
           say:   "<one sentence>"   spoken (voice-off flag honoured) + shown as a caption
+          close: console|camera|panel  close the console window / the enlarged camera view / the panel
           gesture: wave|nod|shake|curious
           twist: -1..1              ribbon twist on the pointing arm
           hold_ms: int              extra dwell after the line (default ~400)
@@ -36,7 +37,7 @@ from tools.tool_registry import register_tool
 
 ROOT = Path(__file__).resolve().parents[2]
 ST = ROOT / "state"
-STEP_KEYS = {"tab", "move", "point", "press", "say", "gesture", "twist", "hold_ms", "emotion"}
+STEP_KEYS = {"tab", "move", "point", "press", "close", "say", "gesture", "twist", "hold_ms", "emotion"}
 GESTURES = {"wave", "nod", "shake", "curious"}
 
 
@@ -71,6 +72,11 @@ def _clean_steps(steps: Any) -> tuple[list[dict[str, Any]], list[str]]:
                 c[k] = str(s[k])[:80]
         if s.get("say"):
             c["say"] = str(s["say"])[:400]
+        if s.get("close"):
+            if s["close"] not in ("console", "camera", "panel"):
+                errs.append(f"step {i}: close must be console|camera|panel")
+            else:
+                c["close"] = s["close"]
         if s.get("gesture"):
             if s["gesture"] not in GESTURES:
                 errs.append(f"step {i}: gesture must be one of {sorted(GESTURES)}")

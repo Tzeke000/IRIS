@@ -169,7 +169,7 @@ function CyborgEyeInner(props: CyborgEyeProps) {
     const loop = (now: number) => {
       raf = requestAnimationFrame(loop);
       if (paused) return;
-      const dt = Math.min(0.05, (now - last) / 1000); last = now;
+      const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now;   // rAF time can precede performance.now(): never integrate a NEGATIVE step
       const L = live.current;
       const cfg = getCfg(String(L.emotion || "calmness"));
       const c = deriveBlendColors(String(L.emotionColor || ""), cfg);
@@ -188,7 +188,7 @@ function CyborgEyeInner(props: CyborgEyeProps) {
       rot.vy += (K * (ty - rot.y) - C * rot.vy) * dt; rot.y += rot.vy * dt;
       rot.vx += (K * (tx - rot.x) - C * rot.vx) * dt; rot.x += rot.vx * dt;
       ball.rotation.set(rot.x, rot.y, 0);
-      if (portsKey) (window as unknown as Record<string, unknown>)[`__cy_${portsKey}`] = { gx, gy, ty, tx, rx: rot.x, ry: rot.y, dt };
+      if (portsKey) (window as unknown as Record<string, unknown>)[`__cy_${portsKey}`] = { gx, gy, ty, tx, rx: rot.x, ry: rot.y, dt, ball, camera };
       const s = Math.max(0.35, Math.min(1.35, Number(L.bodyScale ?? 1)));
       ball.scale.setScalar(s);
       // the iris texture: grab the hidden IrisBody canvas

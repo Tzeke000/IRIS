@@ -17,8 +17,8 @@ const PORT_ANGLE: Record<ArmKey, number> = { right: 0, down: Math.PI / 2, left: 
 
 const N = 16;               // nodes per arm
 const WIRES = 6;
-const MAX_STRETCH = 1.55;
-const ITER = 10;
+const MAX_STRETCH = 1.35;
+const ITER = 16;
 
 const add = (a: Vec, b: Vec): Vec => ({ x: a.x + b.x, y: a.y + b.y });
 const sub = (a: Vec, b: Vec): Vec => ({ x: a.x - b.x, y: a.y - b.y });
@@ -33,6 +33,7 @@ export const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math
 export const easeOutBack = (t: number, s = 1.2) => 1 + (s + 1) * Math.pow(t - 1, 3) + s * Math.pow(t - 1, 2);
 
 type Move = {
+  path?: (t: number) => Vec;                      // continuous goal (wave arcs etc.); t in ms since t0
   from: Vec; to: Vec; t0: number; dur: number;   // ms
   antic: number;                                  // anticipation distance (px, opposite the move)
   press?: { at: number; done: boolean; onContact?: () => void };
@@ -70,11 +71,18 @@ export class Arm {
     const tip = this.p[N - 1];
     const from = this.goal ?? { ...tip };
     const d = len(sub(target, from));
-    const dur = opts.dur ?? clamp(380 + d * 0.9, 420, 1100);
+    const dur = opts.dur ?? clamp(480 + d * 1.0, 520, 1300);
     this.move = {
       from, to: target, t0: now, dur, antic: clamp(d * 0.08, 6, 22),
       press: opts.press ? { at: dur + 120, done: false, onContact: opts.onContact } : undefined,
     };
+    this.holding = true;
+  }
+
+  /** Drive the tip along a continuous path (e.g. a wave's arc) for `dur` ms. Smooth by construction. */
+  follow(path: (t: number) => Vec, now: number, dur: number) {
+    const p0 = path(0);
+    this.move = { path, from: p0, to: p0, t0: now, dur, antic: 0 };
     this.holding = true;
   }
 
@@ -88,16 +96,17 @@ export class Arm {
     const m = this.move;
     if (!m) return this.goal;
     const t = now - m.t0;
+    if (m.path) { this.goal = m.path(Math.min(t, m.dur)); this.pressDepth = 0; return this.goal; }
     const dir = norm(sub(m.to, m.from));
-    const ANT = 140;
+    const ANT = 120;
     let g: Vec;
     if (t < ANT) {                       // anticipation: ease a little backwards first
       const k = Math.sin((t / ANT) * Math.PI * 0.5);
-      g = add(m.from, mul(dir, -m.antic * k));
-    } else if (t < ANT + m.dur) {        // travel: ease out with a little overshoot
+      g = add(m.from, mul(dir, -m.antic * 0.6 * k));
+    } else if (t < ANT + m.dur) {        // travel: accelerate, glide, decelerate (tiny settle at the end)
       const u = (t - ANT) / m.dur;
-      const k = easeOutBack(u, 0.9);
-      const start = add(m.from, mul(dir, -m.antic));
+      const k = u < 0.85 ? easeInOutCubic(u / 0.85) * 1.02 : 1.02 - 0.02 * easeInOutCubic((u - 0.85) / 0.15);
+      const start = add(m.from, mul(dir, -m.antic * 0.6));
       g = { x: lerp(start.x, m.to.x, k), y: lerp(start.y, m.to.y, k) };
     } else {
       g = { ...m.to };
@@ -122,7 +131,7 @@ export class Arm {
     if (!this.p.length) this.reset(root, rootDir, 10 * scale);
     const goal = this.animGoal(now);
     // velocity damping: high = smooth (less bouncy); a reaching arm is a bit crisper
-    const damp = goal ? 0.86 : 0.9;
+    const damp = goal ? 0.84 : 0.88;
     const tsec = now / 1000;
     for (let i = 1; i < N; i++) {
       const cur = this.p[i];
@@ -138,7 +147,7 @@ export class Arm {
     }
     // tip pull: toward the goal when reaching, toward the idle drift point otherwise
     const tipTarget = goal ?? idleTip;
-    const tipK = goal ? 0.32 : 0.05;
+    const tipK = goal ? 0.22 : 0.06;
     const tip = this.p[N - 1];
     this.p[N - 1] = add(tip, mul(sub(tipTarget, tip), tipK));
     // stretch: grow the segments if the goal is beyond reach, relax back otherwise
@@ -153,7 +162,7 @@ export class Arm {
       this.p[0] = { ...root };
       // soft root direction: node 1 wants to sit along the port normal, but may bend
       const want1 = add(root, mul(rootDir, L));
-      this.p[1] = { x: lerp(this.p[1].x, want1.x, 0.35), y: lerp(this.p[1].y, want1.y, 0.35) };
+      this.p[1] = { x: lerp(this.p[1].x, want1.x, 0.55), y: lerp(this.p[1].y, want1.y, 0.55) };
       for (let i = 0; i < N - 1; i++) {
         const a = this.p[i], b = this.p[i + 1];
         const d = sub(b, a);
@@ -163,7 +172,19 @@ export class Arm {
         this.p[i] = add(a, mul(d, diff * wa));        // too long → pull the two ends together
         this.p[i + 1] = sub(b, mul(d, diff * wb));
       }
-      if (goal) this.p[N - 1] = { x: lerp(this.p[N - 1].x, tipTarget.x, 0.25), y: lerp(this.p[N - 1].y, tipTarget.y, 0.25) };
+      // bending stiffness: every node also keeps (most of) its distance to the node two ahead → a cable, not a rubber band
+      for (let i = 0; i < N - 2; i++) {
+        const a = this.p[i], c2 = this.p[i + 2];
+        const d = sub(c2, a);
+        const dl = len(d) || 1e-6;
+        const want = 2 * L * 0.94;
+        if (dl < want) {
+          const diff = ((dl - want) / dl) * 0.35;
+          if (i > 0) this.p[i] = add(a, mul(d, diff * 0.5));
+          this.p[i + 2] = sub(c2, mul(d, diff * (i > 0 ? 0.5 : 1)));
+        }
+      }
+      if (goal) this.p[N - 1] = { x: lerp(this.p[N - 1].x, tipTarget.x, 0.2), y: lerp(this.p[N - 1].y, tipTarget.y, 0.2) };
     }
   }
 
@@ -315,8 +336,13 @@ export function idleTip(center: Vec, radius: number, key: ArmKey, spin: number, 
   return { x: center.x + Math.cos(a) * r + w * Math.sin(t * 0.5 + phase), y: center.y + Math.sin(a) * r + w * Math.cos(t * 0.43 + phase) };
 }
 
-/** Which arm should reach a target: the one whose port faces it best. */
+export const FAVORITE: ArmKey = "right";   // my dominant hand (Zeke 10-08: "a person will notice you always use that hand")
+
+/** Which arm should reach a target: my favourite unless it's busy or facing well away, else the best-facing. */
 export function bestArm(center: Vec, target: Vec, spin: number, busy: Set<ArmKey>): ArmKey {
+  const angF = Math.atan2(target.y - center.y, target.x - center.x);
+  const dF = Math.abs(((angF - (PORT_ANGLE[FAVORITE] + spin) + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
+  if (!busy.has(FAVORITE) && dF < Math.PI * 0.42) return FAVORITE;
   const ang = Math.atan2(target.y - center.y, target.x - center.x);
   let best: ArmKey = "right", bd = 1e9;
   for (const k of ARM_KEYS) {
