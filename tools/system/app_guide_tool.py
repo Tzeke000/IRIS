@@ -54,7 +54,7 @@ from tools.tool_registry import register_tool
 
 ROOT = Path(__file__).resolve().parents[2]
 ST = ROOT / "state"
-STEP_KEYS = {"via", "brain", "tab", "move", "point", "press", "close", "say", "gesture", "twist", "hold_ms", "emotion",
+STEP_KEYS = {"via", "brain", "tab", "move", "point", "press", "close", "say", "gesture", "twist", "hold_ms", "emotion", "approach",
              # 10-08 "what I can do" tour: main window hands off to the WIDGET, which drives the desktop
              "minimize", "travel", "desk", "head", "camera", "image", "wait_ms", "look",
              "video", "weather", "map3d", "panel"}
@@ -127,6 +127,8 @@ def _clean_steps(steps: Any) -> tuple[list[dict[str, Any]], list[str]]:
             c["hold_ms"] = max(0, min(15000, int(s["hold_ms"])))
         if s.get("minimize"):
             c["minimize"] = True
+        if s.get("approach"):
+            c["approach"] = True
         if "wait_ms" in s:
             c["wait_ms"] = max(0, min(20000, int(s["wait_ms"])))
         for k in ("travel", "look"):

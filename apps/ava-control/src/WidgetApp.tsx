@@ -15,7 +15,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import OrbCanvas from "./components/OrbCanvas";
 import { API_BASE, getJson } from "./api";
 import { CUBE_MORPH_ENABLED, deriveOrbEmotion, deriveOrbSleep, deriveOrbState } from "./orbDerive";
-import { PANEL, WIDGET_BASE, useWidgetGuide } from "./guide/WidgetGuide";
+import { PANEL, WIDGET_BASE, ZMAX, useWidgetGuide } from "./guide/WidgetGuide";
 import type { OrbState } from "./components/orbShared";
 
 
@@ -182,14 +182,14 @@ export default function WidgetApp() {
         const w = await import("@tauri-apps/api/window");
         const cw = w.getCurrentWindow();
         const [c, p, k] = await Promise.all([w.cursorPosition(), cw.outerPosition(), cw.scaleFactor()]);
-        const dx = (c.x - p.x) / k - eyeX, dy = (c.y - p.y) / k - eyeY;
-        const over = Math.hypot(dx, dy) < ES * 0.55;
+        const dx = (c.x - p.x) / k - eyeX * guide.zoom, dy = (c.y - p.y) / k - eyeY * guide.zoom;
+        const over = Math.hypot(dx, dy) < ES * 0.55 * guide.zoom;
         if (alive && over !== last) { last = over; await cw.setIgnoreCursorEvents(!over); }
       } catch { /* older webview: leave as is */ }
     };
     const id = window.setInterval(() => void tick(), 120);
     return () => { alive = false; window.clearInterval(id); };
-  }, [guide.running, eyeX, eyeY, ES]);
+  }, [guide.running, eyeX, eyeY, ES, guide.zoom]);
 
   // the thrust trail behind me while I fly (drawn in window coordinates; the particles live in screen px)
   const trailCv = useRef<HTMLCanvasElement | null>(null);
@@ -229,17 +229,21 @@ export default function WidgetApp() {
         left: 0,
       }}
     >
+      <div style={{ position: "absolute", left: 0, top: 0, width: `${100 / guide.zoom}%`, height: `${100 / guide.zoom}%`,
+        transform: `scale(${guide.zoom})`, transformOrigin: "0 0" }}>
       <canvas ref={trailCv} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }} />
       {/* the drag handle is my eye itself */}
       <div data-tauri-drag-region style={{ position: "absolute", left: eyeX - ES * 0.55, top: eyeY - ES * 0.55,
         width: ES * 1.1, height: ES * 1.1, borderRadius: "50%", cursor: "grab", zIndex: 3 }} />
       <div style={{ position: "absolute", left: eyeX - ES / 2, top: eyeY - ES / 2, width: ES, height: ES, pointerEvents: "none" }}>
+      {/* rendered ZMAX times bigger and shown at 1/ZMAX, so "coming toward you" stays sharp */}
+      <div style={{ width: ES * ZMAX, height: ES * ZMAX, transform: `scale(${1 / ZMAX})`, transformOrigin: "0 0" }}>
       <OrbCanvas
         emotion={emotion}
         emotionColor={emotionColor}
         state={orbState as OrbState}
         cubeMorphEnabled={CUBE_MORPH_ENABLED}
-        size={ES}
+        size={ES * ZMAX}
         portsKey="widget"
         gaze={guide.gaze}
         sleepProgress={sleepProgress}
@@ -252,6 +256,7 @@ export default function WidgetApp() {
         bodyScale={bodyScale}
         blinkTrigger={blinkSeq}
       />
+      </div>
       </div>
       {guide.caption && (
         <div style={{ position: "absolute", left: offX + 10, top: WIDGET_BASE.h - 78, width: WIDGET_BASE.w - 20,
@@ -280,6 +285,7 @@ export default function WidgetApp() {
           {guide.panel.kind === "weather" && <WeatherCard d={guide.panel.data || {}} />}
         </div>
       )}
+      </div>
     </div>
   );
 }
