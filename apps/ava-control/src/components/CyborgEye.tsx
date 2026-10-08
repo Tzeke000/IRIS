@@ -163,6 +163,7 @@ function CyborgEyeInner(props: CyborgEyeProps) {
 
     // gaze: the whole ball turns (critically damped); a little idle life
     const rot = { x: 0, y: 0, vx: 0, vy: 0 };
+    let prevState = "", avertX = 0, avertY = 0, avertUntil = 0;    // the BODY looks away to think now
     let fpsWatchFrom = Infinity, frames = 0, gaveUp = false, badLow = 0, badHigh = 0;
     const v3 = new THREE.Vector3();
     let raf = 0, last = performance.now(), paused = false;
@@ -181,8 +182,17 @@ function CyborgEyeInner(props: CyborgEyeProps) {
       M.strip.emissive.copy(mood.light); M.strip.emissiveIntensity = 2.6 * glow;
       // gaze target (x right, y up) → yaw/pitch; idle micro-wander when nobody's steering
       const t = now / 1000;
-      const gx = L.gaze ? L.gaze.x : 0.08 * Math.sin(t * 0.37) + 0.05 * Math.sin(t * 1.1);
-      const gy = L.gaze ? L.gaze.y : 0.06 * Math.sin(t * 0.29 + 1.3);
+      const st = String(L.state || "idle");
+      if (st !== prevState) {
+        if (st === "thinking" || st === "deep") {
+          avertX = (Math.random() < 0.5 ? -1 : 1) * (st === "deep" ? 0.55 : 0.4); avertY = 0.3;
+          avertUntil = t + (st === "deep" ? 4 : 2) + Math.random();
+        } else avertUntil = 0;
+        prevState = st;
+      }
+      const av = t < avertUntil;
+      const gx = (L.gaze ? L.gaze.x : 0.05 * Math.sin(t * 0.37)) + (av ? avertX : 0);
+      const gy = (L.gaze ? L.gaze.y : 0.04 * Math.sin(t * 0.29 + 1.3)) + (av ? avertY : 0);
       const ty = gx * 0.34, tx = -gy * 0.28;
       const K = 140, C = 2 * Math.sqrt(K) * 0.9;              // snappy like a saccade, no wobble
       rot.vy += (K * (ty - rot.y) - C * rot.vy) * dt; rot.y += rot.vy * dt;
@@ -262,7 +272,7 @@ function CyborgEyeInner(props: CyborgEyeProps) {
     <div style={{ position: "relative", width: size, height: size }}>
       <div ref={irisHostRef} aria-hidden="true"
         style={{ position: "absolute", left: 0, top: 0, width: IRIS_TEX, height: IRIS_TEX, opacity: 0, pointerEvents: "none", overflow: "hidden" }}>
-        <IrisBody {...irisProps} shapeOverride={shapeOverride === "pointer" ? undefined : shapeOverride} size={IRIS_TEX} />
+        <IrisBody {...irisProps} embedded shapeOverride={shapeOverride === "pointer" ? undefined : shapeOverride} size={IRIS_TEX} />
       </div>
       <div ref={mountRef} style={{ position: "absolute", inset: 0 }} />
     </div>

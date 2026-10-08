@@ -38,6 +38,9 @@ export interface IrisBodyProps extends OrbProps {
   bodyScale?: number;
   /** Increments on each deliberate blink (like recenterTrigger). */
   blinkTrigger?: number;
+  /** Rendered INSIDE the 3D cyborg eye: the iris sits still and centred (no breathing, drift, micro-motion,
+   *  look-aways or disc tilt) — the ball turns instead, and the arms carry the "alive" motion (Zeke 10-08). */
+  embedded?: boolean;
 }
 
 // Camera framing. Canvas half-width in world units = Z * tan(FOV/2).
@@ -239,13 +242,13 @@ const MOTE_FRAG = /* glsl */`
 
 function IrisBodyInner({ emotion, emotionColor, state, size = 320, shapeOverride, pointerAngleDeg = 0, amplitude = 0,
   energy = 0.5, recenterTrigger, cubeMorphEnabled = true, sleepProgress = 0, sleepRemainingSeconds = 0,
-  wakeProgress = 0, gaze, bodyScale = 1, blinkTrigger }: IrisBodyProps) {
+  wakeProgress = 0, gaze, bodyScale = 1, blinkTrigger, embedded = false }: IrisBodyProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   // Live refs: the loop reads these every frame — prop changes never remount the scene.
   const live = useRef({ emotion, emotionColor, state, shapeOverride, pointerAngleDeg, amplitude, energy,
-    recenterTrigger, cubeMorphEnabled, sleepProgress, wakeProgress, gaze, bodyScale, blinkTrigger });
+    recenterTrigger, cubeMorphEnabled, sleepProgress, wakeProgress, gaze, bodyScale, blinkTrigger, embedded });
   live.current = { emotion, emotionColor, state, shapeOverride, pointerAngleDeg, amplitude, energy,
-    recenterTrigger, cubeMorphEnabled, sleepProgress, wakeProgress, gaze, bodyScale, blinkTrigger };
+    recenterTrigger, cubeMorphEnabled, sleepProgress, wakeProgress, gaze, bodyScale, blinkTrigger, embedded };
 
   useEffect(() => {
     const container = mountRef.current;
@@ -444,13 +447,13 @@ function IrisBodyInner({ emotion, emotionColor, state, size = 320, shapeOverride
         } else { avertUntil = -1; }
         prevState = st;
       }
-      const averting = t < avertUntil && !pointer;
+      const averting = t < avertUntil && !pointer && !L.embedded;
       // microsaccades: tiny quick jumps every ~0.4–1.5 s
       if (t >= nextMicroT) {
-        microX = (Math.random() - 0.5) * 0.09; microY = (Math.random() - 0.5) * 0.07;
+        microX = L.embedded ? 0 : (Math.random() - 0.5) * 0.09; microY = L.embedded ? 0 : (Math.random() - 0.5) * 0.07;
         nextMicroT = t + 0.4 + Math.random() * 1.1;
       }
-      const gz = L.gaze;
+      const gz = L.embedded ? undefined : L.gaze;
       const wantX = (gz ? Math.max(-1, Math.min(1, gz.x)) : 0) + (averting ? avertX : 0);
       const wantY = (gz ? Math.max(-1, Math.min(1, gz.y)) : 0) + (averting ? avertY : 0);
       const kLook = 1 - Math.exp(-dt / 0.12);           // saccade-quick, not floaty
@@ -490,7 +493,7 @@ function IrisBodyInner({ emotion, emotionColor, state, size = 320, shapeOverride
       let breathPeriod = 3.5 - en * 1.5;
       if (st === "attentive") breathPeriod = Math.max(1.2, breathPeriod - 0.3);
       breathPeriod += cur.cube * 0.6;
-      const breath = 1 + Math.sin((t / breathPeriod) * Math.PI * 2) * 0.03 * (1 - cur.cube * 0.4);
+      const breath = L.embedded ? 1 : 1 + Math.sin((t / breathPeriod) * Math.PI * 2) * 0.03 * (1 - cur.cube * 0.4);
 
       // ── body scale ──
       const spread = (0.8 + 0.2 * cfg.particleSpread) * (0.92 + 0.08 * cfg.coreScale);
@@ -519,12 +522,13 @@ function IrisBodyInner({ emotion, emotionColor, state, size = 320, shapeOverride
       let recenterFactor = 0;
       const age = t - recenterStartT;
       if (age >= 0 && age < RECENTER_DURATION) recenterFactor = Math.pow(1 - age / RECENTER_DURATION, 3);
-      const driftScale = 0.012 * (HALF / 1.96) * (1 - cur.cube * 0.5) * (1 - recenterFactor) * (1 - cur.point);
+      const driftScale = L.embedded ? 0 : 0.012 * (HALF / 1.96) * (1 - cur.cube * 0.5) * (1 - recenterFactor) * (1 - cur.point);
       root.position.set((Math.sin(t * 0.30) * 8 + Math.sin(t * 0.70) * 4) * driftScale,
                         (Math.cos(t * 0.40) * 6 + Math.cos(t * 0.11) * 3) * driftScale, 0);
 
       // ── gaze / tilt: the disc turns a few degrees toward the person (and per-emotion tilt) ──
-      iris.rotation.set((-cur.gy * 0.35 + cfg.tiltX * 0.3) * (1 - cur.point), cur.gx * 0.35 * (1 - cur.point), 0);
+      if (L.embedded) iris.rotation.set(0, 0, 0);
+      else iris.rotation.set((-cur.gy * 0.35 + cfg.tiltX * 0.3) * (1 - cur.point), cur.gx * 0.35 * (1 - cur.point), 0);
 
       const pa = (L.pointerAngleDeg || 0) * Math.PI / 180;   // deg clockwise from screen-up
       U.uPointDir.value.set(Math.sin(pa), Math.cos(pa));

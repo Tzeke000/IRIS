@@ -22,7 +22,7 @@ type Step = {
   tab?: string; move?: string | { x: number; y: number }; point?: string; press?: string; say?: string;
   gesture?: "wave" | "nod" | "shake" | "curious"; twist?: number; hold_ms?: number; emotion?: string;
 };
-type Script = { ok?: boolean; seq: number; steps: Step[]; stop?: boolean; silent?: boolean };
+type Script = { ok?: boolean; seq: number; steps: Step[]; stop?: boolean; silent?: boolean; issued_ts?: number };
 
 export type GuideOverlayProps = {
   eye: IrisBodyProps;            // the same props the home-screen eye gets (emotion, colour, state…)
@@ -86,7 +86,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
         size = L.size;
       } else {
         const h = homeRect();
-        if (!h || L.operatorOpen) return;    // the panel covers the home eye: no free-floating arms
+        if (!h) return;                      // at home the arms sit on the body's layer: the panel / camera view cover them
         center = h.c; size = h.size;
       }
       // the 3D cyborg eye publishes its real collar positions (they move as the ball turns)
@@ -107,11 +107,12 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
         const seg = (R * 1.7) / 15;                     // arm length ∝ eye size (≈1.7 iris radii)
         if (!a.p.length || Math.hypot(a.p[0].x - root.x, a.p[0].y - root.y) > 400) a.reset(root, dir, seg);
         a.seg = seg;
-        a.step(now, dt, root, dir, idleTip(center, R, k, 0, t, a.phase, R * 1.6), scale);
+        a.step(now, dt, root, dir, idleTip(center, R, k, 0, t, a.phase, R * 1.85), scale);
       }
       // draw the far arms first (up/left), so crossings read with some depth
       for (const k of ["up", "left", "down", "right"] as ArmKey[]) {
-        drawArm(ctx, arms.current[k], { light: c.lightColor, copper: "#d9894f", copperDark: "#5a2f17", scale, dpr, glow });
+        drawArm(ctx, arms.current[k], { light: c.lightColor, copper: "#d9894f", copperDark: "#5a2f17", scale, dpr, glow,
+          width: live3d ? live3d.radius * 0.34 : undefined });
       }
     };
     raf = requestAnimationFrame(loop);
@@ -397,8 +398,16 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
         const s = await getJson<Script>(`/api/v1/app/guide${GUIDE_CLIENT ? `?client=${encodeURIComponent(GUIDE_CLIENT)}` : ""}`);
         const L = live.current;
         if (!alive || !s || typeof s.seq !== "number") return;
-        if (L.seq < 0) { L.seq = s.seq; return; }                // never replay an old script at startup
+        if (L.seq < 0) {                                          // never replay an OLD script at startup…
+          L.seq = s.seq;
+          const fresh = s.issued_ts && Date.now() / 1000 - s.issued_ts < 20 && s.steps?.length && !s.stop;
+          if (!fresh) return;                                     // …but a script issued seconds ago is meant for me
+          console.info("[guide] running fresh script at startup", s.seq);
+          void runScript(s);
+          return;
+        }
         if (s.seq > L.seq) {
+          console.info("[guide] new script", s.seq, "had", L.seq);
           L.seq = s.seq;
           if (s.stop || !s.steps?.length) { L.stop = true; return; }
           if (L.running) { L.stop = true; while (L.running) await sleep(50); }
@@ -428,7 +437,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
 
   const L = live.current;
   return (
-    <div className="guide-layer" aria-hidden="true">
+    <div className={`guide-layer${floating ? " floating" : ""}`} aria-hidden="true">
       <canvas ref={canvasRef} className="guide-canvas" />
       {floating && (
         <div className="guide-eye" style={{

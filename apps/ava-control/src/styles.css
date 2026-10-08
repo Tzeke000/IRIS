@@ -2053,7 +2053,10 @@ body,
 .presence-root .eye-band .orb-canvas-shell.eye-shell { pointer-events: auto; flex: none; }
 
 /* ---- guide layer (2026-10-08): my eye + cable-arms above every tab; never blocks clicks ---- */
-.guide-layer { position: fixed; inset: 0; z-index: 1400; pointer-events: none; }
+/* at home the arms share the body's layer (above the eye band, below the camera view z1200 / panel z1300);
+   when I lift off to guide, the layer rises above everything */
+.guide-layer { position: fixed; inset: 0; z-index: 30; pointer-events: none; }
+.guide-layer.floating { z-index: 1400; }
 .guide-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .guide-eye { position: absolute; left: 0; top: 0; will-change: transform; filter: drop-shadow(0 10px 24px rgba(0,0,0,0.45)); }
 .guide-caption {
