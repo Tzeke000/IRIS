@@ -20,7 +20,8 @@ import { findEl, scanUi } from "./uiMap";
 
 type Step = {
   brain?: string;               // "spin" | "overview" | "focus:<node id>" (e.g. focus:iris, focus:zeke)
-  close?: "console" | "camera" | "panel";
+  close?: "console" | "camera" | "panel" | "ssh" | "proxmox";
+  via?: string;                 // with press: at contact, invoke server_open(<via>) instead of clicking (closable demo windows)
   tab?: string; move?: string | { x: number; y: number }; point?: string; press?: string; say?: string;
   gesture?: "wave" | "nod" | "shake" | "curious"; twist?: number; hold_ms?: number; emotion?: string;
 };
@@ -241,7 +242,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
     return { el, r, c: { x: r.left + r.width / 2, y: r.top + r.height / 2 } };
   };
 
-  const reachFor = async (id: string, press: boolean, twist?: number): Promise<ArmKey | null> => {
+  const reachFor = async (id: string, press: boolean, twist?: number, via?: string): Promise<ArmKey | null> => {
     const tg = await targetOf(id);
     if (!tg) { report("missing", `no element ${id}`); return null; }
     const L = live.current;
@@ -266,6 +267,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       press, onContact: () => {
         contacted = true;
         const tag = tg.el.tagName.toLowerCase();
+        if (via) { void invoke("server_open", { kind: via }).catch((e) => report("note", `open ${via}: ${String(e).slice(0, 120)}`)); return; }
         if (tag === "input" || tag === "textarea" || tag === "select") tg.el.focus();
         else tg.el.click();
       },
@@ -430,18 +432,19 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
           if (to) await travel(to);
         }
         let used: ArmKey | null = null;
-        if (st.press) used = await reachFor(st.press, true, st.twist);
+        if (st.press) used = await reachFor(st.press, true, st.twist, st.via);
         else if (st.point) used = await reachFor(st.point, false, st.twist);
         if (st.brain) used = (await brainMove(st.brain)) ?? used;
         if (st.gesture) await gesture(st.gesture);
         if (st.close === "camera") await reachFor("camera-overlay", true);
         if (st.close === "panel" && L.operatorOpen) await reachFor("panel-close", true);
-        if (st.close === "console") {            // the console is its own window: close it myself
-          try { await invoke("server_close", { kind: "console" }); } catch (e) { report("note", `close console: ${String(e).slice(0, 120)}`); }
+        if (st.close === "console" || st.close === "ssh" || st.close === "proxmox") {   // their own windows: close them myself
+          try { await invoke("server_close", { kind: st.close }); } catch (e) { report("note", `close ${st.close}: ${String(e).slice(0, 120)}`); }
         }
         if (st.say) await speak(st.say, st.emotion, s.silent);
         await sleep(st.hold_ms ?? 400);
-        if (used) { const h = armH(used); h.release(); h.twistGoal = 0; }
+        for (const k of ARM_KEYS) { const h = armH(k); h.release(); h.twistGoal = 0; }
+        void used;
         setCaption("");
       }
       if (openedPanel && L.operatorOpen && !L.stop) {   // leave the app the way I found it
