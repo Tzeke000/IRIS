@@ -201,24 +201,31 @@ fn server_reach() -> String {
 /// terminal window goes with it. My session on the server is untouched (the console only ATTACHES to it).
 #[tauri::command]
 fn server_close(kind: String) -> Result<(), String> {
-    if kind != "console" {
-        return Err(format!("can't close {kind}"));
-    }
+    // what to match on the process command line (each window server_open made carries one)
+    let (win_proc, pat) = match kind.as_str() {
+        "console" => ("ssh.exe", "*iris_console.sh*"),
+        "ssh" => ("ssh.exe", "*ServerAliveInterval=29*"),
+        "proxmox" => ("msedge.exe", "*iris-pve-guide*"),
+        _ => return Err(format!("can't close {kind}")),
+    };
     #[cfg(windows)]
     {
-        let ps = "Get-CimInstance Win32_Process -Filter \"Name='ssh.exe'\" | Where-Object { $_.CommandLine -like '*iris_console.sh*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }";
+        let ps = format!("Get-CimInstance Win32_Process -Filter \"Name='{win_proc}'\" | Where-Object {{ $_.CommandLine -like '{pat}' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}");
         Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", ps])
+            .args(["-NoProfile", "-NonInteractive", "-Command", ps.as_str()])
             .quiet()
             .status()
             .map(|_| ())
-            .map_err(|e| format!("could not close the console: {e}"))
+            .map_err(|e| format!("could not close {kind}: {e}"))
     }
     #[cfg(not(windows))]
     {
-        Command::new("pkill").args(["-f", "iris_console.sh"]).status()
+        let _ = win_proc;
+        let lin = match kind.as_str() { "console" => "iris_console.sh", "ssh" => "ServerAliveInterval=29", _ => "iris-pve-guide" };
+        let _ = pat;
+        Command::new("pkill").args(["-f", lin]).status()
             .map(|_| ())
-            .map_err(|e| format!("could not close the console: {e}"))
+            .map_err(|e| format!("could not close {kind}: {e}"))
     }
 }
 
@@ -231,9 +238,16 @@ fn server_open(kind: String) -> Result<(), String> {
     {
         let mut cmd = Command::new("cmd.exe");
         match kind.as_str() {
-            "ssh" => cmd.args(["/c", "start", "Iris - server shell", SSH, "-t", home.as_str()]),
+            // ServerAliveInterval=29 is a harmless MARKER so server_close("ssh") can find exactly this window's ssh
+            "ssh" => cmd.args(["/c", "start", "Iris - server shell", SSH, "-o", "ServerAliveInterval=29", "-t", home.as_str()]),
             "console" => cmd.args(["/c", "start", "Iris - my console", SSH, "-t", home.as_str(), "~/iris_console.sh"]),
             "proxmox" => cmd.args(["/c", "start", "", pve_ui.as_str()]),
+            // the guide's demo: an Edge app window on its own throwaway profile, so it can be closed again
+            "proxmox_guide" => {
+                let prof = format!("--user-data-dir={}\\iris-pve-guide", std::env::var("TEMP").unwrap_or_else(|_| "C:\\Windows\\Temp".into()));
+                let app = format!("--app={pve_ui}");
+                cmd.args(["/c", "start", "", "msedge", "--new-window", "--ignore-certificate-errors", prof.as_str(), app.as_str()])
+            }
             _ => return Err(format!("unknown target {kind}")),
         };
         // `start` opens the visible window we WANT; the helper cmd itself stays hidden.
@@ -248,8 +262,17 @@ fn server_open(kind: String) -> Result<(), String> {
             return Command::new("xdg-open").arg(&pve_ui).spawn().map(|_| ())
                 .map_err(|e| format!("could not open the Proxmox page: {e}"));
         }
+        if kind == "proxmox_guide" {
+            let prof = "/tmp/iris-pve-guide";
+            let _ = std::fs::create_dir_all(prof);
+            if Command::new("firefox").args(["--new-instance", "--profile", prof, &pve_ui]).spawn().is_ok() {
+                return Ok(());
+            }
+            return Command::new("xdg-open").arg(&pve_ui).spawn().map(|_| ())
+                .map_err(|e| format!("could not open the Proxmox page: {e}"));
+        }
         let remote: Vec<&str> = match kind.as_str() {
-            "ssh" => vec![SSH, "-t", home.as_str()],
+            "ssh" => vec![SSH, "-o", "ServerAliveInterval=29", "-t", home.as_str()],
             "console" => vec![SSH, "-t", home.as_str(), "~/iris_console.sh"],
             _ => return Err(format!("unknown target {kind}")),
         };

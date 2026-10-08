@@ -61,8 +61,20 @@
       "say": "These little lights are health checks. Green means it's working. Red means something failed, so that's the one to mention to Zeke. Grey usually just means it's switched off on purpose, like my voice at night."
     },
     {
+      "point": "status-corner",
+      "say": "Sometimes I won't answer right away, here or on Discord. That usually doesn't mean anything is wrong."
+    },
+    {
       "point": "main:open-my-console",
-      "say": "Here's a handy one. If you message me on Discord, or type to me here, and I don't answer, look at these lights. If they're all green, I'm probably just heads down working, and this button opens my console so you can watch me work."
+      "say": "If these lights are all green, I'm fine, I'm just busy working on something. And this button lets you see exactly what I'm busy with."
+    },
+    {
+      "press": "main:open-my-console",
+      "say": "This is my console. It's me, working, live. Whatever I'm busy with shows up here."
+    },
+    {
+      "close": "console",
+      "say": "When you've seen enough, just close it. Like that."
     },
     {
       "point": "composer",
@@ -127,11 +139,28 @@
     },
     {
       "point": "server:ssh-into-iris-home",
-      "say": "This one opens a command window straight into my computer. That's a tool for Zeke when he's fixing things."
+      "say": "This one opens a command window straight into my computer."
+    },
+    {
+      "press": "server:ssh-into-iris-home",
+      "say": "Like this. It's a tool for Zeke when he's fixing things, so there's nothing in here you need to touch."
+    },
+    {
+      "close": "ssh",
+      "say": "And closed again."
     },
     {
       "point": "server:proxmox-web-page",
-      "say": "And this opens the control page for the whole server, where the virtual machines are managed. Also Zeke's territory."
+      "say": "And this opens the control page for the whole server, where the virtual machines are managed."
+    },
+    {
+      "press": "server:proxmox-web-page",
+      "via": "proxmox_guide",
+      "say": "Here it is. It wants a password, because it's Zeke's territory too."
+    },
+    {
+      "close": "proxmox",
+      "say": "Closing that up."
     },
     {
       "point": "server:open-my-console",

@@ -18,7 +18,8 @@ actions:
           press: "<element id>"     an arm taps it, and the app clicks it AT the contact frame
           say:   "<one sentence>"   spoken (voice-off flag honoured) + shown as a caption
           brain: spin|overview|focus:<node id>   (Brain tab: spin the memory graph / fly to a node and point at it)
-          close: console|camera|panel  close the console window / the enlarged camera view / the panel
+          close: console|camera|panel|ssh|proxmox  close that window / the camera view / the panel
+          via: ssh|console|proxmox_guide   with press: open THIS (a closable window) at contact instead of clicking
           gesture: wave|nod|shake|curious
           twist: -1..1              ribbon twist on the pointing arm
           hold_ms: int              extra dwell after the line (default ~400)
@@ -38,7 +39,7 @@ from tools.tool_registry import register_tool
 
 ROOT = Path(__file__).resolve().parents[2]
 ST = ROOT / "state"
-STEP_KEYS = {"brain", "tab", "move", "point", "press", "close", "say", "gesture", "twist", "hold_ms", "emotion"}
+STEP_KEYS = {"via", "brain", "tab", "move", "point", "press", "close", "say", "gesture", "twist", "hold_ms", "emotion"}
 GESTURES = {"wave", "nod", "shake", "curious"}
 
 
@@ -73,6 +74,11 @@ def _clean_steps(steps: Any) -> tuple[list[dict[str, Any]], list[str]]:
                 c[k] = str(s[k])[:80]
         if s.get("say"):
             c["say"] = str(s["say"])[:400]
+        if s.get("via"):
+            if s["via"] not in ("ssh", "console", "proxmox_guide"):
+                errs.append(f"step {i}: via must be ssh|console|proxmox_guide")
+            else:
+                c["via"] = s["via"]
         if s.get("brain"):
             b = str(s["brain"])[:80]
             if b in ("spin", "overview") or b.startswith("focus:"):
@@ -80,8 +86,8 @@ def _clean_steps(steps: Any) -> tuple[list[dict[str, Any]], list[str]]:
             else:
                 errs.append(f"step {i}: brain must be spin|overview|focus:<node id>")
         if s.get("close"):
-            if s["close"] not in ("console", "camera", "panel"):
-                errs.append(f"step {i}: close must be console|camera|panel")
+            if s["close"] not in ("console", "camera", "panel", "ssh", "proxmox"):
+                errs.append(f"step {i}: close must be console|camera|panel|ssh|proxmox")
             else:
                 c["close"] = s["close"]
         if s.get("gesture"):
