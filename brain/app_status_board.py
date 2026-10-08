@@ -368,10 +368,35 @@ def _check_post_office() -> tuple[bool | None, str]:
         return False, f"port {port}: {e.__class__.__name__}"
 
 
-def _check_unit(unit: str):
+_VOICE_OFF_FLAG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "state", "voice_deliberately_off.json")
+
+
+def _voice_off_reason() -> str | None:
+    """Why the voice is DELIBERATELY off (quiet hours / Zeke's word), or None.
+    Parses the key - a flag file holding {"off": false} means ON."""
+    try:
+        import json
+        with open(_VOICE_OFF_FLAG, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:  # noqa: BLE001 - absent/unreadable = not deliberately off
+        return None
+    if not d.get("off"):
+        return None
+    why = str(d.get("why") or "turned off on purpose")
+    if "quiet hours" in why:
+        return "nighttime quiet hours, back at 05:10"
+    return why[:80]
+
+
+def _check_unit(unit: str, voice: bool = False):
     def _f() -> tuple[bool | None, str]:
         rc, out = _run(["systemctl", "--user", "is-active", unit], 5.0)
         state = out.strip().splitlines()[-1] if out.strip() else "?"
+        if state != "active" and voice:
+            why = _voice_off_reason()
+            if why:  # off ON PURPOSE - neutral, not a fault
+                return None, f"inactive because {why}"
         return (state == "active"), f"{unit}: {state}"
     return _f
 
@@ -383,8 +408,8 @@ if not _IS_WIN:
         "desktop_bridge": {"label": "Desktop bridge", "fn": _check_desktop_bridge, "every": 60.0},
         "wake_on_lan":    {"label": "Wake-on-LAN (tower)", "fn": _check_wol, "every": 600.0},
         "post_office":    {"label": "Post-office (letters)", "fn": _check_post_office, "every": 30.0},
-        "mouth":          {"label": "Mouth service", "fn": _check_unit("iris-mouth"), "every": 15.0},
-        "ears":           {"label": "Ears service", "fn": _check_unit("iris-ears"), "every": 15.0},
+        "mouth":          {"label": "Mouth service", "fn": _check_unit("iris-mouth", voice=True), "every": 15.0},
+        "ears":           {"label": "Ears service", "fn": _check_unit("iris-ears", voice=True), "every": 15.0},
     }
 
 
