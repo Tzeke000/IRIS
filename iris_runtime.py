@@ -761,6 +761,9 @@ def voice_speak(text: str, emotion: str = "neutral", intensity: float = 0.5) -> 
                     buf += chunk
             resp = _json.loads(buf.split(b"\n", 1)[0].decode("utf-8", "replace")) if buf else {}
             if resp.get("ok"):
+                _res = str(resp.get("result") or "")
+                if "dropped" in _res:   # 10-08: the daemon DROPPED it (barge-in mute / mouth_muted) — say so, never "ok"
+                    return {"ok": False, "spoken": False, "dropped": _res[:160], "engine": "styletts2"}
                 _voice_speak_log_transcript(text)
                 return {"ok": True, "spoke_ms": int((time.time() - t0) * 1000), "engine": "styletts2"}
         except Exception:
