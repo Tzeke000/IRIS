@@ -196,8 +196,46 @@ fn server_reach() -> String {
     )
 }
 
+#[cfg(windows)]
+const CHROME: &str = r"C:\Program Files\Google\Chrome\Application\chrome.exe";
+
+/// Chrome's visible top-level windows (2026-10-08, the guide's Proxmox demo). `snap` remembers which windows
+/// exist BEFORE I open mine; `close` posts WM_CLOSE only to windows that are NEW since the snap AND whose title
+/// is the Proxmox page (or its certificate warning) — so a Chrome window Zeke had open is never touched.
+#[cfg(windows)]
+fn chrome_windows(mode: &str) -> Result<(), String> {
+    const PS: &str = r#"param($mode)
+$snap = Join-Path $env:TEMP 'iris_pve_guide_before.txt'
+Add-Type -TypeDefinition 'using System;using System.Text;using System.Runtime.InteropServices;public static class IrisW{public delegate bool P(IntPtr h,IntPtr l);[DllImport("user32.dll")]public static extern bool EnumWindows(P p,IntPtr l);[DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern int GetWindowText(IntPtr h,StringBuilder s,int n);[DllImport("user32.dll")]public static extern bool IsWindowVisible(IntPtr h);[DllImport("user32.dll")]public static extern uint GetWindowThreadProcessId(IntPtr h,out uint p);[DllImport("user32.dll")]public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);}'
+$ids = @(Get-Process chrome -ErrorAction SilentlyContinue | ForEach-Object { [uint32]$_.Id })
+$global:wins = @()
+$cb = [IrisW+P]{ param($h, $l)
+  if ([IrisW]::IsWindowVisible($h)) {
+    $p = [uint32]0; [void][IrisW]::GetWindowThreadProcessId($h, [ref]$p)
+    if ($ids -contains $p) { $sb = New-Object System.Text.StringBuilder 512; [void][IrisW]::GetWindowText($h, $sb, 512)
+      if ($sb.Length -gt 0) { $global:wins += [pscustomobject]@{ h = [int64]$h; t = $sb.ToString() } } } }
+  $true }
+[void][IrisW]::EnumWindows($cb, [IntPtr]::Zero)
+if ($mode -eq 'list') { $global:wins | ForEach-Object { "$($_.h) $($_.t)" }; exit 0 }
+if ($mode -eq 'snap') { ($global:wins | ForEach-Object { $_.h }) -join "`n" | Set-Content -Path $snap -Encoding ascii; exit 0 }
+$before = @(); if (Test-Path $snap) { $before = @(Get-Content $snap | Where-Object { $_ } | ForEach-Object { [int64]$_ }) }
+foreach ($w in $global:wins) {
+  if (($before -notcontains $w.h) -and ($w.t -match 'Proxmox|Privacy error|not private|:8006')) { [void][IrisW]::PostMessage([IntPtr]$w.h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
+}
+"#;
+    let tmp = std::env::var("TEMP").unwrap_or_else(|_| r"C:\Windows\Temp".into());
+    let script = format!(r"{tmp}\iris_chrome_windows.ps1");
+    std::fs::write(&script, PS).map_err(|e| format!("could not write helper: {e}"))?;
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script.as_str(), mode])
+        .quiet()
+        .status()
+        .map(|_| ())
+        .map_err(|e| format!("chrome windows {mode}: {e}"))
+}
+
 /// Close a window that server_open opened (2026-10-08: the guide opens my console to show it, then closes it
-/// itself). Only the console is closable: it kills the local ssh client running ~/iris_console.sh, and the
+/// itself). console/ssh: kill the local ssh client that window runs (marker on its command line), and the
 /// terminal window goes with it. My session on the server is untouched (the console only ATTACHES to it).
 #[tauri::command]
 fn server_close(kind: String) -> Result<(), String> {
@@ -205,11 +243,14 @@ fn server_close(kind: String) -> Result<(), String> {
     let (win_proc, pat) = match kind.as_str() {
         "console" => ("ssh.exe", "*iris_console.sh*"),
         "ssh" => ("ssh.exe", "*ServerAliveInterval=29*"),
-        "proxmox" => ("msedge.exe", "*iris-pve-guide*"),
+        "proxmox" => ("chrome.exe", ""),
         _ => return Err(format!("can't close {kind}")),
     };
     #[cfg(windows)]
     {
+        if kind == "proxmox" {
+            return chrome_windows("close");
+        }
         let ps = format!("Get-CimInstance Win32_Process -Filter \"Name='{win_proc}'\" | Where-Object {{ $_.CommandLine -like '{pat}' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}");
         Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", ps.as_str()])
@@ -221,8 +262,12 @@ fn server_close(kind: String) -> Result<(), String> {
     #[cfg(not(windows))]
     {
         let _ = win_proc;
-        let lin = match kind.as_str() { "console" => "iris_console.sh", "ssh" => "ServerAliveInterval=29", _ => "iris-pve-guide" };
         let _ = pat;
+        if kind == "proxmox" {   // a window in his normal browser: close it by title if wmctrl is around, else leave it
+            let _ = Command::new("wmctrl").args(["-c", "Proxmox"]).status();
+            return Ok(());
+        }
+        let lin = match kind.as_str() { "console" => "iris_console.sh", _ => "ServerAliveInterval=29" };
         Command::new("pkill").args(["-f", lin]).status()
             .map(|_| ())
             .map_err(|e| format!("could not close {kind}: {e}"))
@@ -242,11 +287,15 @@ fn server_open(kind: String) -> Result<(), String> {
             "ssh" => cmd.args(["/c", "start", "Iris - server shell", SSH, "-o", "ServerAliveInterval=29", "-t", home.as_str()]),
             "console" => cmd.args(["/c", "start", "Iris - my console", SSH, "-t", home.as_str(), "~/iris_console.sh"]),
             "proxmox" => cmd.args(["/c", "start", "", pve_ui.as_str()]),
-            // the guide's demo: an Edge app window on its own throwaway profile, so it can be closed again
+            // the guide's demo (Zeke 10-08): a normal window in the Chrome he already runs (not an app window,
+            // not a throwaway profile). Snapshot Chrome's windows FIRST, so server_close closes only the one I made.
             "proxmox_guide" => {
-                let prof = format!("--user-data-dir={}\\iris-pve-guide", std::env::var("TEMP").unwrap_or_else(|_| "C:\\Windows\\Temp".into()));
-                let app = format!("--app={pve_ui}");
-                cmd.args(["/c", "start", "", "msedge", "--new-window", "--ignore-certificate-errors", prof.as_str(), app.as_str()])
+                let _ = chrome_windows("snap");
+                if std::path::Path::new(CHROME).exists() {
+                    cmd.args(["/c", "start", "", CHROME, "--new-window", pve_ui.as_str()])
+                } else {
+                    cmd.args(["/c", "start", "", pve_ui.as_str()])
+                }
             }
             _ => return Err(format!("unknown target {kind}")),
         };
@@ -262,12 +311,7 @@ fn server_open(kind: String) -> Result<(), String> {
             return Command::new("xdg-open").arg(&pve_ui).spawn().map(|_| ())
                 .map_err(|e| format!("could not open the Proxmox page: {e}"));
         }
-        if kind == "proxmox_guide" {
-            let prof = "/tmp/iris-pve-guide";
-            let _ = std::fs::create_dir_all(prof);
-            if Command::new("firefox").args(["--new-instance", "--profile", prof, &pve_ui]).spawn().is_ok() {
-                return Ok(());
-            }
+        if kind == "proxmox_guide" {   // his normal browser, like the real button
             return Command::new("xdg-open").arg(&pve_ui).spawn().map(|_| ())
                 .map_err(|e| format!("could not open the Proxmox page: {e}"));
         }
