@@ -2032,8 +2032,8 @@ async def ws(socket: WebSocket) -> None:
 # the host STREAMED the speech or the voice_speak MCP tool did. The daemon is the source of
 # truth; this only mirrors. FAIL-OPEN: any error leaves the orb on its prior (emotion) state,
 # never crashes iris_runtime.
-_VOICE_STATUS_FILE = Path(r"D:\Wren-Companion\scratch\voice_status.json")
-_VOICE_AMP_FILE = Path(r"D:\Wren-Companion\scratch\voice_amplitude.json")
+_VOICE_STATUS_FILE = Path(__file__).resolve().parent.parent / "scratch" / "voice_status.json"  # repo-relative (10-07: the D:\ literal never resolved on the Linux server - captions + orb voice state were dead)
+_VOICE_AMP_FILE = Path(__file__).resolve().parent.parent / "scratch" / "voice_amplitude.json"
 _VOICE_DAEMON_ADDR = (os.environ.get("IRIS_VOICE_HOST", "127.0.0.1"), int(os.environ.get("WREN_VOICE_DAEMON_PORT", "8770")))
 # Daemon vocabulary (wren_voice_status.STATES) -> orb voice_loop.state vocabulary (App.tsx).
 _VOICE_STATE_MAP = {
