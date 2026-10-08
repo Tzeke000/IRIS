@@ -9,6 +9,7 @@
 // The layer is pointer-events:none, so it never blocks clicks.
 import { useCallback, useEffect, useRef, useState } from "react";
 import OrbCanvas from "../components/OrbCanvas";
+import { eyePorts } from "../components/CyborgEye";
 import type { IrisBodyProps } from "../components/IrisBody";
 import { deriveBlendColors, getCfg } from "../components/orbShared";
 import { getJson, postJson } from "../api";
@@ -82,14 +83,19 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
         if (!h || L.operatorOpen) return;    // the panel covers the home eye: no free-floating arms
         center = h.c; size = h.size;
       }
-      const R = (size / 2) * IRIS_FRAC;
+      // the 3D cyborg eye publishes its real collar positions (they move as the ball turns)
+      const ep = eyePorts.get(L.floating ? "guide" : "home");
+      const live3d = ep && performance.now() - ep.ts < 400 ? ep : null;
+      if (live3d) center = live3d.center;
+      const R = live3d ? live3d.radius * 0.9 : (size / 2) * IRIS_FRAC;
       const scale = Math.max(0.55, Math.min(1.6, R / 60));
       const dt = Math.min(50, now - last); last = now;
       const t = now / 1000;
       const c = colorRef.current;
       for (const k of ARM_KEYS) {
         const a = arms.current[k];
-        const { root, dir } = port(center, R * 0.98, k, 0);
+        const pp = live3d?.ports[k];
+        const { root, dir } = pp ? { root: { x: pp.x, y: pp.y }, dir: { x: pp.nx, y: pp.ny } } : port(center, R * 0.98, k, 0);
         const seg = (R * 1.7) / 15;                     // arm length ∝ eye size (≈1.7 iris radii)
         if (!a.p.length || Math.hypot(a.p[0].x - root.x, a.p[0].y - root.y) > 400) a.reset(root, dir, seg);
         a.seg = seg;
@@ -221,6 +227,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
 
   const speak = async (text: string, emotion?: string, silent?: boolean) => {
     setCaption(text);
+    report("say", text.slice(0, 200));
     let spoken = false;
     if (!silent) try {
       const r = await postJson<{ ok: boolean; spoken?: boolean }>("/api/v1/app/guide/say", { text, emotion });
@@ -386,7 +393,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
           width: L.size, height: L.size,
           transform: `translate(${eyePos.x + L.offset.x - L.size / 2}px, ${eyePos.y + L.offset.y - L.size / 2}px)`,
         }}>
-          <OrbCanvas {...eye} size={L.size} gaze={gaze} />
+          <OrbCanvas {...eye} size={L.size} gaze={gaze} portsKey="guide" />
         </div>
       )}
       {caption && (
