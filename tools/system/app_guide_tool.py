@@ -18,6 +18,8 @@ actions:
           gesture: wave|nod|shake|curious
           twist: -1..1              ribbon twist on the pointing arm
           hold_ms: int              extra dwell after the line (default ~400)
+  tour  {name, silent?}       play a saved tour from config/guide_tours/<name>.json (e.g. "basics")
+  tours                       list saved tours
   stop                        end the current script (eye returns home)
   status                      the app's last progress report
 """
@@ -98,6 +100,18 @@ def _app_guide(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         items = [{k: it.get(k) for k in ("id", "label", "kind", "tab", "visible")} for it in m.get("items", [])]
         return {"ok": True, "age_s": round(age, 1), "tab": m.get("tab"), "window": m.get("window"),
                 "n": len(items), "items": items}
+    if action == "tours":
+        d = ROOT / "config" / "guide_tours"
+        return {"ok": True, "tours": sorted(p.stem for p in d.glob("*.json")) if d.is_dir() else []}
+    if action == "tour":
+        name = str(params.get("name") or "basics")
+        if not name.replace("_", "").replace("-", "").isalnum():
+            return {"ok": False, "error": "bad tour name"}
+        t = _read(ROOT / "config" / "guide_tours" / f"{name}.json", None)
+        if not t:
+            return {"ok": False, "error": f"no tour {name!r} (action=tours lists them)"}
+        params = {**params, "steps": t.get("steps"), "action": "run"}
+        action = "run"
     if action == "run":
         steps, errs = _clean_steps(params.get("steps"))
         if errs and not steps:
@@ -116,7 +130,14 @@ def _app_guide(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     if action == "status":
         cur = _read(ST / "app_guide.json", {"seq": 0, "steps": []})
         prog = _read(ST / "app_guide_progress.json", None)
-        return {"ok": True, "script_seq": cur.get("seq"), "n_steps": len(cur.get("steps") or []),
+        hist = []
+        try:
+            lines = (ST / "app_guide_progress.jsonl").read_text(encoding="utf-8").splitlines()[-400:]
+            hist = [json.loads(x) for x in lines if x.strip()]
+            hist = [h for h in hist if h.get("seq") == cur.get("seq") and h.get("status") not in ("step",)]
+        except Exception:  # noqa: BLE001
+            pass
+        return {"ok": True, "script_seq": cur.get("seq"), "n_steps": len(cur.get("steps") or []), "events": hist[-30:],
                 "progress": prog, "progress_age_s": round(time.time() - float(prog.get("ts") or 0), 1) if prog else None}
     return {"ok": False, "error": f"unknown action {action!r} (ui_map|run|stop|status)"}
 
@@ -125,7 +146,7 @@ register_tool(
     name="app_guide",
     description="Drive the app's guide overlay (my eye + cable-arms above every tab): action=ui_map (what's on "
                 "screen, element ids) | run {steps:[{tab,move,point,press,say,gesture,twist,hold_ms}]} | stop | "
-                "status. The app speaks each 'say' and lands the arm on 'point' in time with the line. Tier 1.",
+                "status | tour {name} | tours. The app speaks each 'say' and lands the arm on 'point' in time with the line. Tier 1.",
     tier=1,
     handler=_app_guide,
 )

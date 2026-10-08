@@ -1,0 +1,27 @@
+{
+  "name": "basics",
+  "about": "First tour of the app for someone who has never seen it. Plain words; what to worry about and what not to.",
+  "steps": [
+    {"move": "center", "gesture": "wave", "say": "Hi! I'm Iris. Let me show you around my app."},
+    {"move": "home", "point": "eye", "say": "This big eye in the middle is me. It changes colour with my mood, and it looks toward whoever I'm paying attention to."},
+    {"point": "chip:mood", "say": "Up here it says what mood I'm in right now."},
+    {"point": "chip:running-on", "say": "This says which computer I'm running on. Right now it's the server."},
+    {"point": "chip:model", "say": "And this is the name of the brain I'm thinking with."},
+    {"point": "chip:cpu-mine", "say": "These numbers show how hard my computer is working. They jump up and down all the time, and that's normal."},
+    {"point": "chip:server-cpu-1", "say": "These also show the temperature. Anything under about eighty degrees is fine. If one stays above eighty-five for a long time, let Zeke know."},
+    {"point": "chip:gpu", "say": "The GPU is the part I use to see and to speak. Being busy is normal for it, so don't worry about a high number here."},
+    {"point": "chip:ram", "say": "Memory and storage only matter if they get almost completely full. If the first number gets right up next to the second, tell Zeke."},
+    {"point": "chip:network", "say": "This is just how much data is moving. Nothing to watch here."},
+    {"point": "camera", "say": "Down here in the corner is what my camera sees. Click it to see it bigger."},
+    {"point": "status-corner", "say": "These little lights are health checks. Green means it's working. Red means something failed, so that's the one to mention to Zeke. Grey usually just means it's switched off on purpose, like my voice at night."},
+    {"point": "composer", "say": "You can type to me in this box, any time."},
+    {"point": "mic", "say": "This button mutes the microphone. When it's off, I can't hear you, but I can still talk."},
+    {"point": "voice", "say": "This one turns my voice on and off."},
+    {"point": "power", "twist": -0.5, "say": "And this one shuts me down. Please don't press it unless Zeke asks you to."},
+    {"tab": "voice", "say": "This button opens my panel, where all my tabs live. This is the Voice tab."},
+    {"point": "voice:test-voice", "say": "Here you can test my voice, and mute it if you need some quiet."},
+    {"tab": "chat", "say": "The Chat tab keeps our whole conversation, so you can scroll back and read anything I said."},
+    {"tab": "brain", "say": "And this is my Brain tab. It's a map of my memories and how they connect. You can drag it around to explore."},
+    {"move": "center", "gesture": "nod", "say": "That's the tour! If you ever get stuck, just ask me. I'm happy to help."}
+  ]
+}
