@@ -13,10 +13,12 @@ import { eyePorts } from "../components/CyborgEye";
 import type { IrisBodyProps } from "../components/IrisBody";
 import { deriveBlendColors, getCfg } from "../components/orbShared";
 import { getJson, postJson } from "../api";
+import { invoke } from "@tauri-apps/api/core";
 import { Arm, ARM_KEYS, ArmKey, bestArm, drawArm, easeInOutCubic, idleTip, port, Vec } from "./arms";
 import { findEl, scanUi } from "./uiMap";
 
 type Step = {
+  close?: "console" | "camera" | "panel";
   tab?: string; move?: string | { x: number; y: number }; point?: string; press?: string; say?: string;
   gesture?: "wave" | "nod" | "shake" | "curious"; twist?: number; hold_ms?: number; emotion?: string;
 };
@@ -93,7 +95,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       if (live3d) center = live3d.center;
       const R = live3d ? live3d.radius * 0.9 : (size / 2) * IRIS_FRAC;
       const scale = Math.max(0.55, Math.min(1.6, R / 60));
-      const dt = Math.min(50, now - last); last = now;
+      const dt = Math.max(0, Math.min(50, now - last)); last = now;
       slowAvg = slowAvg * 0.97 + dt * 0.03;
       if (glow && slowAvg > 30) glow = false;
       const t = now / 1000;
@@ -118,23 +120,26 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
 
   // ---------------------------------------------------------------- eye travel (Disney timing)
   const travel = useCallback(async (to: Vec) => {
+    // Glide: a small, soft wind-up, then accelerate → cruise → decelerate (no 0→100→0 jumps)
     const L = live.current;
     const from = { ...L.pos };
     const d = Math.hypot(to.x - from.x, to.y - from.y);
     if (d < 2) return;
     const dir = { x: (to.x - from.x) / d, y: (to.y - from.y) / d };
-    const ANT = 160, dur = Math.min(1100, 420 + d * 0.55);
+    const ANT = 180, dur = Math.min(1600, 650 + d * 0.75);
+    const back = Math.min(8, d * 0.03);
     const t0 = performance.now();
     setGaze({ x: dir.x * 0.85, y: -dir.y * 0.85 });            // the eye looks where it's going, first
+    const smoother = (u: number) => u * u * u * (u * (u * 6 - 15) + 10);   // smootherstep: zero accel at both ends
     for (;;) {
       const t = performance.now() - t0;
-      if (t < ANT) {                                              // anticipation: dip back a little
-        const k = Math.sin((t / ANT) * Math.PI * 0.5);
-        L.pos = { x: from.x - dir.x * 10 * k, y: from.y - dir.y * 10 * k };
+      if (t < ANT) {
+        const k = 0.5 - 0.5 * Math.cos((t / ANT) * Math.PI);
+        L.pos = { x: from.x - dir.x * back * k, y: from.y - dir.y * back * k };
       } else if (t < ANT + dur) {
-        const u = easeInOutCubic((t - ANT) / dur);
-        const s = { x: from.x - dir.x * 10, y: from.y - dir.y * 10 };
-        L.pos = { x: s.x + (to.x - s.x) * u, y: s.y + (to.y - s.y) * u };
+        const u = smoother((t - ANT) / dur);
+        const s0 = { x: from.x - dir.x * back, y: from.y - dir.y * back };
+        L.pos = { x: s0.x + (to.x - s0.x) * u, y: s0.y + (to.y - s0.y) * u };
       } else break;
       setEyePos({ ...L.pos });
       await sleep(16);
@@ -168,20 +173,38 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
   }, [onFloatingChange, travel]);
 
   // where the eye should float to sit beside a target without covering it
+  // Where my body should float to point at a rect: my favourite (right) hand toward it, my body NEVER over it.
+  const bodyR = () => live.current.size * 0.47;
+  const overlaps = (p: Vec, r: DOMRect, pad = 14) => {
+    const nx = Math.max(r.left - pad, Math.min(p.x, r.right + pad)), ny = Math.max(r.top - pad, Math.min(p.y, r.bottom + pad));
+    return Math.hypot(p.x - nx, p.y - ny) < bodyR();
+  };
   const besideTarget = (r: DOMRect): Vec => {
     const L = live.current;
     const W = window.innerWidth, H = window.innerHeight;
     const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-    const gap = L.size * 0.9 + 40;
+    const R = (L.size / 2) * IRIS_FRAC;
+    const gap = bodyR() + R * 1.1 + 18;
+    const m = L.size / 2 + 8;
+    const clampP = (p: Vec) => ({ x: Math.max(m, Math.min(W - m, p.x)), y: Math.max(m, Math.min(H - m, p.y)) });
+    // favourite-hand poses first (body to the LEFT so the right arm reaches right), then the rest
     const cands: Vec[] = [
-      { x: cx - r.width / 2 - gap, y: cy }, { x: cx + r.width / 2 + gap, y: cy },
-      { x: cx, y: cy + r.height / 2 + gap }, { x: cx, y: cy - r.height / 2 - gap },
-    ];
-    const m = L.size / 2 + 10;
-    const ok = cands.filter((p) => p.x > m && p.x < W - m && p.y > m && p.y < H - m);
-    const pick = (ok.length ? ok : cands).sort((a, b) =>
-      Math.hypot(a.x - L.pos.x, a.y - L.pos.y) - Math.hypot(b.x - L.pos.x, b.y - L.pos.y))[0];
-    return { x: Math.max(m, Math.min(W - m, pick.x)), y: Math.max(m, Math.min(H - m, pick.y)) };
+      { x: r.left - gap, y: cy }, { x: r.left - gap * 0.75, y: r.bottom + gap * 0.7 },
+      { x: r.left - gap * 0.75, y: r.top - gap * 0.7 }, { x: cx, y: r.bottom + gap }, { x: cx, y: r.top - gap },
+      { x: r.right + gap, y: cy },
+    ].map(clampP);
+    for (const c of cands) if (!overlaps(c, r)) return c;
+    return cands[0];
+  };
+  /** The point on the rect's edge facing my body, just outside it (pointing) or just inside it (pressing). */
+  const edgePoint = (r: DOMRect, from: Vec, inset: number): Vec => {
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const dx = from.x - cx, dy = from.y - cy;
+    const sx = dx === 0 ? Infinity : (r.width / 2) / Math.abs(dx), sy = dy === 0 ? Infinity : (r.height / 2) / Math.abs(dy);
+    const k = Math.min(sx, sy);
+    const ex = cx + dx * k, ey = cy + dy * k;
+    const dl = Math.hypot(dx, dy) || 1;
+    return { x: ex - (dx / dl) * inset, y: ey - (dy / dl) * inset };   // inset<0 = outside the edge
   };
 
   const targetOf = async (id: string): Promise<{ el: HTMLElement; c: Vec; r: DOMRect } | null> => {
@@ -202,9 +225,11 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
     if (!tg) { report("missing", `no element ${id}`); return null; }
     const L = live.current;
     const R = (L.size / 2) * IRIS_FRAC;
-    const scale = Math.max(0.55, Math.min(1.6, R / 60));
-    const maxReach = R + R * 1.7 * 1.45;
-    if (Math.hypot(tg.c.x - L.pos.x, tg.c.y - L.pos.y) > maxReach * 0.92) await travel(besideTarget(tg.r));
+    const maxReach = R + R * 1.7 * 1.3;
+    const here = Math.hypot(tg.c.x - L.pos.x, tg.c.y - L.pos.y);
+    const facesFav = tg.c.x > L.pos.x + 10;               // target on my favourite (right) side
+    const big = tg.r.width * tg.r.height > 0.35 * window.innerWidth * window.innerHeight;   // e.g. the enlarged camera
+    if (!big && (overlaps(L.pos, tg.r) || here > maxReach * 0.9 || !facesFav)) await travel(besideTarget(tg.r));
     const dx = tg.c.x - L.pos.x, dy = tg.c.y - L.pos.y, dl = Math.hypot(dx, dy) || 1;
     setGaze({ x: (dx / dl) * 0.8, y: (-dy / dl) * 0.8 });       // eye leads: look first…
     await sleep(140);                                             // …then the arm goes
@@ -213,7 +238,10 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
     const a = arms.current[k];
     if (twist !== undefined) a.twistGoal = twist;
     let contacted = false;
-    a.reachTo(tg.c, performance.now(), {
+    const aim = big
+      ? { x: L.pos.x + (tg.c.x - L.pos.x) * 0.25 + R * 1.4, y: L.pos.y + (tg.c.y - L.pos.y) * 0.25 }   // tap the big thing near me
+      : edgePoint(tg.r, L.pos, press ? Math.min(10, Math.min(tg.r.width, tg.r.height) * 0.3) : -6);
+    a.reachTo(aim, performance.now(), {
       press, onContact: () => {
         contacted = true;
         const tag = tg.el.tagName.toLowerCase();
@@ -274,15 +302,18 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       L.offset = { x: 0, y: 0 };
       setGaze(undefined);
     } else if (g === "wave") {
+      // a smooth wave: the hand rises, then swings on an ARC (pendulum about a pivot), then settles back
       const a = arms.current["up"].holding ? arms.current["right"] : arms.current["up"];
       const R = (L.size / 2) * IRIS_FRAC;
-      const hand = { x: base.x + R * 1.6, y: base.y - R * 2.4 };
-      a.reachTo(hand, performance.now(), { dur: 420 });
-      await sleep(560);
-      for (let i = 0; i < 4; i++) {
-        a.reachTo({ x: hand.x + (i % 2 ? -1 : 1) * R * 0.7, y: hand.y + (i % 2 ? 6 : -6) }, performance.now(), { dur: 260 });
-        await sleep(300);
-      }
+      const pivot = { x: base.x + R * 1.1, y: base.y - R * 1.2 };
+      const rad = R * 1.35, dur = 2600;
+      a.follow((t) => {
+        const u = t / dur;
+        const env = Math.sin(Math.PI * Math.min(1, u * 1.15)) ** 0.7;         // ease in and out of the wave
+        const ang = -Math.PI / 2 + 0.55 * env * Math.sin(2 * Math.PI * 1.7 * (t / 1000));
+        return { x: pivot.x + Math.cos(ang) * rad, y: pivot.y + Math.sin(ang) * rad * 0.85 };
+      }, performance.now(), dur);
+      await sleep(dur);
       a.release();
     } else if (g === "curious") {
       const a = arms.current["up"];
@@ -332,6 +363,11 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
         if (st.press) used = await reachFor(st.press, true, st.twist);
         else if (st.point) used = await reachFor(st.point, false, st.twist);
         if (st.gesture) await gesture(st.gesture);
+        if (st.close === "camera") await reachFor("camera-overlay", true);
+        if (st.close === "panel" && L.operatorOpen) await reachFor("panel-close", true);
+        if (st.close === "console") {            // the console is its own window: close it myself
+          try { await invoke("server_close", { kind: "console" }); } catch (e) { report("note", `close console: ${String(e).slice(0, 120)}`); }
+        }
         if (st.say) await speak(st.say, st.emotion, s.silent);
         await sleep(st.hold_ms ?? 400);
         if (used) { arms.current[used].release(); arms.current[used].twistGoal = 0; }

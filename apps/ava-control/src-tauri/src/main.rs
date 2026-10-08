@@ -196,6 +196,32 @@ fn server_reach() -> String {
     )
 }
 
+/// Close a window that server_open opened (2026-10-08: the guide opens my console to show it, then closes it
+/// itself). Only the console is closable: it kills the local ssh client running ~/iris_console.sh, and the
+/// terminal window goes with it. My session on the server is untouched (the console only ATTACHES to it).
+#[tauri::command]
+fn server_close(kind: String) -> Result<(), String> {
+    if kind != "console" {
+        return Err(format!("can't close {kind}"));
+    }
+    #[cfg(windows)]
+    {
+        let ps = "Get-CimInstance Win32_Process -Filter \"Name='ssh.exe'\" | Where-Object { $_.CommandLine -like '*iris_console.sh*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }";
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", ps])
+            .quiet()
+            .status()
+            .map(|_| ())
+            .map_err(|e| format!("could not close the console: {e}"))
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("pkill").args(["-f", "iris_console.sh"]).status()
+            .map(|_| ())
+            .map_err(|e| format!("could not close the console: {e}"))
+    }
+}
+
 /// ssh = a shell on iris-home · console = attach to my live session there · proxmox = the web UI.
 #[tauri::command]
 fn server_open(kind: String) -> Result<(), String> {
@@ -277,7 +303,7 @@ fn main() {
             app.manage(VoicePlayer(std::sync::Mutex::new(start_voice_player())));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![server_vms, server_vm_power, server_reach, server_open, server_start_iris])
+        .invoke_handler(tauri::generate_handler![server_vms, server_vm_power, server_reach, server_open, server_close, server_start_iris])
         .build(tauri::generate_context!())
         .expect("error while building Iris Control")
         .run(|app, event| {

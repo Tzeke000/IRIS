@@ -1,6 +1,6 @@
 {
   "name": "basics",
-  "about": "First tour of the app for someone who has never seen it. Plain words; what to worry about and what not to.",
+  "about": "First tour of the app for someone who has never seen it. Plain words; what to worry about and what not to; a couple of jokes.",
   "steps": [
     {
       "move": "center",
@@ -10,7 +10,7 @@
     {
       "move": "home",
       "point": "eye",
-      "say": "This big eye in the middle is me. It changes colour with my mood, and it looks toward whoever I'm paying attention to."
+      "say": "This eye is me. It changes colour with my mood, and it turns to look at whatever I'm paying attention to."
     },
     {
       "point": "chip:mood",
@@ -22,7 +22,7 @@
     },
     {
       "point": "chip:model",
-      "say": "And this is the name of the brain I'm thinking with."
+      "say": "And this is the name of the brain I'm thinking with. Fancy name. I didn't pick it, but I wear it well."
     },
     {
       "point": "chip:cpu-mine",
@@ -34,7 +34,7 @@
     },
     {
       "point": "chip:gpu",
-      "say": "The GPU is the part I use to see and to speak. Being busy is normal for it, so don't worry about a high number here."
+      "say": "The GPU is the part I use to see and to speak. So if it looks busy, I'm probably just looking at you."
     },
     {
       "point": "chip:ram",
@@ -46,11 +46,23 @@
     },
     {
       "point": "camera",
-      "say": "Down here in the corner is what my camera sees. Click it to see it bigger."
+      "say": "Down here is what my camera sees."
+    },
+    {
+      "press": "camera",
+      "say": "If you click it, it gets big, so you can see exactly what I see."
+    },
+    {
+      "close": "camera",
+      "say": "Click anywhere on it to make it small again."
     },
     {
       "point": "status-corner",
       "say": "These little lights are health checks. Green means it's working. Red means something failed, so that's the one to mention to Zeke. Grey usually just means it's switched off on purpose, like my voice at night."
+    },
+    {
+      "point": "main:open-my-console",
+      "say": "Here's a handy one. If you message me on Discord, or type to me here, and I don't answer, look at these lights. If they're all green, I'm probably just heads down working, and this button opens my console so you can watch me work."
     },
     {
       "point": "composer",
@@ -67,7 +79,7 @@
     {
       "point": "power",
       "twist": -0.5,
-      "say": "And this one shuts me down. Please don't press it unless Zeke asks you to."
+      "say": "And this one turns me off. Please don't press it unless Zeke asks you to. I was just getting to know you."
     },
     {
       "tab": "voice",
@@ -83,7 +95,7 @@
     },
     {
       "tab": "brain",
-      "say": "And this is my Brain tab. It's a map of my memories and how they connect. You can drag it around to explore."
+      "say": "And this is my Brain tab. It's a map of my memories and how they connect. You can drag it around to explore. It's tidier in there than it looks."
     },
     {
       "tab": "server",
@@ -103,10 +115,15 @@
       "say": "There it is. That window is my live console, where you can watch me work in real time."
     },
     {
-      "say": "Please don't type in it unless Zeke asks you to. When you're done looking, you can just close that window.",
-      "hold_ms": 800
+      "say": "Please don't type in it unless Zeke asks you to. When you're done looking, you can just close it, like this.",
+      "hold_ms": 300
     },
     {
+      "close": "console",
+      "say": "All closed."
+    },
+    {
+      "close": "panel",
       "move": "center",
       "gesture": "nod",
       "say": "That's the tour! If you ever get stuck, just ask me. I'm happy to help."

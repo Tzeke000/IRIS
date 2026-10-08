@@ -2463,7 +2463,7 @@ export default function App() {
         }}
       />
       {cameraOverlayOpen && (
-        <div className="camera-overlay" onClick={() => setCameraOverlayOpen(false)}>
+        <div className="camera-overlay" data-iris="camera-overlay" onClick={() => setCameraOverlayOpen(false)}>
           {/* Prefer live frame (refreshes every 200ms) — fall back to cached annotated frame */}
           <img src={liveFrameSrc || frameUrl} alt="camera expanded" />
         </div>
