@@ -59,6 +59,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
   useEffect(() => {
     (window as unknown as { __irisGuide?: unknown }).__irisGuide = { arms: arms.current, live: live.current };
     let raf = 0, last = performance.now();
+    let slowAvg = 16, glow = true;                  // drop the glow blur if this machine can't keep up
     const loop = (now: number) => {
       raf = requestAnimationFrame(loop);
       const cv = canvasRef.current;
@@ -90,6 +91,8 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       const R = live3d ? live3d.radius * 0.9 : (size / 2) * IRIS_FRAC;
       const scale = Math.max(0.55, Math.min(1.6, R / 60));
       const dt = Math.min(50, now - last); last = now;
+      slowAvg = slowAvg * 0.97 + dt * 0.03;
+      if (glow && slowAvg > 30) glow = false;
       const t = now / 1000;
       const c = colorRef.current;
       for (const k of ARM_KEYS) {
@@ -103,7 +106,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       }
       // draw the far arms first (up/left), so crossings read with some depth
       for (const k of ["up", "left", "down", "right"] as ArmKey[]) {
-        drawArm(ctx, arms.current[k], { light: c.lightColor, copper: "#d9894f", copperDark: "#5a2f17", scale, dpr });
+        drawArm(ctx, arms.current[k], { light: c.lightColor, copper: "#d9894f", copperDark: "#5a2f17", scale, dpr, glow });
       }
     };
     raf = requestAnimationFrame(loop);
