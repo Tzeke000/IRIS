@@ -402,4 +402,13 @@ def install(app: Any, g: dict[str, Any], root: Path) -> list[str]:
         added += _jr.install(app, g, root, have)
     except Exception as e:  # noqa: BLE001
         added.append(f"jarvis routes FAILED: {e!r}"[:200])
+    # 2026-10-08 app GUIDE (tutorial overlay: script / progress / ui_map / say) — own stateless module.
+    try:
+        import importlib
+        from brain import app_guide_routes as _gr
+        _gr = importlib.reload(_gr)
+        have = {f"{m} {getattr(r, 'path', '')}" for r in app.routes for m in (getattr(r, "methods", None) or [])}
+        added += _gr.install(app, g, root, have)
+    except Exception as e:  # noqa: BLE001
+        added.append(f"guide routes FAILED: {e!r}"[:200])
     return added

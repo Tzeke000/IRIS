@@ -2051,3 +2051,15 @@ body,
   pointer-events: none;            /* only the eye itself takes the mouse */
 }
 .presence-root .eye-band .orb-canvas-shell.eye-shell { pointer-events: auto; flex: none; }
+
+/* ---- guide layer (2026-10-08): my eye + cable-arms above every tab; never blocks clicks ---- */
+.guide-layer { position: fixed; inset: 0; z-index: 1400; pointer-events: none; }
+.guide-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.guide-eye { position: absolute; left: 0; top: 0; will-change: transform; filter: drop-shadow(0 10px 24px rgba(0,0,0,0.45)); }
+.guide-caption {
+  position: absolute; width: 360px; padding: 10px 14px; border-radius: 12px;
+  background: rgba(10, 12, 18, 0.88); border: 1px solid var(--orb-color, #4a7fff);
+  color: #eef2ff; font-size: 15px; line-height: 1.35; box-shadow: 0 8px 28px rgba(0,0,0,0.45);
+  animation: guide-cap-in 0.22s ease-out;
+}
+@keyframes guide-cap-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }

@@ -13,6 +13,7 @@ import PcPanel from "./components/PcPanel";
 import { CUBE_MORPH_ENABLED, EMOTION_VISUALS, deriveOrbEmotion, deriveOrbSleep, deriveOrbState, mixHex, shadeHex, type EmotionVisual } from "./orbDerive";
 import OrbCanvas, { setBodyStyle, useBodyStyle } from "./components/OrbCanvas";
 import { listen } from "@tauri-apps/api/event";
+import GuideOverlay from "./guide/GuideOverlay";
 
 /** Operator HTTP API aggregate (brain/operator_server.py — started from avaagent.py). */
 type Snapshot = Record<string, unknown>;
@@ -498,6 +499,7 @@ export default function App() {
   const [inputMuted, setInputMuted] = useState(false);
   const [backendShutdownDetected, setBackendShutdownDetected] = useState(false);
   const [operatorOpen, setOperatorOpen] = useState(false);
+  const [guideFloating, setGuideFloating] = useState(false);   // my eye has lifted onto the guide layer
   const [cameraOverlayOpen, setCameraOverlayOpen] = useState(false);
 
   // Connectivity state
@@ -2288,21 +2290,21 @@ export default function App() {
           </span>
         </div>
         <div className="iris-top-actions">
-          <button type="button" className={`iris-ib ${inputMuted ? "off" : ""}`} onClick={() => void toggleInputMute()}
+          <button type="button" data-iris="mic" className={`iris-ib ${inputMuted ? "off" : ""}`} onClick={() => void toggleInputMute()}
             title={inputMuted ? "Mic is off — I can't hear you. Click to turn it on." : "Mic is on — click to mute"}
             aria-label={inputMuted ? "Turn the mic on" : "Mute the mic"}>
             <Ico d={inputMuted ? ICON.micOff : ICON.mic} />
           </button>
-          <button type="button" className={`iris-ib ${Boolean(tts?.enabled) ? "" : "off"}`} onClick={() => void toggleTts()}
+          <button type="button" data-iris="voice" className={`iris-ib ${Boolean(tts?.enabled) ? "" : "off"}`} onClick={() => void toggleTts()}
             disabled={shutdownInProgress}
             title={`My voice is ${Boolean(tts?.enabled) ? "on" : "off"} (${String(tts?.engine ?? "none")})`}
             aria-label={Boolean(tts?.enabled) ? "Turn my voice off" : "Turn my voice on"}>
             <Ico d={Boolean(tts?.enabled) ? ICON.speaker : ICON.speakerOff} />
           </button>
-          <button type="button" className="iris-ib" onClick={() => setOperatorOpen(true)} title="Panel" aria-label="Open the panel">
+          <button type="button" data-iris="panel" className="iris-ib" onClick={() => setOperatorOpen(true)} title="Panel" aria-label="Open the panel">
             <Ico d={ICON.menu} />
           </button>
-          <button type="button" className="iris-ib power" onClick={() => setShutdownConfirmOpen(true)}
+          <button type="button" data-iris="power" className="iris-ib power" onClick={() => setShutdownConfirmOpen(true)}
             disabled={shutdownInProgress} title="Shut me down" aria-label="Shut down">
             <Ico d={ICON.power} />
           </button>
@@ -2357,7 +2359,7 @@ export default function App() {
           </div>
         )}
         <div className="eye-band" ref={eyeBandRef}>
-          <div className={`orb-canvas-shell eye-shell${orbRecenterPulse ? " recenter-pulse" : ""}`} style={{ width: eyeSize, height: eyeSize }}>
+          <div data-iris="eye" className={`orb-canvas-shell eye-shell${orbRecenterPulse ? " recenter-pulse" : ""}`} style={{ width: eyeSize, height: eyeSize, visibility: guideFloating ? "hidden" : undefined }}>
             <OrbCanvas
               emotion={primaryEmotion}
               emotionColor={effectiveOrbColor}
@@ -2399,7 +2401,7 @@ export default function App() {
                   : ""}
         </div>
         {/* Inner thoughts moved into the Chat tab (Zeke 10-07) — the middle of the page is my eye. */}
-        <div className="presence-input-row iris-composer">
+        <div className="presence-input-row iris-composer" data-iris="composer">
           <input
             type="text"
             value={chatInput}
@@ -2418,13 +2420,13 @@ export default function App() {
               mic off · I can't hear you
             </button>
           )}
-          <button type="button" className="iris-send" aria-label="Send"
+          <button type="button" data-iris="send" className="iris-send" aria-label="Send"
             onClick={() => void sendChat()}
             disabled={chatBusy || shutdownInProgress || !chatInput.trim()}>
             <Ico d={ICON.send} />
           </button>
         </div>
-        <button className="presence-camera-thumb" type="button" onClick={() => setCameraOverlayOpen(true)} aria-label="Expand camera" title={rawSceneSummary || "Expand camera"}>
+        <button className="presence-camera-thumb" data-iris="camera" type="button" onClick={() => setCameraOverlayOpen(true)} aria-label="Expand camera" title={rawSceneSummary || "Expand camera"}>
           {liveFrameSrc ? (
             <img src={liveFrameSrc} alt="camera live thumb" />
           ) : presenceCameraOk ? (
@@ -2449,6 +2451,16 @@ export default function App() {
         </button>
       </section>
       <StatusCorner sb={statusBoard} />
+      <GuideOverlay
+        activeTab={tab}
+        operatorOpen={operatorOpen}
+        onFloatingChange={setGuideFloating}
+        eye={{
+          emotion: primaryEmotion, emotionColor: effectiveOrbColor,
+          state: shutdownInProgress ? "offline" : (orbPulseMode as any), size: eyeSize,
+          amplitude: ttsAmplitude, energy: moodEnergy, cubeMorphEnabled: PRESENCE_V2_CUBE_MORPH_ENABLED,
+        }}
+      />
       {cameraOverlayOpen && (
         <div className="camera-overlay" onClick={() => setCameraOverlayOpen(false)}>
           {/* Prefer live frame (refreshes every 200ms) — fall back to cached annotated frame */}
@@ -2550,7 +2562,7 @@ export default function App() {
 
       <div className={`operator-backdrop ${operatorOpen ? "open" : ""}`} onClick={() => setOperatorOpen(false)} />
       <div className={`op-body operator-drawer ${operatorOpen ? "open" : ""} ${shutdownInProgress ? "shutdown-locked" : ""}`}>
-        <button className="operator-close" type="button" onClick={() => setOperatorOpen(false)}>
+        <button className="operator-close" data-iris="panel-close" type="button" onClick={() => setOperatorOpen(false)}>
           ×
         </button>
         <nav className="op-nav" aria-label="Primary">
@@ -2562,7 +2574,7 @@ export default function App() {
                 <div key={g.title} className="iris-nav-group">
                   <div className="iris-nav-h">{g.title}</div>
                   {items.map((t) => (
-                    <button key={t.id} type="button" className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
+                    <button key={t.id} type="button" data-iris={`tab:${t.id}`} className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
                       {t.label}
                     </button>
                   ))}
@@ -2573,7 +2585,7 @@ export default function App() {
             <div className="iris-nav-group">
               <div className="iris-nav-h">Extras</div>
               {customTabs.map((ct) => (
-                <button key={`custom_${ct.id}`} type="button" className={tab === ct.id ? "active" : ""}
+                <button key={`custom_${ct.id}`} type="button" data-iris={`tab:${ct.id}`} className={tab === ct.id ? "active" : ""}
                   onClick={() => setTab(ct.id)} title={`Custom tab: ${ct.content_type}`}>
                   {ct.name}
                 </button>
