@@ -17,6 +17,7 @@ import { getJson, postJson } from "../api";
 import { invoke } from "@tauri-apps/api/core";
 import { Arm, ARM_KEYS, ArmKey, bestArm, drawArm, easeInOutCubic, idleTip, port, Vec } from "./arms";
 import { findEl, scanUi } from "./uiMap";
+import { speakLine } from "./speech";
 
 type Step = {
   brain?: string;               // "spin" | "overview" | "focus:<node id>" (e.g. focus:iris, focus:zeke)
@@ -24,6 +25,7 @@ type Step = {
   via?: string;                 // with press: at contact, invoke server_open(<via>) instead of clicking (closable demo windows)
   tab?: string; move?: string | { x: number; y: number }; point?: string; press?: string; say?: string;
   gesture?: "wave" | "nod" | "shake" | "curious"; twist?: number; hold_ms?: number; emotion?: string;
+  minimize?: boolean;           // after the line: minimize the app (the widget takes over, like normal)
 };
 type Script = { ok?: boolean; seq: number; steps: Step[]; stop?: boolean; silent?: boolean; issued_ts?: number };
 
@@ -302,42 +304,9 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
   const speak = async (text: string, emotion?: string, silent?: boolean): Promise<boolean> => {
     const L0 = live.current;
     const clicks0 = L0.clicked;
-    const interrupted = () => L0.clicked !== clicks0;
     setCaption(text);
     report("say", text.slice(0, 200));
-    let spoken = false;
-    if (!silent) try {
-      const r = await postJson<{ ok: boolean; spoken?: boolean }>("/api/v1/app/guide/say", { text, emotion });
-      spoken = Boolean(r?.spoken);
-    } catch { spoken = false; }
-    const words = text.split(/\s+/).length;
-    const est = 700 + words * 360;
-    const t0 = performance.now();
-    if (spoken) {
-      // The mouth speaks sentence by sentence and reports "not speaking" in the gaps between them, so a short
-      // quiet is NOT the end of the line (10-08: I moved on to the chat box mid-sentence about the console).
-      // Done = I've been talking at least ~words x 0.3 s since I started AND it's been quiet for over a second.
-      const minTalk = words * 300;
-      let started = false, startedAt = 0, quietSince = 0;
-      while (performance.now() - t0 < est * 2.5 + 4000) {
-        await sleep(100);
-        let sp = false;
-        try { sp = Boolean((await getJson<{ speaking?: boolean }>("/api/v1/tts/state"))?.speaking); } catch { /* keep going */ }
-        const now = performance.now();
-        if (interrupted()) { void postJson("/api/v1/app/guide/hush", {}).catch(() => undefined); break; }
-        if (sp) { if (!started) { started = true; startedAt = now; } quietSince = 0; }
-        else if (started) {
-          if (!quietSince) quietSince = now;
-          if (now - quietSince > 1100 && now - startedAt > minTalk) break;
-        }
-        else if (now - t0 > 5000) break;                          // never started: fall back to reading time
-      }
-      if (!started && !interrupted()) await sleep(Math.max(0, est - (performance.now() - t0)));
-    } else {
-      const tEnd = t0 + est;                                     // voice off: give time to read the caption
-      while (performance.now() < tEnd && !interrupted()) await sleep(80);
-    }
-    return !interrupted();
+    return speakLine(text, { emotion, silent, interrupted: () => L0.clicked !== clicks0 });
   };
 
   // Someone clicked during the tour (Zeke 10-08): stop for a sec, ask them not to, then carry on.
@@ -456,7 +425,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
 
   const seqRef = useRef(0);
   const report = (status: string, note = "", index = -1) => {
-    void postJson("/api/v1/app/guide/progress", { seq: seqRef.current, index, status, note }).catch(() => undefined);
+    void postJson("/api/v1/app/guide/progress", { seq: seqRef.current, index, status, note, client: GUIDE_CLIENT }).catch(() => undefined);
   };
 
   const runScript = useCallback(async (s: Script) => {
@@ -507,6 +476,12 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
           }
         }
         await sleep(st.hold_ms ?? 400);
+        if (st.minimize) {
+          for (const k of ARM_KEYS) armH(k).release();
+          await land();
+          try { const { getCurrentWindow } = await import("@tauri-apps/api/window"); await getCurrentWindow().minimize(); }
+          catch (e) { report("note", `minimize: ${String(e).slice(0, 120)}`); }
+        }
         if (L.clicked !== clicksAtStep && !L.stop) { report("clicked", "between lines", i); await warnNoClick(s.silent); }
         for (const k of ARM_KEYS) { const h = armH(k); h.release(); h.twistGoal = 0; }
         void used;

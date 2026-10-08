@@ -15,6 +15,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import OrbCanvas from "./components/OrbCanvas";
 import { API_BASE, getJson } from "./api";
 import { CUBE_MORPH_ENABLED, deriveOrbEmotion, deriveOrbSleep, deriveOrbState } from "./orbDerive";
+import { PANEL, WIDGET_BASE, useWidgetGuide } from "./guide/WidgetGuide";
 import type { OrbState } from "./components/orbShared";
 
 
@@ -166,28 +167,56 @@ export default function WidgetApp() {
   // (widget_spatial_tool) — degrees clockwise from screen-up.
   const pointerAngleDeg = isPointing ? Number(widgetBlock?.pointing_angle_deg) || 0 : 0;
 
+  // The "what I can do" tour runs from here (2026-10-08).
+  const guide = useWidgetGuide();
+  const offX = guide.panel && guide.panelSide === "left" ? PANEL.w : 0;
+  const eyeX = WIDGET_BASE.eye.x + offX, eyeY = WIDGET_BASE.eye.y, ES = WIDGET_BASE.eyeSize;
+
+  // The window is bigger than my eye now (room for my cable-arms, a caption and a panel), so everything that ISN'T
+  // my eye lets clicks fall through to whatever is underneath — the widget never steals the desktop around it.
+  useEffect(() => {
+    if (guide.running) return;                     // the tour makes the whole window click-through itself
+    let alive = true, last: boolean | null = null;
+    const tick = async () => {
+      try {
+        const w = await import("@tauri-apps/api/window");
+        const cw = w.getCurrentWindow();
+        const [c, p, k] = await Promise.all([w.cursorPosition(), cw.outerPosition(), cw.scaleFactor()]);
+        const dx = (c.x - p.x) / k - eyeX, dy = (c.y - p.y) / k - eyeY;
+        const over = Math.hypot(dx, dy) < ES * 0.55;
+        if (alive && over !== last) { last = over; await cw.setIgnoreCursorEvents(!over); }
+      } catch { /* older webview: leave as is */ }
+    };
+    const id = window.setInterval(() => void tick(), 120);
+    return () => { alive = false; window.clearInterval(id); };
+  }, [guide.running, eyeX, eyeY, ES]);
+
   return (
     <div
-      data-tauri-drag-region
       style={{
-        width: "150px",
-        height: "150px",
+        width: "100vw",
+        height: "100vh",
         background: "transparent",
         backgroundColor: "transparent",
         overflow: "hidden",
-        cursor: "grab",
         userSelect: "none",
         position: "fixed",
         top: 0,
         left: 0,
       }}
     >
+      {/* the drag handle is my eye itself */}
+      <div data-tauri-drag-region style={{ position: "absolute", left: eyeX - ES * 0.55, top: eyeY - ES * 0.55,
+        width: ES * 1.1, height: ES * 1.1, borderRadius: "50%", cursor: "grab", zIndex: 3 }} />
+      <div style={{ position: "absolute", left: eyeX - ES / 2, top: eyeY - ES / 2, width: ES, height: ES, pointerEvents: "none" }}>
       <OrbCanvas
         emotion={emotion}
         emotionColor={emotionColor}
         state={orbState as OrbState}
         cubeMorphEnabled={CUBE_MORPH_ENABLED}
-        size={150}
+        size={ES}
+        portsKey="widget"
+        gaze={guide.gaze}
         sleepProgress={sleepProgress}
         sleepRemainingSeconds={sleepRemainingSeconds}
         wakeProgress={wakeProgress}
@@ -198,6 +227,22 @@ export default function WidgetApp() {
         bodyScale={bodyScale}
         blinkTrigger={blinkSeq}
       />
+      </div>
+      {guide.caption && (
+        <div style={{ position: "absolute", left: offX + 10, top: WIDGET_BASE.h - 78, width: WIDGET_BASE.w - 20,
+          padding: "7px 10px", borderRadius: 10, background: "rgba(8,12,22,0.82)", color: "#e8f0ff",
+          font: "500 12.5px/1.35 system-ui, sans-serif", textAlign: "center", border: "1px solid rgba(120,170,255,0.35)",
+          boxShadow: "0 4px 18px rgba(0,0,0,0.45)", pointerEvents: "none" }}>{guide.caption}</div>
+      )}
+      {guide.panel && (
+        <div style={{ position: "absolute", top: eyeY - PANEL.h / 2, left: guide.panelSide === "right" ? WIDGET_BASE.w - 10 : 10,
+          width: PANEL.w - 20, height: PANEL.h, borderRadius: 12, overflow: "hidden", background: "#05070c",
+          border: "1px solid rgba(120,170,255,0.45)", boxShadow: "0 6px 26px rgba(0,0,0,0.55)", pointerEvents: "none" }}>
+          <img alt="" style={{ width: "100%", height: "100%", objectFit: guide.panel.kind === "camera" ? "cover" : "contain" }}
+            src={guide.panel.kind === "camera" ? `${API_BASE}/api/v1/camera/mjpeg?e=${guide.panel.name ?? "w"}`
+              : `${API_BASE}/api/v1/app/guide/media/${encodeURIComponent(guide.panel.name || "")}`} />
+        </div>
+      )}
     </div>
   );
 }

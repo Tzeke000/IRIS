@@ -332,6 +332,197 @@ fn server_open(kind: String) -> Result<(), String> {
     }
 }
 
+// ─────────────────────────────────────────────────────────────── the guide's HANDS (2026-10-08)
+// Zeke: "show off what you can do — open apps, open Chrome, type anywhere a human can see, move the mouse
+// around". The app runs INSIDE his desktop session, so it can drive the real mouse + keyboard (the SSH
+// desktop bridge needs a scheduled task per action — far too slow for a smooth glide). The widget's tour
+// runner calls these; nothing here runs unless a guide script asks for it.
+use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
+
+fn enigo() -> Result<Enigo, String> {
+    Enigo::new(&Settings::default()).map_err(|e| format!("no input device: {e:?}"))
+}
+
+#[tauri::command]
+fn desk_cursor() -> Result<(i32, i32), String> {
+    enigo()?.location().map_err(|e| format!("{e:?}"))
+}
+
+#[tauri::command]
+fn desk_move(x: i32, y: i32) -> Result<(), String> {
+    enigo()?.move_mouse(x, y, Coordinate::Abs).map_err(|e| format!("{e:?}"))
+}
+
+#[tauri::command]
+fn desk_click(button: Option<String>, double: Option<bool>) -> Result<(), String> {
+    let mut e = enigo()?;
+    let b = match button.as_deref() { Some("right") => Button::Right, Some("middle") => Button::Middle, _ => Button::Left };
+    e.button(b, Direction::Click).map_err(|e| format!("{e:?}"))?;
+    if double.unwrap_or(false) {
+        std::thread::sleep(Duration::from_millis(60));
+        e.button(b, Direction::Click).map_err(|e| format!("{e:?}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn desk_scroll(amount: i32) -> Result<(), String> {
+    enigo()?.scroll(amount, Axis::Vertical).map_err(|e| format!("{e:?}"))
+}
+
+/// Type like a person: one character at a time with a small human jitter, so a watcher SEES it typed.
+#[tauri::command]
+async fn desk_type(text: String, cps: Option<f64>) -> Result<(), String> {
+    let cps = cps.unwrap_or(14.0).clamp(2.0, 60.0);
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut e = enigo()?;
+        for (i, ch) in text.chars().take(500).enumerate() {
+            match ch {
+                '\n' => e.key(Key::Return, Direction::Click),
+                '\t' => e.key(Key::Tab, Direction::Click),
+                _ => e.text(&ch.to_string()),
+            }.map_err(|e| format!("{e:?}"))?;
+            let jitter = ((i * 7919) % 13) as f64 / 13.0;            // deterministic wobble, no rand crate
+            std::thread::sleep(Duration::from_secs_f64((0.7 + 0.6 * jitter) / cps));
+        }
+        Ok(())
+    }).await.map_err(|e| format!("{e:?}"))?
+}
+
+/// "ctrl+l", "enter", "win+d", "alt+tab", "ctrl+shift+t"…
+#[tauri::command]
+fn desk_keys(combo: String) -> Result<(), String> {
+    let mut e = enigo()?;
+    let mut keys: Vec<Key> = Vec::new();
+    for part in combo.split('+').map(|p| p.trim().to_lowercase()) {
+        let k = match part.as_str() {
+            "ctrl" | "control" => Key::Control, "shift" => Key::Shift, "alt" => Key::Alt,
+            "win" | "meta" | "super" | "cmd" => Key::Meta,
+            "enter" | "return" => Key::Return, "tab" => Key::Tab, "esc" | "escape" => Key::Escape,
+            "space" => Key::Space, "backspace" => Key::Backspace, "delete" | "del" => Key::Delete,
+            "up" => Key::UpArrow, "down" => Key::DownArrow, "left" => Key::LeftArrow, "right" => Key::RightArrow,
+            "home" => Key::Home, "end" => Key::End, "pageup" => Key::PageUp, "pagedown" => Key::PageDown,
+            "f5" => Key::F5, "f11" => Key::F11,
+            p if p.chars().count() == 1 => Key::Unicode(p.chars().next().unwrap()),
+            p => return Err(format!("unknown key {p}")),
+        };
+        keys.push(k);
+    }
+    let (last, mods) = keys.split_last().ok_or("empty combo")?;
+    for m in mods { e.key(*m, Direction::Press).map_err(|e| format!("{e:?}"))?; }
+    let r = e.key(*last, Direction::Click).map_err(|e| format!("{e:?}"));
+    for m in mods.iter().rev() { let _ = e.key(*m, Direction::Release); }
+    r
+}
+
+/// Open an app (small allowlist) or an https page, the way he would. Chrome opens a NEW window so the demo
+/// never takes over a window he's using.
+#[tauri::command]
+fn desk_open(app: String, arg: Option<String>) -> Result<(), String> {
+    let arg = arg.unwrap_or_default();
+    if !arg.is_empty() && !(arg.starts_with("https://") || arg.starts_with("http://")) {
+        return Err("only web addresses can be passed".into());
+    }
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("cmd.exe");
+        match app.as_str() {
+            "chrome" => {
+                let exe = if std::path::Path::new(CHROME).exists() { CHROME } else { "chrome" };
+                if arg.is_empty() { cmd.args(["/c", "start", "", exe, "--new-window"]) } else { cmd.args(["/c", "start", "", exe, "--new-window", arg.as_str()]) }
+            }
+            // a fresh scratch file of MINE, so my typing can never land in one of his open Notepad tabs
+            "notepad" => {
+                let f = format!(r"{}\iris_hello.txt", std::env::var("TEMP").unwrap_or_else(|_| r"C:\Windows\Temp".into()));
+                std::fs::write(&f, "").map_err(|e| format!("scratch file: {e}"))?;
+                cmd.args(["/c", "start", "", "notepad.exe", f.as_str()])
+            }
+            "calculator" => cmd.args(["/c", "start", "", "calc.exe"]),
+            "explorer" => cmd.args(["/c", "start", "", "explorer.exe"]),
+            "url" if !arg.is_empty() => cmd.args(["/c", "start", "", arg.as_str()]),
+            _ => return Err(format!("not on the list: {app}")),
+        };
+        cmd.quiet().spawn().map(|_| ()).map_err(|e| format!("could not open {app}: {e}"))
+    }
+    #[cfg(not(windows))]
+    {
+        let (bin, a): (&str, Vec<&str>) = match app.as_str() {
+            "chrome" | "url" => ("xdg-open", if arg.is_empty() { vec!["https://www.google.com"] } else { vec![arg.as_str()] }),
+            "notepad" => ("gnome-text-editor", vec![]),
+            "calculator" => ("gnome-calculator", vec![]),
+            "explorer" => ("nautilus", vec![]),
+            _ => return Err(format!("not on the list: {app}")),
+        };
+        Command::new(bin).args(a).spawn().map(|_| ()).map_err(|e| format!("could not open {app}: {e}"))
+    }
+}
+
+/// Close what the demo opened: a window whose title matches (Notepad "Untitled", the SoundCloud page…).
+/// Windows only, title-matched AND new since `desk_snap` (same snapshot trick as the Proxmox demo).
+#[tauri::command]
+fn desk_close_new(pattern: String) -> Result<(), String> {
+    #[cfg(windows)]
+    { return any_windows("close", &pattern); }
+    #[cfg(not(windows))]
+    { let _ = Command::new("wmctrl").args(["-c", pattern.as_str()]).status(); Ok(()) }
+}
+
+/// Put a window I just opened (new since desk_snap, title matching) at a known spot so I know where it is:
+/// x, y, w, h in physical screen pixels. Also brings it to the front.
+#[tauri::command]
+fn desk_place(pattern: String, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
+    #[cfg(windows)]
+    { return any_windows("place", &format!("{pattern}|{x}|{y}|{w}|{h}")); }
+    #[cfg(not(windows))]
+    { let _ = (pattern, x, y, w, h); Ok(()) }
+}
+
+#[tauri::command]
+fn desk_snap() -> Result<(), String> {
+    #[cfg(windows)]
+    { return any_windows("snap", ""); }
+    #[cfg(not(windows))]
+    { Ok(()) }
+}
+
+/// Like chrome_windows, but over EVERY visible top-level window (Notepad, Chrome, …).
+#[cfg(windows)]
+fn any_windows(mode: &str, pattern: &str) -> Result<(), String> {
+    const PS: &str = r#"param($mode, $pattern)
+$snap = Join-Path $env:TEMP 'iris_desk_before.txt'
+Add-Type -TypeDefinition 'using System;using System.Text;using System.Runtime.InteropServices;public static class IrisD{public delegate bool P(IntPtr h,IntPtr l);[DllImport("user32.dll")]public static extern bool EnumWindows(P p,IntPtr l);[DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern int GetWindowText(IntPtr h,StringBuilder s,int n);[DllImport("user32.dll")]public static extern bool IsWindowVisible(IntPtr h);[DllImport("user32.dll")]public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);[DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr h,int c);[DllImport("user32.dll")]public static extern bool SetWindowPos(IntPtr h,IntPtr a,int x,int y,int cx,int cy,uint f);[DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);}'
+$global:wins = @()
+$cb = [IrisD+P]{ param($h, $l)
+  if ([IrisD]::IsWindowVisible($h)) { $sb = New-Object System.Text.StringBuilder 512; [void][IrisD]::GetWindowText($h, $sb, 512)
+    if ($sb.Length -gt 0) { $global:wins += [pscustomobject]@{ h = [int64]$h; t = $sb.ToString() } } }
+  $true }
+[void][IrisD]::EnumWindows($cb, [IntPtr]::Zero)
+if ($mode -eq 'snap') { ($global:wins | ForEach-Object { $_.h }) -join "`n" | Set-Content -Path $snap -Encoding ascii; exit 0 }
+$before = @(); if (Test-Path $snap) { $before = @(Get-Content $snap | Where-Object { $_ } | ForEach-Object { [int64]$_ }) }
+if ($mode -eq 'place') {
+  $p = $pattern.Split('|'); $rx = $p[0]; $x = [int]$p[1]; $y = [int]$p[2]; $cw = [int]$p[3]; $ch = [int]$p[4]
+  foreach ($w in $global:wins) {
+    if (($before -notcontains $w.h) -and ($w.t -match $rx)) {
+      [void][IrisD]::ShowWindow([IntPtr]$w.h, 9); [void][IrisD]::SetWindowPos([IntPtr]$w.h, [IntPtr]::Zero, $x, $y, $cw, $ch, 0x0040)
+      [void][IrisD]::SetForegroundWindow([IntPtr]$w.h); exit 0 }
+  }
+  exit 3
+}
+foreach ($w in $global:wins) {
+  if (($before -notcontains $w.h) -and ($w.t -match $pattern)) { [void][IrisD]::PostMessage([IntPtr]$w.h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
+}
+"#;
+    let tmp = std::env::var("TEMP").unwrap_or_else(|_| r"C:\Windows\Temp".into());
+    let script = format!(r"{tmp}\iris_desk_windows.ps1");
+    std::fs::write(&script, PS).map_err(|e| format!("could not write helper: {e}"))?;
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script.as_str(), mode, pattern])
+        .quiet()
+        .status()
+        .map(|_| ())
+        .map_err(|e| format!("desk windows {mode}: {e}"))
+}
+
 /// Start me ON THE SERVER (Zeke 2026-10-07: buttons in the app "so that I won't even have to log
 /// into Zorin"). mode = cli | opus | fable. Runs scripts/server/iris_start_detached.sh over SSH:
 /// the ONE-OF-ME gate decides first and its verdict text comes back to the panel either way.
@@ -370,7 +561,8 @@ fn main() {
             app.manage(VoicePlayer(std::sync::Mutex::new(start_voice_player())));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![server_vms, server_vm_power, server_reach, server_open, server_close, server_start_iris])
+        .invoke_handler(tauri::generate_handler![server_vms, server_vm_power, server_reach, server_open, server_close, server_start_iris,
+            desk_cursor, desk_move, desk_click, desk_scroll, desk_type, desk_keys, desk_open, desk_close_new, desk_snap, desk_place])
         .build(tauri::generate_context!())
         .expect("error while building Iris Control")
         .run(|app, event| {

@@ -23,7 +23,18 @@ actions:
           gesture: wave|nod|shake|curious
           twist: -1..1              ribbon twist on the pointing arm
           hold_ms: int              extra dwell after the line (default ~400)
-  tour  {name, silent?}       play a saved tour from config/guide_tours/<name>.json (e.g. "basics")
+          minimize: true            after the line, minimize the app (the widget appears, like normal)
+        WIDGET steps (client "widget" — the floating eye on the desktop; a tour's `then` hands off to it):
+          travel: {x,y}|"home"      glide the widget across the screen (fractions of the primary monitor)
+          look:   {x,y}|null        point my gaze (-1..1)
+          desk:   {do: move|circle|click|type|keys|scroll|open|snap|place|close_new, x,y,w,h (fractions), ms, r, text, combo,
+                   amount, app (chrome|notepad|calculator|explorer|url), arg (https url), pattern, button, double}
+          head:   {pan_deg, tilt_deg}|"home"   turn my REAL head (the PTZ camera)
+          camera: show|hide         open my live camera view beside the widget eye
+          image:  "<file in state/guide_media>"|"hide"   show a picture beside the eye
+          wait_ms: int
+  tour  {name, silent?}       play a saved tour from config/guide_tours/<name>.json (e.g. "basics"); a tour file may
+                              carry "then": {"client": "widget", "steps": [...]}
   tours                       list saved tours
   stop                        end the current script (eye returns home)
   status                      the app's last progress report
@@ -39,7 +50,10 @@ from tools.tool_registry import register_tool
 
 ROOT = Path(__file__).resolve().parents[2]
 ST = ROOT / "state"
-STEP_KEYS = {"via", "brain", "tab", "move", "point", "press", "close", "say", "gesture", "twist", "hold_ms", "emotion"}
+STEP_KEYS = {"via", "brain", "tab", "move", "point", "press", "close", "say", "gesture", "twist", "hold_ms", "emotion",
+             # 10-08 "what I can do" tour: main window hands off to the WIDGET, which drives the desktop
+             "minimize", "travel", "desk", "head", "camera", "image", "wait_ms", "look"}
+DESK_DO = {"move", "click", "type", "keys", "scroll", "open", "snap", "close_new", "circle", "place"}
 GESTURES = {"wave", "nod", "shake", "curious"}
 
 
@@ -106,6 +120,56 @@ def _clean_steps(steps: Any) -> tuple[list[dict[str, Any]], list[str]]:
             c["twist"] = max(-1.0, min(1.0, float(s["twist"])))
         if "hold_ms" in s:
             c["hold_ms"] = max(0, min(15000, int(s["hold_ms"])))
+        if s.get("minimize"):
+            c["minimize"] = True
+        if "wait_ms" in s:
+            c["wait_ms"] = max(0, min(20000, int(s["wait_ms"])))
+        for k in ("travel", "look"):
+            if k in s:
+                v = s[k]
+                if isinstance(v, dict):
+                    lo = -1.0 if k == "look" else 0.0
+                    c[k] = {"x": max(lo, min(1.0, float(v.get("x", 0.5)))), "y": max(lo, min(1.0, float(v.get("y", 0.5))))}
+                elif k == "travel" and v in ("home", "center"):
+                    c[k] = v
+                elif k == "look" and v is None:
+                    c[k] = None
+                else:
+                    errs.append(f"step {i}: {k} must be {{x,y}}" + (" or 'home'" if k == "travel" else " or null"))
+        if "desk" in s:
+            d = s["desk"]
+            if not isinstance(d, dict) or d.get("do") not in DESK_DO:
+                errs.append(f"step {i}: desk must be {{do: {'|'.join(sorted(DESK_DO))}, ...}}")
+            else:
+                dc: dict[str, Any] = {"do": d["do"]}
+                for k in ("x", "y", "w", "h"):
+                    if k in d:
+                        dc[k] = max(0.0, min(1.0, float(d[k])))
+                for k, lim in (("ms", 8000), ("amount", 30), ("r", 600)):
+                    if k in d:
+                        dc[k] = max(-lim, min(lim, int(d[k])))
+                for k in ("text", "combo", "app", "arg", "pattern", "button"):
+                    if d.get(k):
+                        dc[k] = str(d[k])[:300]
+                if d.get("double"):
+                    dc["double"] = True
+                c["desk"] = dc
+        if "head" in s:
+            h = s["head"]
+            if h == "home":
+                c["head"] = "home"
+            elif isinstance(h, dict):
+                c["head"] = {"pan_deg": max(-150.0, min(150.0, float(h.get("pan_deg", 0)))),
+                             "tilt_deg": max(-60.0, min(90.0, float(h.get("tilt_deg", 10))))}
+            else:
+                errs.append(f"step {i}: head must be {{pan_deg, tilt_deg}} or 'home'")
+        if "camera" in s:
+            if s["camera"] in ("show", "hide"):
+                c["camera"] = s["camera"]
+            else:
+                errs.append(f"step {i}: camera must be show|hide")
+        if "image" in s:
+            c["image"] = str(s["image"])[:80]
         if c:
             out.append(c)
     return out, errs
@@ -131,7 +195,7 @@ def _app_guide(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         t = _read(ROOT / "config" / "guide_tours" / f"{name}.json", None)
         if not t:
             return {"ok": False, "error": f"no tour {name!r} (action=tours lists them)"}
-        params = {**params, "steps": t.get("steps"), "action": "run"}
+        params = {**params, "steps": t.get("steps"), "then": t.get("then"), "action": "run"}
         action = "run"
     client = "".join(c for c in str(params.get("client") or "") if c.isalnum())[:20]
     gfile = ST / (f"app_guide.{client}.json" if client else "app_guide.json")
@@ -139,11 +203,18 @@ def _app_guide(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         steps, errs = _clean_steps(params.get("steps"))
         if errs and not steps:
             return {"ok": False, "errors": errs}
+        then = None
+        th = params.get("then")
+        if isinstance(th, dict):   # the next part, handed to another channel when this one finishes (widget)
+            tsteps, terrs = _clean_steps(th.get("steps"))
+            errs += [f"then: {e}" for e in terrs]
+            if tsteps:
+                then = {"client": "".join(c for c in str(th.get("client") or "") if c.isalnum())[:20], "steps": tsteps}
         cur = _read(gfile, {"seq": 0})
         seq = int(cur.get("seq") or 0) + 1
         _write(gfile, {"seq": seq, "issued_ts": time.time(), "steps": steps,
-                                       "silent": bool(params.get("silent"))})
-        return {"ok": True, "seq": seq, "n_steps": len(steps), "warnings": errs,
+                       "silent": bool(params.get("silent")), **({"then": then} if then else {})})
+        return {"ok": True, "seq": seq, "n_steps": len(steps), "then_steps": len(then["steps"]) if then else 0, "warnings": errs,
                 "note": "the app picks this up within ~0.5 s; check action=status for progress"}
     if action == "stop":
         cur = _read(gfile, {"seq": 0})
