@@ -1602,12 +1602,24 @@ export default function App() {
     return [...hist, ...th].sort((a, b) => tsOf(a) - tsOf(b));
   }, [chatHist, thoughtMsgs]);
   const statusBoard = useStatusBoard();
-  // The middle of the page is my eye (Zeke 10-07): size it to the window, between the old 400 and 620.
-  const [eyeSize, setEyeSize] = useState(() => Math.max(380, Math.min(620, Math.round(window.innerHeight * 0.58))));
+  // My eye lives in its OWN layer (Zeke 10-07: "your eye is getting cut off at the top … needs to be in
+  // its own layer that never gets cut off as well as center it"). The band takes whatever height is left
+  // between the top bar and the composer; the eye is sized to FIT the band (min of its width/height), so
+  // it can never be clipped, at any window size. Rounded to 20 px so a 1 px resize doesn't rebuild WebGL.
+  const eyeBandRef = useRef<HTMLDivElement | null>(null);
+  const [eyeSize, setEyeSize] = useState(360);
   useEffect(() => {
-    const onR = () => setEyeSize(Math.max(380, Math.min(620, Math.round(window.innerHeight * 0.58))));
-    window.addEventListener("resize", onR);
-    return () => window.removeEventListener("resize", onR);
+    const el = eyeBandRef.current;
+    if (!el) return;
+    const fit = () => {
+      const r = el.getBoundingClientRect();
+      const s = Math.max(160, Math.min(720, Math.floor(Math.min(r.width, r.height) / 20) * 20 - 8));
+      setEyeSize((prev) => (prev === s ? prev : s));
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
+    return () => ro.disconnect();
   }, []);
 
   const memThreads = memory?.active_threads;
@@ -2322,8 +2334,8 @@ export default function App() {
             <span style={{ color: "#00d4d4" }}>Processing…</span>
           </div>
         )}
-        <div className="presence-orb-wrap">
-          <div className={`orb-canvas-shell${orbRecenterPulse ? " recenter-pulse" : ""}`}>
+        <div className="eye-band" ref={eyeBandRef}>
+          <div className={`orb-canvas-shell eye-shell${orbRecenterPulse ? " recenter-pulse" : ""}`} style={{ width: eyeSize, height: eyeSize }}>
             <OrbCanvas
               emotion={primaryEmotion}
               emotionColor={effectiveOrbColor}

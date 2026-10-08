@@ -83,33 +83,44 @@ export function StatusTopBar({ sb, mood, moodSub, moodColor }: {
   const why = stale ? (err ? `not live: ${err}` : "not live — no fresh reading") : undefined;
   const g = b?.gpu?.[0];
   const cpus = b?.host_cpus;
+  // Order (Zeke 10-07): my VM's CPU, then the server's two physical CPUs to its right, before RAM;
+  // mood sits in the MIDDLE of the same row.
+  const moodChip = (
+    <div className="sb-mood" style={{ color: moodColor }} key="mood">
+      <span className="sb-k">Mood</span>
+      <span className="sb-v">{mood || "—"}</span>
+      {moodSub ? <span className="sb-sub">with a little {moodSub}</span> : null}
+    </div>
+  );
+  const left = [
+    <Chip key="where" k="Running on" v={where} sub={b?.host.hostname} dim={dim} title={why} />,
+    <Chip key="model" k="Model" v={b?.model ?? "—"} dim={dim} title={why ?? "read from the live process's --model flag"} />,
+    <Chip key="cpu" k={b?.host.role === "server" ? "CPU (mine)" : "CPU"} v={fmt(b?.cpu?.percent, 0, "%")}
+      sub={b?.cpu ? `${b.cpu.cores} vCPU${b.cpu.temp_c !== null ? ` · ${fmt(b.cpu.temp_c, 0, "°C")}` : ""}` : undefined}
+      dim={dim} title={why ?? (b?.host.role === "server" ? "my VM's share of the server" : undefined)} />,
+    ...(b?.host.role === "server"
+      ? (cpus && cpus.length > 0
+        ? cpus.map((c) => (
+          <Chip key={`sock${c.socket}`} k={`Server CPU ${c.socket + 1}`} v={fmt(c.percent, 0, "%")}
+            sub={`${c.temp_c !== null ? fmt(c.temp_c, 0, "°C") : "temp —"}${c.threads ? ` · ${c.threads} thr` : ""}`}
+            dim={dim} title={why ?? "physical Xeon on the R740 (read from the Proxmox host)"} />))
+        : [<Chip key="sockna" k="Server CPUs" v="—" dim title={b?.host_cpus_error ?? "no reading from the Proxmox host"} />])
+      : []),
+  ];
+  const right = [
+    <Chip key="ram" k="RAM" v={b?.ram ? `${fmt(b.ram.used_gb, 1)}/${fmt(b.ram.total_gb, 0)} GB` : "—"} dim={dim} title={why} />,
+    <Chip key="gpu" k="GPU" v={g ? `${fmt(g.util_pct, 0, "%")}` : "—"}
+      sub={g ? `${fmt(g.mem_used_mb / 1024, 1)}/${fmt(g.mem_total_mb / 1024, 0)} GB · ${fmt(g.temp_c, 0, "°C")}` : undefined}
+      dim={dim} title={why ?? g?.name} />,
+    <Chip key="ssd" k="SSD" v={b?.disk ? `${fmt(b.disk.used_gb, 0)}/${fmt(b.disk.total_gb, 0)} GB` : "—"}
+      sub={b?.disk ? `R ${rate(b.disk.read_mb_s)} · W ${rate(b.disk.write_mb_s)} MB/s` : undefined} dim={dim} title={why} />,
+    <Chip key="net" k="Network" v={b?.net ? `↓${rate(b.net.rx_mbps)} ↑${rate(b.net.tx_mbps)}` : "—"} sub={b?.net ? `Mb/s · ${b.net.iface ?? "?"}` : undefined} dim={dim} title={why} />,
+  ];
   return (
     <div className="sb-top" role="status">
-      <Chip k="Running on" v={where} sub={b?.host.hostname} dim={dim} title={why} />
-      <Chip k="Model" v={b?.model ?? "—"} dim={dim} title={why ?? "read from the live process's --model flag"} />
-      {cpus && cpus.length > 0 ? (
-        cpus.map((c) => (
-          <Chip key={c.socket} k={`CPU ${c.socket + 1}`} v={fmt(c.percent, 0, "%")}
-            sub={`${c.temp_c !== null ? fmt(c.temp_c, 0, "°C") : "temp —"}${c.threads ? ` · ${c.threads} threads` : ""}`}
-            dim={dim} title={why ?? "physical Xeon on the R740 (read from the Proxmox host)"} />
-        ))
-      ) : (
-        <Chip k={b?.host.role === "server" ? "CPU (my VM)" : "CPU"} v={fmt(b?.cpu?.percent, 0, "%")}
-          sub={b?.cpu ? `${b.cpu.cores} cores${b.cpu.temp_c !== null ? ` · ${fmt(b.cpu.temp_c, 0, "°C")}` : ""}` : undefined}
-          dim={dim} title={why ?? (b?.host.role === "server" ? `My VM's share only. The two physical Xeons: ${b?.host_cpus_error ?? "no reading"}` : undefined)} />
-      )}
-      <Chip k="RAM" v={b?.ram ? `${fmt(b.ram.used_gb, 1)}/${fmt(b.ram.total_gb, 0)} GB` : "—"} dim={dim} title={why} />
-      <Chip k="GPU" v={g ? `${fmt(g.util_pct, 0, "%")}` : "—"}
-        sub={g ? `${fmt(g.mem_used_mb / 1024, 1)}/${fmt(g.mem_total_mb / 1024, 0)} GB · ${fmt(g.temp_c, 0, "°C")}` : undefined}
-        dim={dim} title={why ?? g?.name} />
-      <Chip k="SSD" v={b?.disk ? `${fmt(b.disk.used_gb, 0)}/${fmt(b.disk.total_gb, 0)} GB` : "—"}
-        sub={b?.disk ? `R ${rate(b.disk.read_mb_s)} · W ${rate(b.disk.write_mb_s)} MB/s` : undefined} dim={dim} title={why} />
-      <Chip k="Network" v={b?.net ? `↓${rate(b.net.rx_mbps)} ↑${rate(b.net.tx_mbps)}` : "—"} sub={b?.net ? `Mb/s · ${b.net.iface ?? "?"}` : undefined} dim={dim} title={why} />
-      <div className="sb-mood" style={{ color: moodColor }}>
-        <span className="sb-k">Mood</span>
-        <span className="sb-v">{mood || "—"}</span>
-        {moodSub ? <span className="sb-sub">with a little {moodSub}</span> : null}
-      </div>
+      <div className="sb-side sb-left">{left}</div>
+      {moodChip}
+      <div className="sb-side sb-right">{right}</div>
     </div>
   );
 }

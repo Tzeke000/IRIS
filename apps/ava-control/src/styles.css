@@ -2032,3 +2032,22 @@ body,
 /* inner thoughts as chat entries */
 .chat-thought { border-left: 3px solid rgba(122,138,163,0.6); padding-left: 0.5rem; opacity: 0.85; }
 .chat-thought .chat-text { font-style: italic; color: #93a2b8; }
+
+/* ── 2026-10-07 round 2: mood in the middle of the row; the eye in its own never-clipped layer ── */
+.sb-top { display: grid; grid-template-columns: 1fr auto 1fr; align-items: stretch; column-gap: 10px; }
+.sb-side { display: flex; flex-wrap: wrap; gap: 6px; align-items: stretch; }
+.sb-left { justify-content: flex-end; }
+.sb-right { justify-content: flex-start; }
+.sb-mood { margin-left: 0; text-align: center; align-items: center; min-width: 150px; }
+
+.presence-root .presence-stage {
+  flex: 1 1 auto; min-height: 0; height: auto; max-height: none;
+  overflow: visible; justify-content: flex-start; padding-bottom: 12px;
+}
+.eye-band {
+  flex: 1 1 auto; min-height: 160px; width: 100%;
+  position: relative; z-index: 4; overflow: visible;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;            /* only the eye itself takes the mouse */
+}
+.presence-root .eye-band .orb-canvas-shell.eye-shell { pointer-events: auto; flex: none; }
