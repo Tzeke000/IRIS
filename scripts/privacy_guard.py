@@ -43,6 +43,11 @@ GENERIC = [
         r"\b(?!(?:ff[-:]){5}ff\b|(?:aa[-:]bb[-:]cc[-:]dd[-:]ee[-:]ff)\b|(?:00[-:]){5}00\b)"
         r"(?:[0-9a-f]{2}[-:]){5}[0-9a-f]{2}\b", re.I)),
     ("tailnet-ip", re.compile(r"\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b(?<!100\.64\.0\.1)")),
+    # private LAN addresses (2026-10-07 hardening: the list caught only KNOWN addresses, so any new
+    # device's IP walked straight through). Not after '=', '.', a letter or digit, so package pins
+    # like ==10.3.7.77 and dotted versions don't trip it.
+    ("private-ip", re.compile(r"(?<![\w.=])(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}"
+                              r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?![\w.])")),
 ]
 EMAIL_OK = re.compile(r"(@users\.noreply\.github\.com|noreply@anthropic\.com)$", re.I)
 
