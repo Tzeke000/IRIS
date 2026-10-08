@@ -161,7 +161,9 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       } else if (t < ANT + dur) {
         const u = smoother((t - ANT) / dur);
         const s0 = { x: from.x - dir.x * back, y: from.y - dir.y * back };
-        L.pos = { x: s0.x + (to.x - s0.x) * u, y: s0.y + (to.y - s0.y) * u };
+        // travel on a gentle ARC, not a ruler line (curved = friendly): bulge sideways, peaking mid-flight
+        const bulge = Math.min(60, d * 0.09) * Math.sin(Math.PI * u) * (dir.x >= 0 ? -1 : 1);
+        L.pos = { x: s0.x + (to.x - s0.x) * u - dir.y * bulge, y: s0.y + (to.y - s0.y) * u + dir.x * bulge };
       } else break;
       setEyePos({ ...L.pos });
       await sleep(16);
@@ -242,6 +244,18 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
     return { el, r, c: { x: r.left + r.width / 2, y: r.top + r.height / 2 } };
   };
 
+  // Secondary motion on the THING, so a watcher sees what I mean: a quick squash where I tap, a soft glow where I point.
+  const tapFeedback = (el: HTMLElement) => {
+    try { el.animate([{ transform: "scale(1)" }, { transform: "scale(0.94)", offset: 0.35 }, { transform: "scale(1.02)", offset: 0.75 }, { transform: "scale(1)" }],
+      { duration: 280, easing: "cubic-bezier(0.2, 0, 0, 1)" }); } catch { /* old webview: skip */ }
+  };
+  const pointGlow = (el: HTMLElement) => {
+    const c = colorRef.current.lightColor || "#6aa3ff";
+    try { el.animate([{ boxShadow: "0 0 0 0 transparent" }, { boxShadow: `0 0 0 3px ${c}, 0 0 18px 2px ${c}`, offset: 0.3 },
+      { boxShadow: `0 0 0 2px ${c}, 0 0 12px 1px ${c}`, offset: 0.8 }, { boxShadow: "0 0 0 0 transparent" }],
+      { duration: 1800, easing: "ease-in-out" }); } catch { /* skip */ }
+  };
+
   const reachFor = async (id: string, press: boolean, twist?: number, via?: string): Promise<ArmKey | null> => {
     const tg = await targetOf(id);
     if (!tg) { report("missing", `no element ${id}`); return null; }
@@ -268,10 +282,12 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
         contacted = true;
         const tag = tg.el.tagName.toLowerCase();
         if (via) { void invoke("server_open", { kind: via }).catch((e) => report("note", `open ${via}: ${String(e).slice(0, 120)}`)); return; }
+        if (!big) tapFeedback(tg.el);
         if (tag === "input" || tag === "textarea" || tag === "select") tg.el.focus();
         else tg.el.click();
       },
     });
+    if (!press && !big) pointGlow(tg.el);
     if (press) {
       const t0 = performance.now();
       while (!contacted && performance.now() - t0 < 2500) await sleep(30);
@@ -294,14 +310,22 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
     const est = 700 + words * 360;
     const t0 = performance.now();
     if (spoken) {
-      let started = false, quietSince = 0;
-      while (performance.now() - t0 < est * 2.2 + 3000) {
+      // The mouth speaks sentence by sentence and reports "not speaking" in the gaps between them, so a short
+      // quiet is NOT the end of the line (10-08: I moved on to the chat box mid-sentence about the console).
+      // Done = I've been talking at least ~words x 0.3 s since I started AND it's been quiet for over a second.
+      const minTalk = words * 300;
+      let started = false, startedAt = 0, quietSince = 0;
+      while (performance.now() - t0 < est * 2.5 + 4000) {
         await sleep(100);
         let sp = false;
         try { sp = Boolean((await getJson<{ speaking?: boolean }>("/api/v1/tts/state"))?.speaking); } catch { /* keep going */ }
-        if (sp) { started = true; quietSince = 0; }
-        else if (started) { if (!quietSince) quietSince = performance.now(); if (performance.now() - quietSince > 450) break; }
-        else if (performance.now() - t0 > 4000) break;           // never started: fall back to reading time
+        const now = performance.now();
+        if (sp) { if (!started) { started = true; startedAt = now; } quietSince = 0; }
+        else if (started) {
+          if (!quietSince) quietSince = now;
+          if (now - quietSince > 1100 && now - startedAt > minTalk) break;
+        }
+        else if (now - t0 > 5000) break;                          // never started: fall back to reading time
       }
       if (!started) await sleep(Math.max(0, est - (performance.now() - t0)));
     } else {
@@ -365,7 +389,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
         const u = Math.min(1, (performance.now() - t0) / dur);
         const k = u * u * (3 - 2 * u);                          // ease in/out of the spin
         const a = a0 + k * Math.PI * 2;
-        fg.cameraPosition({ x: d * Math.sin(a), y, z: d * Math.cos(a) });
+        fg.cameraPosition({ x: d * Math.sin(a), y, z: d * Math.cos(a) }, { x: 0, y: 0, z: 0 });   // circle ME (pinned at the origin)
         if (u >= 1) break;
         await sleep(16);
       }
@@ -376,11 +400,18 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const node = (fg.graphData().nodes as any[]).find((n) => String(n.id) === id);
       if (!node) { report("missing", `no brain node ${id}`); return null; }
-      const dist = 140, h = Math.hypot(node.x, node.y, node.z) || 1, ratio = 1 + dist / h;
-      fg.cameraPosition({ x: node.x * ratio, y: node.y * ratio, z: node.z * ratio }, node, 1800);
+      // Come in toward the node from where the camera already is (10-08: "me" is pinned at the origin, so the old
+      // "push out along the node's own direction" put the camera INSIDE my node and the Brain tab went blank).
+      const nx = Number(node.x || 0), ny = Number(node.y || 0), nz = Number(node.z || 0);
+      const cam = fg.cameraPosition();
+      let vx = cam.x - nx, vy = cam.y - ny, vz = cam.z - nz;
+      let vl = Math.hypot(vx, vy, vz);
+      if (vl < 1) { vx = 0; vy = 0; vz = 1; vl = 1; }
+      const dist = 160;
+      fg.cameraPosition({ x: nx + (vx / vl) * dist, y: ny + (vy / vl) * dist, z: nz + (vz / vl) * dist }, { x: nx, y: ny, z: nz }, 1800);
       await sleep(1900);
       if (!cont) return null;
-      const sc = fg.graph2ScreenCoords(node.x, node.y, node.z);
+      const sc = fg.graph2ScreenCoords(nx, ny, nz);
       const r = cont.getBoundingClientRect();
       const pt = { x: r.left + sc.x, y: r.top + sc.y };
       const box = new DOMRect(pt.x - 14, pt.y - 14, 28, 28);
