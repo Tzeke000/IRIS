@@ -57,7 +57,8 @@ def log(msg: str) -> None:
 
 def load_token() -> str | None:
     try:
-        p = Path(os.environ["USERPROFILE"]) / ".claude/channels/discord/.env"
+        # USERPROFILE on Windows, HOME on Linux (the server) — USERPROFILE-only made the guard fail closed on Linux
+        p = Path(os.environ.get("USERPROFILE") or os.path.expanduser("~")) / ".claude/channels/discord/.env"
         for line in p.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line.startswith("DISCORD_BOT_TOKEN="):
