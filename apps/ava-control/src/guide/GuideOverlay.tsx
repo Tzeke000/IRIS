@@ -17,7 +17,7 @@ import { getJson, postJson } from "../api";
 import { invoke } from "@tauri-apps/api/core";
 import { Arm, ARM_KEYS, ArmKey, bestArm, drawArm, easeInOutCubic, idleTip, port, Vec } from "./arms";
 import { findEl, scanUi } from "./uiMap";
-import { speakLine } from "./speech";
+import { speakLine, stripTags } from "./speech";
 import { fly, type Pose } from "./flight";
 import { Trail } from "./trail";
 
@@ -458,7 +458,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
             report("clicked", st.say.slice(0, 80), i);
             await warnNoClick(s.silent);                    // then say the line again, from the top
             clicksAtStep = L.clicked;                       // that click is answered — don't warn twice for it
-            setCaption(st.say);
+            setCaption(stripTags(st.say));
           }
         }
         await sleep(st.hold_ms ?? 400);

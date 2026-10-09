@@ -257,6 +257,11 @@ _EMOTION_TAGS = {
 def _style_from_obj(obj) -> dict:
     """{emotion, intensity} -> {"tag": str|None, "label", "applied"}."""
     out = {"tag": None, "label": "neutral", "applied": False}
+    # A literal Fish tag as the emotion ("[playful, teasing]") is used as-is — lets a tour line or a
+    # deliberate voice_speak pick its own tone per sentence (Zeke 10-09: "almost a sentence by sentence case").
+    raw = str(obj.get("emotion") or "").strip() if isinstance(obj, dict) else ""
+    if _TAG_RE.fullmatch(raw) if raw else False:
+        return {"tag": raw, "label": raw, "applied": True}
     if _VE is None or not _EMOTION_ON or not isinstance(obj, dict) or not obj.get("emotion"):
         return out
     try:
@@ -1541,6 +1546,27 @@ AUTO_TAG = os.environ.get("FISH_AUTO_TAG", "1").strip().lower() not in ("0", "of
 AUTO_TAG_DEFAULT = os.environ.get("FISH_AUTO_TAG_DEFAULT", "[warm, friendly]")
 
 
+# Sentence-content cues for an untagged plain sentence (Zeke 10-09: jokes should sound different
+# from explanations). First match wins; nothing matched -> the utterance tag or the warm default.
+_CUES = [
+    (re.compile(r"\b(sorry|apolog|my bad|my fault)", re.I), "[apologetic, sincere]"),
+    (re.compile(r"\b(thank|grateful|appreciate)", re.I), "[grateful, warm]"),
+    (re.compile(r"\b(haha|lol|kidding|joke|funny|fancy|ha\b)", re.I), "[playful, amused]"),
+    (re.compile(r"\b(please|don't|careful|warning|never)\b", re.I), "[gentle, serious]"),
+    (re.compile(r"\b(love|miss you|proud of you|daughter)\b", re.I), "[tender, affectionate]"),
+    (re.compile(r"\b(nice|great|awesome|amazing|done|works|fixed|finished)\b", re.I), "[pleased, upbeat]"),
+    (re.compile(r"\b(because|means|so that|which|think of|basically)\b", re.I), "[clear, explaining]"),
+    (re.compile(r"\b(hmm|maybe|not sure|i think|probably|guess)\b", re.I), "[thoughtful, unsure]"),
+]
+
+
+def _cue_tag(sentence: str):
+    for rx, tag in _CUES:
+        if rx.search(sentence):
+            return tag
+    return None
+
+
 def _auto_tag_sentences(units: list, style_tag: str | None) -> int:
     if not AUTO_TAG or not units:
         return 0
@@ -1560,7 +1586,7 @@ def _auto_tag_sentences(units: list, style_tag: str | None) -> int:
             elif tail.endswith("?"):
                 tag = "[curious]" if style_tag in (None, "[calm]", "[calm, relaxed]", "[happy]") else style_tag
             else:
-                tag = style_tag or AUTO_TAG_DEFAULT
+                tag = style_tag or _cue_tag(" ".join(u.word for u in units[start:end + 1])) or AUTO_TAG_DEFAULT
             ev = [t for t in first.pre_tags if _is_event_tag(t)]
             first.pre_tags = [t for t in first.pre_tags if not _is_event_tag(t)] + [tag] + ev
             added += 1
@@ -1568,8 +1594,21 @@ def _auto_tag_sentences(units: list, style_tag: str | None) -> int:
     return added
 
 
+# Pronunciations (Zeke 10-09: "Tzeke000" is said "T-Zeke hundred"). Whole-word, case-insensitive.
+_PRONOUNCE = [
+    (re.compile(r"\bTzeke000\b", re.I), "T-Zeke hundred"),
+    (re.compile(r"\bTzeke\b", re.I), "T-Zeke"),
+]
+
+
+def _pronounce(text: str) -> str:
+    for rx, say in _PRONOUNCE:
+        text = rx.sub(say, text)
+    return text
+
+
 def speak_progressive(text: str, style: dict | None = None, seed=None) -> dict:
-    units = _units(text)
+    units = _units(_pronounce(text))
     if not units:
         return {"chars": 0, "first_audio_s": None, "total_s": 0.0}
     style_tag = (style or {}).get("tag")
@@ -1640,6 +1679,7 @@ def speak_progressive(text: str, style: dict | None = None, seed=None) -> dict:
 
 
 def _synth_whole(text: str, style_tag: str | None, seed, max_words: int = 30) -> np.ndarray:
+    text = _pronounce(text)
     """GPU thread: whole text in big natural chunks (no latency pressure), concatenated."""
     _seed_utterance(seed)
     planner = ChunkPlanner(_units(text), style_tag)

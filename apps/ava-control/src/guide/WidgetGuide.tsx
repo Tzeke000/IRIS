@@ -17,7 +17,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { API_BASE, getJson, postJson } from "../api";
 import { eyeArms } from "../components/eyeArms3d";
-import { speakLine } from "./speech";
+import { speakLine, stripTags } from "./speech";
 import { fly, type Pose } from "./flight";
 import { Trail } from "./trail";
 
@@ -370,7 +370,7 @@ export function useWidgetGuide() {
           armKey = await reachToward({ x: m.x + st.desk.x * m.w, y: m.y + st.desk.y * m.h });
         const deskP = st.desk && !deskDone ? doDesk(s.seq, st.desk) : Promise.resolve();
         if (st.say) {
-          setCaption(st.say);
+          setCaption(stripTags(st.say));
           report(s.seq, "say", st.say.slice(0, 200));
           await speakLine(st.say, { emotion: st.emotion, silent: s.silent, interrupted: () => L.stop });
         }

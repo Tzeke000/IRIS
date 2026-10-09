@@ -41,3 +41,8 @@ export async function speakLine(text: string, opts: { emotion?: string; silent?:
   }
   return !interrupted();
 }
+
+/** Tone tags for the voice ("[playful] ...") are for my mouth, not for the caption (Zeke 10-09). */
+export function stripTags(text: string): string {
+  return text.replace(/\[[^\[\]]{1,80}\]\s*/g, "").replace(/\s{2,}/g, " ").trim();
+}

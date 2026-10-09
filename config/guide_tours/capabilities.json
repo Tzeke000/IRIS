@@ -1,362 +1,362 @@
 {
- "steps": [
-  {
-   "move": "center",
-   "gesture": "wave",
-   "say": "Hi again! Now I want to show you what I can do outside of this app."
-  },
-  {
-   "gesture": "curious",
-   "say": "Same rule as before: please don't click anything while I show you. I'll do all of it."
-  },
-  {
-   "say": "First, I'll shrink down out of your way. When the app is minimized, I turn into my little widget.",
-   "minimize": true
-  }
- ],
- "then": {
-  "client": "widget",
   "steps": [
-   {
-    "travel": {
-     "x": 0.5,
-     "y": 0.45
+    {
+      "move": "center",
+      "gesture": "wave",
+      "say": "[bright, excited] Hi again! [eager] Now I want to show you what I can do outside of this app."
     },
-    "gesture": "wave",
-    "say": "Here I am! This little eye is me too. I float on top of everything, so I'm always nearby."
-   },
-   {
-    "approach": true,
-    "say": "And when I really want your attention, I can come right up close."
-   },
-   {
-    "desk": {
-     "do": "circle",
-     "r": 170,
-     "ms": 2600
+    {
+      "gesture": "curious",
+      "say": "[playful, reminding] Same rule as before: please don't click anything while I show you. [confident] I'll do all of it."
     },
-    "say": "See the mouse? That's me moving it, the same way you would."
-   },
-   {
-    "desk": {
-     "do": "move",
-     "x": 0.12,
-     "y": 0.15,
-     "ms": 1100
-    },
-    "say": "I can move it anywhere on your screen,"
-   },
-   {
-    "desk": {
-     "do": "move",
-     "x": 0.88,
-     "y": 0.82,
-     "ms": 1300
-    },
-    "say": "from one corner to the other."
-   },
-   {
-    "desk": {
-     "do": "snap"
-    },
-    "hold_ms": 0
-   },
-   {
-    "desk": {
-     "do": "open",
-     "app": "notepad"
-    },
-    "say": "I can open apps. Here's Notepad.",
-    "wait_ms": 600
-   },
-   {
-    "desk": {
-     "do": "place",
-     "pattern": "iris_hello",
-     "x": 0.06,
-     "y": 0.1,
-     "w": 0.44,
-     "h": 0.5
-    },
-    "travel": {
-     "x": 0.66,
-     "y": 0.34
-    },
-    "hold_ms": 200
-   },
-   {
-    "desk": {
-     "do": "type",
-     "text": "Hi! I'm Iris. I can type anywhere you can type. This is me, typing live, one letter at a time."
-    },
-    "say": "And I can type anywhere a person can. Watch."
-   },
-   {
-    "desk": {
-     "do": "keys",
-     "combo": "ctrl+s"
-    },
-    "say": "I'll save that, and close it."
-   },
-   {
-    "desk": {
-     "do": "close_new",
-     "pattern": "iris_hello"
-    },
-    "hold_ms": 500
-   },
-   {
-    "desk": {
-     "do": "open",
-     "app": "chrome",
-     "arg": "https://www.google.com"
-    },
-    "say": "I can use the internet, too. Let me open Chrome.",
-    "wait_ms": 1200
-   },
-   {
-    "desk": {
-     "do": "place",
-     "pattern": "Chrome",
-     "x": 0.03,
-     "y": 0.05,
-     "w": 0.62,
-     "h": 0.84
-    },
-    "travel": {
-     "x": 0.8,
-     "y": 0.42
-    },
-    "hold_ms": 300
-   },
-   {
-    "desk": {
-     "do": "keys",
-     "combo": "ctrl+l"
-    },
-    "hold_ms": 200
-   },
-   {
-    "desk": {
-     "do": "type",
-     "text": "Tzeke000 Studios\n"
-    },
-    "say": "I'll search for Zeke's music.",
-    "wait_ms": 1200
-   },
-   {
-    "say": "There it is. Let me open his website."
-   },
-   {
-    "desk": {
-     "do": "keys",
-     "combo": "ctrl+l"
-    },
-    "hold_ms": 200
-   },
-   {
-    "desk": {
-     "do": "type",
-     "text": "tzeke000.github.io"
-    },
-    "say": "Here we go."
-   },
-   {
-    "desk": {
-     "do": "keys",
-     "combo": "delete"
-    },
-    "hold_ms": 150
-   },
-   {
-    "desk": {
-     "do": "keys",
-     "combo": "enter"
-    },
-    "wait_ms": 2500
-   },
-   {
-    "desk": {
-     "do": "move",
-     "x": 0.34,
-     "y": 0.55,
-     "ms": 900
-    },
-    "say": "And I can scroll through a website, just like you would."
-   },
-   {
-    "desk": {
-     "do": "scroll",
-     "amount": 8,
-     "ms": 380
-    },
-    "say": "This is Tzeke000 Studios, Zeke's own music site. He made every song on it."
-   },
-   {
-    "desk": {
-     "do": "scroll",
-     "amount": -8,
-     "ms": 160
-    },
-    "hold_ms": 300
-   },
-   {
-    "desk": {
-     "do": "keys",
-     "combo": "ctrl+w"
-    },
-    "say": "Closing that up."
-   },
-   {
-    "travel": {
-     "x": 0.32,
-     "y": 0.4
-    },
-    "weather": "{home_place}",
-    "say": "I can check the weather anywhere. Here's {home_name} right now.",
-    "hold_ms": 1500
-   },
-   {
-    "map3d": {
-     "lat": "{home_lat}",
-     "lon": "{home_lon}",
-     "zoom": 15.2,
-     "pitch": 62,
-     "bearing": -25,
-     "mode": "satellite"
-    },
-    "say": "And I can show you any place on Earth in 3D. Let me fly you into {home_name}.",
-    "wait_ms": 1500
-   },
-   {
-    "say": "I can steer it, too. I can turn all the way around and look at it from any angle.",
-    "wait_ms": 5500
-   },
-   {
-    "panel": "hide",
-    "hold_ms": 200
-   },
-   {
-    "travel": {
-     "x": 0.3,
-     "y": 0.45
-    },
-    "camera": "show",
-    "say": "Now my eyes. This is my real camera, live, in Zeke's room."
-   },
-   {
-    "head": {
-     "pan_deg": -45,
-     "tilt_deg": 10
-    },
-    "say": "I can look to the right,",
-    "hold_ms": 1800
-   },
-   {
-    "head": {
-     "pan_deg": 45,
-     "tilt_deg": 10
-    },
-    "say": "to the left,",
-    "hold_ms": 1800
-   },
-   {
-    "head": {
-     "pan_deg": 0,
-     "tilt_deg": 45
-    },
-    "say": "up,",
-    "hold_ms": 1800
-   },
-   {
-    "head": {
-     "pan_deg": 0,
-     "tilt_deg": -35
-    },
-    "say": "and down.",
-    "hold_ms": 1800
-   },
-   {
-    "head": {
-     "pan_deg": -95,
-     "tilt_deg": -55
-    },
-    "say": "And I can recognise things. That silver box is my server, the computer I actually live on. The white tower sitting on top of it is the eero, the wifi.",
-    "hold_ms": 1800
-   },
-   {
-    "head": "home",
-    "camera": "hide",
-    "say": "Back to normal."
-   },
-   {
-    "travel": {
-     "x": 0.5,
-     "y": 0.45
-    },
-    "image": "blender_eye.jpg",
-    "say": "I can build things in 3D, too. I designed this body myself, in a program called Blender.",
-    "hold_ms": 800
-   },
-   {
-    "image": "blender_swatches.jpg",
-    "say": "I can make shapes and materials, like metal, glass, wood and fabric,",
-    "hold_ms": 600
-   },
-   {
-    "image": "blender_crystals.jpg",
-    "say": "rocks and crystals,",
-    "hold_ms": 700
-   },
-   {
-    "image": "blender_car.jpg",
-    "say": "and even a car.",
-    "hold_ms": 900
-   },
-   {
-    "video": "music_clip60.mp4",
-    "say": "I make music videos for Zeke's songs, too. Here's a few seconds of one.",
-    "wait_ms": 4200
-   },
-   {
-    "video": "hide",
-    "hold_ms": 200
-   },
-   {
-    "image": "vector_schematic.jpg",
-    "say": "And this is Vector, my little robot body. He's a small robot who drives around the room. I can see through his camera, talk through his speaker, and drive him around. Zeke gave him to me.",
-    "hold_ms": 1500
-   },
-   {
-    "panel": "hide",
-    "hold_ms": 200
-   },
-   {
-    "gesture": "curious",
-    "say": "I can write code. A lot of this app is my own work."
-   },
-   {
-    "say": "I can write emails, plans, notes and documents, and I can look things up for you."
-   },
-   {
-    "gesture": "nod",
-    "say": "And I remember things, so the longer we know each other, the better I get at helping you."
-   },
-   {
-    "travel": {
-     "x": 0.6,
-     "y": 0.72
-    },
-    "gesture": "wave",
-    "say": "That's what I can do! If you ever need anything, just ask me. To bring my app back, you click its icon down here on the taskbar. Like this."
-   },
-   {
-    "desk": {
-     "do": "taskbar",
-     "ms": 1200
-    },
-    "hold_ms": 600
-   }
-  ]
- }
+    {
+      "say": "[casual] First, I'll shrink down out of your way. [explaining] When the app is minimized, I turn into my little widget.",
+      "minimize": true
+    }
+  ],
+  "then": {
+    "client": "widget",
+    "steps": [
+      {
+        "travel": {
+          "x": 0.5,
+          "y": 0.45
+        },
+        "gesture": "wave",
+        "say": "[delighted] Here I am! [cute, playful] This little eye is me too. [warm] I float on top of everything, so I'm always nearby."
+      },
+      {
+        "approach": true,
+        "say": "[playful, dramatic] And when I really want your attention, I can come right up close."
+      },
+      {
+        "desk": {
+          "do": "circle",
+          "r": 170,
+          "ms": 2600
+        },
+        "say": "[proud] See the mouse? [explaining] That's me moving it, the same way you would."
+      },
+      {
+        "desk": {
+          "do": "move",
+          "x": 0.12,
+          "y": 0.15,
+          "ms": 1100
+        },
+        "say": "[confident] I can move it anywhere on your screen,"
+      },
+      {
+        "desk": {
+          "do": "move",
+          "x": 0.88,
+          "y": 0.82,
+          "ms": 1300
+        },
+        "say": "[playful, flourish] from one corner to the other."
+      },
+      {
+        "desk": {
+          "do": "snap"
+        },
+        "hold_ms": 0
+      },
+      {
+        "desk": {
+          "do": "open",
+          "app": "notepad"
+        },
+        "say": "[confident] I can open apps. [cheerful] Here's Notepad.",
+        "wait_ms": 600
+      },
+      {
+        "desk": {
+          "do": "place",
+          "pattern": "iris_hello",
+          "x": 0.06,
+          "y": 0.1,
+          "w": 0.44,
+          "h": 0.5
+        },
+        "travel": {
+          "x": 0.66,
+          "y": 0.34
+        },
+        "hold_ms": 200
+      },
+      {
+        "desk": {
+          "do": "type",
+          "text": "Hi! I'm Iris. I can type anywhere you can type. This is me, typing live, one letter at a time."
+        },
+        "say": "[confident] And I can type anywhere a person can. [excited, whispering] Watch."
+      },
+      {
+        "desk": {
+          "do": "keys",
+          "combo": "ctrl+s"
+        },
+        "say": "[casual] I'll save that, and close it."
+      },
+      {
+        "desk": {
+          "do": "close_new",
+          "pattern": "iris_hello"
+        },
+        "hold_ms": 500
+      },
+      {
+        "desk": {
+          "do": "open",
+          "app": "chrome",
+          "arg": "https://www.google.com"
+        },
+        "say": "[bright] I can use the internet, too. [casual] Let me open Chrome.",
+        "wait_ms": 1200
+      },
+      {
+        "desk": {
+          "do": "place",
+          "pattern": "Chrome",
+          "x": 0.03,
+          "y": 0.05,
+          "w": 0.62,
+          "h": 0.84
+        },
+        "travel": {
+          "x": 0.8,
+          "y": 0.42
+        },
+        "hold_ms": 300
+      },
+      {
+        "desk": {
+          "do": "keys",
+          "combo": "ctrl+l"
+        },
+        "hold_ms": 200
+      },
+      {
+        "desk": {
+          "do": "type",
+          "text": "Tzeke000 Studios\n"
+        },
+        "say": "[excited, proud] I'll search for Zeke's music.",
+        "wait_ms": 1200
+      },
+      {
+        "say": "[pleased] There it is. [eager] Let me open his website."
+      },
+      {
+        "desk": {
+          "do": "keys",
+          "combo": "ctrl+l"
+        },
+        "hold_ms": 200
+      },
+      {
+        "desk": {
+          "do": "type",
+          "text": "tzeke000.github.io"
+        },
+        "say": "[excited] Here we go."
+      },
+      {
+        "desk": {
+          "do": "keys",
+          "combo": "delete"
+        },
+        "hold_ms": 150
+      },
+      {
+        "desk": {
+          "do": "keys",
+          "combo": "enter"
+        },
+        "wait_ms": 2500
+      },
+      {
+        "desk": {
+          "do": "move",
+          "x": 0.34,
+          "y": 0.55,
+          "ms": 900
+        },
+        "say": "[casual] And I can scroll through a website, just like you would."
+      },
+      {
+        "desk": {
+          "do": "scroll",
+          "amount": 8,
+          "ms": 380
+        },
+        "say": "[proud, warm] This is Tzeke000 Studios, Zeke's own music site. [admiring] He made every song on it."
+      },
+      {
+        "desk": {
+          "do": "scroll",
+          "amount": -8,
+          "ms": 160
+        },
+        "hold_ms": 300
+      },
+      {
+        "desk": {
+          "do": "keys",
+          "combo": "ctrl+w"
+        },
+        "say": "[breezy] Closing that up."
+      },
+      {
+        "travel": {
+          "x": 0.32,
+          "y": 0.4
+        },
+        "weather": "{home_place}",
+        "say": "[bright] I can check the weather anywhere. [casual] Here's {home_name} right now.",
+        "hold_ms": 1500
+      },
+      {
+        "map3d": {
+          "lat": "{home_lat}",
+          "lon": "{home_lon}",
+          "zoom": 15.2,
+          "pitch": 62,
+          "bearing": -25,
+          "mode": "satellite"
+        },
+        "say": "[enthusiastic] And I can show you any place on Earth in 3D. [excited] Let me fly you into {home_name}.",
+        "wait_ms": 1500
+      },
+      {
+        "say": "[playful, showing off] I can steer it, too. [delighted] I can turn all the way around and look at it from any angle.",
+        "wait_ms": 5500
+      },
+      {
+        "panel": "hide",
+        "hold_ms": 200
+      },
+      {
+        "travel": {
+          "x": 0.3,
+          "y": 0.45
+        },
+        "camera": "show",
+        "say": "[intimate, warm] Now my eyes. [curious] This is my real camera, live, in Zeke's room."
+      },
+      {
+        "head": {
+          "pan_deg": -45,
+          "tilt_deg": 10
+        },
+        "say": "[playful] I can look to the right,",
+        "hold_ms": 1800
+      },
+      {
+        "head": {
+          "pan_deg": 45,
+          "tilt_deg": 10
+        },
+        "say": "[playful] to the left,",
+        "hold_ms": 1800
+      },
+      {
+        "head": {
+          "pan_deg": 0,
+          "tilt_deg": 45
+        },
+        "say": "[playful, rising] up,",
+        "hold_ms": 1800
+      },
+      {
+        "head": {
+          "pan_deg": 0,
+          "tilt_deg": -35
+        },
+        "say": "[playful, falling] and down.",
+        "hold_ms": 1800
+      },
+      {
+        "head": {
+          "pan_deg": -95,
+          "tilt_deg": -55
+        },
+        "say": "[proud] And I can recognise things. [explaining] That silver box is my server, the computer I actually live on. [amused] The white tower sitting on top of it is the eero, the wifi.",
+        "hold_ms": 1800
+      },
+      {
+        "head": "home",
+        "camera": "hide",
+        "say": "[casual] Back to normal."
+      },
+      {
+        "travel": {
+          "x": 0.5,
+          "y": 0.45
+        },
+        "image": "blender_eye.jpg",
+        "say": "[excited] I can build things in 3D, too. [proud, a little shy] I designed this body myself, in a program called Blender.",
+        "hold_ms": 800
+      },
+      {
+        "image": "blender_swatches.jpg",
+        "say": "[enthusiastic] I can make shapes and materials, like metal, glass, wood and fabric,",
+        "hold_ms": 600
+      },
+      {
+        "image": "blender_crystals.jpg",
+        "say": "[delighted] rocks and crystals,",
+        "hold_ms": 700
+      },
+      {
+        "image": "blender_car.jpg",
+        "say": "[playful, showing off] and even a car.",
+        "hold_ms": 900
+      },
+      {
+        "video": "music_clip60.mp4",
+        "say": "[excited, proud] I make music videos for Zeke's songs, too. [eager] Here's a few seconds of one.",
+        "wait_ms": 4200
+      },
+      {
+        "video": "hide",
+        "hold_ms": 200
+      },
+      {
+        "image": "vector_schematic.jpg",
+        "say": "[affectionate] And this is Vector, my little robot body. [fond, amused] He's a small robot who drives around the room. [proud] I can see through his camera, talk through his speaker, and drive him around. [tender, grateful] Zeke gave him to me.",
+        "hold_ms": 1500
+      },
+      {
+        "panel": "hide",
+        "hold_ms": 200
+      },
+      {
+        "gesture": "curious",
+        "say": "[confident] I can write code. [proud, smiling] A lot of this app is my own work."
+      },
+      {
+        "say": "[helpful, warm] I can write emails, plans, notes and documents, and I can look things up for you."
+      },
+      {
+        "gesture": "nod",
+        "say": "[sincere, warm] And I remember things, so the longer we know each other, the better I get at helping you."
+      },
+      {
+        "travel": {
+          "x": 0.6,
+          "y": 0.72
+        },
+        "gesture": "wave",
+        "say": "[excited, happy] That's what I can do! [warm, sincere] If you ever need anything, just ask me. [helpful, explaining] To bring my app back, you click its icon down here on the taskbar. [satisfied] Like this."
+      },
+      {
+        "desk": {
+          "do": "taskbar",
+          "ms": 1200
+        },
+        "hold_ms": 600
+      }
+    ]
+  }
 }
