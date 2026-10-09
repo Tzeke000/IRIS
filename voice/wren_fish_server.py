@@ -131,6 +131,7 @@ SCHEDULE = [int(x) for x in os.environ.get("FISH_CHUNK_SCHEDULE", "3,3,6,10").sp
 GROWTH = float(os.environ.get("FISH_CHUNK_GROWTH", "1.6"))      # after the schedule runs out
 MAX_CHUNK_WORDS = int(os.environ.get("FISH_MAX_CHUNK_WORDS", "40"))
 MIN_CHUNK_WORDS = int(os.environ.get("FISH_MIN_CHUNK_WORDS", "2"))
+CLAUSE_STRETCH = float(os.environ.get("FISH_CLAUSE_STRETCH", "1.7"))  # stretch a chunk to reach a clause boundary
 SAFETY_FRAC = float(os.environ.get("FISH_SAFETY_FRAC", "0.15"))  # keep 15 % of the budget spare
 SAFETY_S = float(os.environ.get("FISH_SAFETY_S", "0.15"))        # ... plus this many seconds
 
@@ -375,6 +376,15 @@ class ChunkPlanner:
                 if s >= best_s:                        # ties -> the longer chunk
                     best_n, best_s = n_, s
             n = best_n
+            # Zeke 10-09: "let me think| about that" — a mid-clause cut audibly clips the word and
+            # crowds the next one. If there's no comma/sentence end in range, stretch the chunk to
+            # the next clause boundary (up to CLAUSE_STRETCH x max_words) instead of cutting mid-phrase.
+            if best_s < 2:
+                hi = min(rem, int(max_words * CLAUSE_STRETCH))
+                for n_ in range(max_words + 1, hi + 1):
+                    if self.units[self.i + n_ - 1].strength >= 2:
+                        n = n_
+                        break
             # never strand a chunk on "a"/"the"/"of": take up to 2 more words to reach a real word
             k = 0
             while self.units[self.i + n - 1].strength == 0 and n < rem and k < 2:
@@ -411,7 +421,7 @@ def _trim_edges(a: np.ndarray, strength: int, first: bool, last: bool) -> np.nda
     if voiced.size == 0:
         return a
     keep_lead = 0.02 if not first else 0.01
-    keep_tail = {3: 0.28, 2: 0.16, 1: 0.06}.get(strength, 0.06) if not last else 0.25
+    keep_tail = {3: 0.28, 2: 0.16, 1: 0.12}.get(strength, 0.12) if not last else 0.25   # 0.06 clipped word endings ("think|") — Zeke 10-09
     s = max(0, voiced[0] * hop - int(keep_lead * SAMPLE_RATE))
     e = min(a.size, (voiced[-1] + 1) * hop + int(keep_tail * SAMPLE_RATE))
     out = a[s:e].astype(np.float32, copy=True)
