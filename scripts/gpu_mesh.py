@@ -550,7 +550,13 @@ class GpuMeshRenderer:
         # a solid model actually is. ~90% of the benefit for +30% instead of
         # +400%. Raise ss only for a deliberate high-quality pass.
         self.ss = max(1, int(ss))
-        self.ctx = moderngl.create_standalone_context()
+        # Headless Linux (the server has no X display) needs EGL; Windows/desktop
+        # take the default path. Without this the 3D layer silently came back
+        # blank on the server and the render "succeeded" with no models.
+        try:
+            self.ctx = moderngl.create_standalone_context()
+        except Exception:
+            self.ctx = moderngl.create_standalone_context(backend="egl")
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.prog_shaded = self.ctx.program(vertex_shader=_VERT,
                                             fragment_shader=_FRAG_SHADED)
