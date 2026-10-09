@@ -1,0 +1,33 @@
+# ~/.config/systemd/user/iris-mouth-fish.service - Fish Audio S2 Pro mouth on the V100 (:8779),
+# side by side with the StyleTTS2 mouth (iris-mouth, :8769). NOT installed or enabled by anything;
+# to try it:  cp scripts/server/iris-mouth-fish.service ~/.config/systemd/user/ &&
+#             systemctl --user daemon-reload && systemctl --user start iris-mouth-fish
+# Sound goes to the tower via IRIS_AUDIO_SINK from the SAME env file as iris-mouth (generated from
+# config/private.local.json, so no address is tracked here). Nothing calls :8779 until a caller is
+# pointed at it. Needs ~9-12 GB of VRAM (int8; ~13-16 GB with FISH_INT8=0); the first start compiles ~10 min
+# (/health = 503 "loading" until warm; later starts reuse the inductor cache).
+# NB: systemd lets EnvironmentFile= override Environment=, so never put WREN_VOICE_PORT in
+# voice.env or this unit would collide with the live mouth's port (it then exits: singleton bind).
+[Unit]
+Description=Iris mouth - Fish S2 Pro on the V100 (sound out of the tower), port 8779
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/IRIS
+Environment=WREN_VOICE_PORT=8779
+Environment=FISH_MAXSEQ=4096
+Environment=FISH_COMPILE=reduce-overhead
+Environment=FISH_INT8=1
+Environment=IRIS_FISH_ROOT=%h/voice_lab/fish
+Environment=TMPDIR=%h/voice_lab/tmp
+EnvironmentFile=%h/.config/iris/voice.env
+ExecStart=%h/voice_lab/fish/venv/bin/python %h/IRIS/voice/wren_fish_server.py
+Restart=on-failure
+RestartSec=30
+# the compile warm-up can take minutes; don't let a stop hang forever
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
