@@ -946,6 +946,62 @@ def lyric_model_schedule(lines, fps: int, beat_i, n_frames: int,
           + (" ..." if len(used) > 8 else ""))
     return sched, zoom, push_mask
 
+
+def lyric_punch_schedule(heard, words, fps: int, beat_i, n_frames: int,
+                         amount: float = 1.30, secs: float = 0.30):
+    """Per-frame centrepiece size multiplier: a quick PUNCH on every SUNG
+    occurrence of `words`, or None if nothing matched.
+
+    2026-10-09 ("Hit a Bump" v2): a punch on every "bump". Different from the
+    "closer" dolly above in three ways, each on purpose:
+      * it reads the WHISPER-HEARD words, not the written lyric — the written
+        line says "i take a bump" once while the singer does "bump, bump,
+        bump", and every one of those should land. Mishearings ("bomb") are
+        handled by listing them as aliases in `words`.
+      * it is SHORT (`secs`, default 0.3s — under one beat at 148 bpm, so
+        three bumps on three beats read as three hits, not one swell) and
+        multiplies whatever framing is already there instead of replacing it.
+      * it does not touch the lyric-model schedule or the spin, so a car or a
+        pair of headphones on screen stays on screen and just gets hit.
+    Each punch PEAKS ON THE NEAREST BEAT to the word's midpoint. Whisper's
+    word START absorbs the gap before the word and ran up to ~0.2s early on
+    the bumps; the midpoint snapped to the beat grid matched every bump in
+    that song."""
+    keys = {re.sub(r"[^a-z]", "", str(w).lower()) for w in words} - {""}
+    if not heard or not keys or n_frames <= 0:
+        return None, []
+    beat_i = np.asarray(beat_i)
+    starts = np.flatnonzero(np.diff(beat_i, prepend=beat_i[0]) != 0)
+    max_snap = int(round(0.25 * fps))
+    peaks = []
+    for w in heard:
+        if re.sub(r"[^a-z]", "", str(w.text).lower()) not in keys:
+            continue
+        f = int(round(0.5 * (float(w.start) + float(w.end)) * fps))
+        if len(starts):
+            k = int(np.argmin(np.abs(starts - f)))
+            if abs(int(starts[k]) - f) <= max_snap:
+                f = int(starts[k])
+        if 0 <= f < n_frames and f not in peaks:
+            peaks.append(f)
+    if not peaks:
+        return None, []
+    env = np.zeros(n_frames, np.float32)
+    n_att = max(1, int(round(0.06 * fps)))           # snap in...
+    n_dec = max(2, int(round(float(secs) * fps)) - n_att)   # ...ease back
+    for fp in peaks:
+        for k in range(-n_att, n_dec + 1):
+            fi = fp + k
+            if not 0 <= fi < n_frames:
+                continue
+            if k <= 0:
+                v = 0.5 - 0.5 * np.cos(np.pi * (k + n_att) / n_att)
+            else:
+                v = 0.5 + 0.5 * np.cos(np.pi * k / n_dec)
+            env[fi] = max(env[fi], v)
+    return (1.0 + (float(amount) - 1.0) * env).astype(np.float32), \
+        sorted(p / fps for p in peaks)
+
 # Metal tints. `base` in the metal shader is Schlick F0 — the colour of the
 # MIRROR — so these are real conductor reflectances, not surface paint. Zeke
 # said "shiny metallic", and the palette-tinted default renders blue chrome;
@@ -3618,6 +3674,17 @@ def main() -> int:
                     help="length of one lyric dolly: eased in, held at the "
                          "near point, then eased back OUT to the standing "
                          "framing (default 2.4s)")
+    ap.add_argument("--punch-words", default="", metavar="W1,W2",
+                    help="comma list: a quick camera PUNCH on the centrepiece "
+                         "on every SUNG occurrence (whisper-heard, so repeats "
+                         "count even if the lyric sheet writes the word once); "
+                         "add whisper's mishearings as aliases, e.g. "
+                         "'bump,bomb'. Off by default")
+    ap.add_argument("--punch-amount", type=float, default=1.30, metavar="SCALE",
+                    help="size multiplier at the peak of a punch (default 1.30)")
+    ap.add_argument("--punch-secs", type=float, default=0.30, metavar="SECONDS",
+                    help="length of one punch, snap-in + ease-back "
+                         "(default 0.30s; keep it under one beat)")
     ap.add_argument("--lasers", action="store_true",
                     help="beams from a head model's eye sockets, on the DROP "
                          "only (not every kick - it stops meaning anything if "
@@ -3736,6 +3803,7 @@ def main() -> int:
               "reduced, contrast scrim behind lyrics")
     t0 = time.time()
 
+    heard: list[Word] = []
     if args.no_vocals:
         lines: list[list[Word]] = []
     else:
@@ -3883,6 +3951,19 @@ def main() -> int:
         if r.lyric_shapes is None:
             print("[lyric_viz] lyric models: no matching words - "
                   "falling back to the shape deck")
+    if args.punch_words:
+        pwords = [w.strip() for w in args.punch_words.split(",") if w.strip()]
+        pz, ptimes = lyric_punch_schedule(
+            heard, pwords, args.fps, analysis.beat_i, n_frames,
+            amount=args.punch_amount, secs=args.punch_secs)
+        if pz is None:
+            print(f"[lyric_viz] punches: none - no sung {pwords} heard")
+        else:
+            r.lyric_zoom = pz if r.lyric_zoom is None else r.lyric_zoom * pz
+            print(f"[lyric_viz] punches: {len(ptimes)} on {pwords} "
+                  f"(x{args.punch_amount:.2f} over {args.punch_secs:.2f}s, "
+                  f"beat-snapped) at "
+                  + " ".join(f"{t:.2f}" for t in ptimes))
     if r._shapes and len(r._shapes) > 1:
         beats_per = max(1, args.shape_every)
         print(f"[lyric_viz] shape deck: {len(r._shapes)} shapes "
