@@ -28,8 +28,9 @@ if [ "$ENGINE" = "fish" ]; then
     # Zeke 10-09: 3-word pieces sounded choppy (each piece is voiced on its own) ⇒ start with 8 words, then grow.
     export FISH_CHUNK_SCHEDULE=6,14,24 FISH_FIRST_FLUSH_S=1.6   # Zeke 10-09: 6 words to start; flush deadline outlasts a 6-word first piece (~1.2 s compute)
     export FISH_SEED=-1   # research 10-09: a fixed seed made every repeat identical ("hmm" always the same)
-    # Zeke 10-09 blind test: picked #3 = refA_32s (32 s of the conversational middle of his original Iris_voice.mp3)
-    export IRIS_FISH_REF_WAV="$HOME/voice_lab/ref_candidates/refA_32s.wav" IRIS_FISH_REF_TXT="$HOME/voice_lab/ref_candidates/refA_32s.txt"
+    # Zeke 10-09: first blind test picked refA_32s; then after "still monotone" he made a lively ElevenLabs take and picked #3 = x3
+    # (45 s montage: excited + mischievous + sad + comforting, from iris-expresive.mp3) — pitch movement ~2x refA
+    export IRIS_FISH_REF_WAV="$HOME/voice_lab/ref_expressive/x3.wav" IRIS_FISH_REF_TXT="$HOME/voice_lab/ref_expressive/x3.txt"
     export IRIS_FISH_ROOT="$HOME/voice_lab/fish" TMPDIR="$HOME/voice_lab/tmp"
     t0=$(date +%s)
     "$HOME/voice_lab/fish/venv/bin/python" "$ROOT/voice/wren_fish_server.py"
