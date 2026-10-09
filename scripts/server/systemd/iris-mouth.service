@@ -1,9 +1,10 @@
-# ~/.config/systemd/user/iris-mouth.service - my StyleTTS2 mouth on the server's V100 (:8769).
+# ~/.config/systemd/user/iris-mouth.service - my mouth on the server's V100 (:8769): whichever engine
+# scripts/server/mouth_switch.sh selected (fish = main, styletts = standby; 2026-10-09) via mouth_launch.sh.
 # Sound goes to the tower's speakers via IRIS_AUDIO_SINK (set in ~/.config/iris/voice.env,
 # generated from config/private.local.json so no address is tracked). Not cognition - safe to
 # run beside the tower me. Installed by scripts/server/install_supervision.sh (2026-10-07).
 [Unit]
-Description=Iris mouth (StyleTTS2 on the V100, sound out of the tower)
+Description=Iris mouth (selected engine: Fish S2 Pro / StyleTTS2, on the V100, sound out of the tower)
 After=network-online.target
 Wants=network-online.target
 
@@ -11,7 +12,8 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/IRIS
 EnvironmentFile=%h/.config/iris/voice.env
-ExecStart=%h/venvs/iris-style/bin/python %h/IRIS/voice/wren_styletts_server.py
+ExecStart=%h/IRIS/scripts/server/mouth_launch.sh
+TimeoutStopSec=30
 Restart=always
 RestartSec=10
 

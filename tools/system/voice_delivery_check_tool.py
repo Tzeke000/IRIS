@@ -94,7 +94,7 @@ def _voice_delivery_check(params: dict[str, Any], g: dict[str, Any]) -> dict[str
     except Exception:  # noqa: BLE001
         pass
     # 2. what the mouth spoke  ·  daemon drops
-    spoke = _journal_times("iris-mouth", since_min, "[styletts] reply in")
+    spoke = _journal_times("iris-mouth", since_min, "] reply in")   # [styletts] or [fish]
     drops = _journal_times("iris-ears", since_min, "dropped") + _journal_times("iris-ears", since_min, "STALE barge-in")
     # 3. what the tower played
     sessions, sink_err = _sink_sessions()
