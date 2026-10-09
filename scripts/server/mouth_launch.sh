@@ -25,6 +25,9 @@ if [ "$ENGINE" = "fish" ]; then
   else
     log "starting fish on :8769"
     export FISH_MAXSEQ=4096 FISH_COMPILE=reduce-overhead FISH_INT8=1
+    # Zeke 10-09: 3-word pieces sounded choppy (each piece is voiced on its own) ⇒ start with 8 words, then grow.
+    export FISH_CHUNK_SCHEDULE=6,14,24 FISH_FIRST_FLUSH_S=1.6   # Zeke 10-09: 6 words to start; flush deadline outlasts a 6-word first piece (~1.2 s compute)
+    export FISH_SEED=-1   # research 10-09: a fixed seed made every repeat identical ("hmm" always the same)
     export IRIS_FISH_ROOT="$HOME/voice_lab/fish" TMPDIR="$HOME/voice_lab/tmp"
     t0=$(date +%s)
     "$HOME/voice_lab/fish/venv/bin/python" "$ROOT/voice/wren_fish_server.py"
