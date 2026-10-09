@@ -27,6 +27,12 @@ Usage:
       [--style edm|dubstep|deephouse] [--out out.mp4] [--size 1280x720]
       [--fps 30] [--device cuda|cpu] [--no-vocals]
 
+  Server, chunk-parallel (2026-10-09; same args + --workers, default 16):
+    scripts/server/lyric_viz_parallel.sh [--workers 16] <args> --out out.mp4
+  Each chunk SIMULATES state up to its first frame (Renderer.simulate), so the
+  stitched video is pixel-identical to a single render (verified max abs diff
+  0 at every join). --window renders simulate the same way.
+
 Encoding is PyAV (bundled FFmpeg libs) — no ffmpeg.exe needed on this machine.
 """
 from __future__ import annotations
@@ -39,6 +45,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass, field
+from dataclasses import replace as _dc_replace
 from pathlib import Path
 
 import cv2
@@ -1136,6 +1143,17 @@ class Renderer:
     _shapes: "list | None" = None           # parsed shape list (set in __post_init__)
     _shape_last: int = -1                   # last slot index, for swap logging
     _symb: "dict | None" = None             # symbiote viz state (droplets, tendrils, plate)
+    # SIMULATE mode (2026-10-09, chunk-parallel renders). While True, frame()
+    # advances every piece of frame-to-frame state EXACTLY as a drawn frame
+    # would, and draws nothing. A chunk that starts at frame A first simulates
+    # 0..A-1 so its first frame matches a single full render pixel for pixel —
+    # without it the spin, the nova shockwaves, the debris depth, the palette
+    # index etc. all restart at the chunk start (the 10-09 boombox showed its
+    # BACK in a 44-74 s test window and its FRONT in the full render).
+    # ⚠ RULE FOR NEW CODE: any attribute or dict a draw method mutates frame to
+    # frame must be advanced on the `self._sim` path too, BEFORE the method's
+    # `if self._sim: return`. state_digest() lists the state that is checked.
+    _sim: bool = False
 
     # -- setup ------------------------------------------------------------
     def __post_init__(self):
@@ -1239,10 +1257,27 @@ class Renderer:
         slot = int(a.beat_i[i]) // max(1, int(self.bg_every))
         return self.bg_deck[slot % len(self.bg_deck)]
 
+    def _stars_step(self, i: int, a: Analysis) -> None:
+        drop = bool(a.drop[i])
+        speed = 0.4 + 2.2 * a.bass[i] + (2.0 if drop else 0.0)
+        self._stars[:, 0] -= speed * self._stars[:, 2]
+        self._stars[:, 0] %= self.W
+
     def _bg(self, i: int, t: float, a: Analysis) -> np.ndarray:
+        bg = self._bg_now(i, a)
+        if self._sim:
+            # same branch order as below; only the stateful backgrounds move
+            if self.bgclips:
+                return None
+            if bg == "starfield":
+                self._stars_step(i, a)
+            elif bg == "warp":
+                self._bg_warp(t, a, i)
+            elif bg in ("metal", "tunnel"):
+                self._bg_metal(t, a, i)
+            return None
         img = np.zeros((self.H, self.W, 3), np.float32)
         img[:] = (8, 8, 14)
-        bg = self._bg_now(i, a)
         if self.bgclips:
             # music-reactive VJ loop background (Beeple CC loops etc):
             # brightness rides the energy, kick flashes push it, loops cut on
@@ -1263,10 +1298,7 @@ class Renderer:
             img += up * self._pocket()
             return img
         if bg == "starfield":
-            drop = bool(a.drop[i])
-            speed = 0.4 + 2.2 * a.bass[i] + (2.0 if drop else 0.0)
-            self._stars[:, 0] -= speed * self._stars[:, 2]
-            self._stars[:, 0] %= self.W
+            self._stars_step(i, a)
             xs = self._stars[:, 0].astype(int)
             ys = self._stars[:, 1].astype(int)
             bright = (60 + 180 * self._stars[:, 2]
@@ -1426,6 +1458,8 @@ class Renderer:
             st["y"][gone] = rng.uniform(-1, 1, int(gone.sum()))
             st["z"][gone] = 1.0
             z0[gone] = 1.0
+        if self._sim:
+            return None
         f = 0.62 * self.H
         cx, cy = self.W / 2.0, self.H / 2.0
         x1 = cx + st["x"] * f / st["z"]
@@ -1497,6 +1531,8 @@ class Renderer:
         # on the bass without the whole field teleporting when the rate changes
         st["z"] += (0.9 + 3.4 * float(a.bass[i])
                     + (4.5 if a.drop[i] else 0.0)) / max(1, self.fps)
+        if self._sim:
+            return None
         d = NEAR + ((st["d0"] * span - st["z"]) % span)
         half = np.tan(np.radians(FOV) / 2.0) * d
         if layout == "tunnel":
@@ -1636,6 +1672,20 @@ class Renderer:
 
     def _viz(self, img: np.ndarray, i: int, a: Analysis) -> None:
         v = self._viz_now(i, a)
+        if self._sim:
+            # only these carry state from frame to frame; each one returns
+            # right after advancing it (radial/bars/wave/ncs/tn/mcat are pure)
+            if v == "tunnel":
+                self._viz_tunnel(img, i, a)
+            elif v == "supernova":
+                self._viz_supernova(img, i, a)
+            elif v == "kaleido":
+                self._viz_kaleido(img, i, a)
+            elif v == "symbiote":
+                self._viz_symbiote(img, i, a)
+            if self.style.particles:
+                self._viz_particles(img, i, a)
+            return
         if v == "radial":
             self._viz_radial(img, i, a)
         elif v == "bars_center":
@@ -1803,6 +1853,33 @@ class Renderer:
         ke = st["kick_env"]
         cx, cy = w / 2.0, h * 0.45
         R0 = h * 0.155 * (1.0 + 0.30 * bass + 0.12 * rms + 0.10 * ke)
+        # STATE FIRST (tendril angles + droplets), so the _sim path can stop
+        # before any pixels. The droplet height-field blobs are collected and
+        # added to the field later in the same order -> identical sums.
+        st["ang"] += st["spin"] * (1.0 / self.fps) * (0.25 + 1.6 * bass)
+        # -- droplets: thrown on kicks, sprung back, merged through the blur --
+        if kick and i - st["last_kick"] > 3:
+            st["last_kick"] = i
+            for _ in range(2 + int(4 * bass)):
+                ang = rng.uniform(0, 2 * np.pi)
+                sp = (0.9 + 1.6 * bass) * R0 * 0.075
+                st["drops"].append([cx + np.cos(ang) * R0 * 0.9,
+                                    cy + np.sin(ang) * R0 * 0.9,
+                                    np.cos(ang) * sp, np.sin(ang) * sp, 0.0,
+                                    R0 * rng.uniform(0.22, 0.42)])
+        keep = []
+        blobs = []
+        for dr in st["drops"]:
+            dr[4] += 1
+            dr[0] += dr[2]; dr[1] += dr[3]
+            dr[2] += (cx - dr[0]) * 0.0055; dr[3] += (cy - dr[1]) * 0.0055
+            dr[2] *= 0.986; dr[3] *= 0.986
+            blobs.append((dr[0], dr[1], dr[5]))
+            if dr[4] < 110 and np.hypot(dr[0] - cx, dr[1] - cy) > R0 * 0.55:
+                keep.append(dr)
+        st["drops"] = keep[-40:]
+        if self._sim:
+            return
 
         # -- silhouette: spectrum lobes + wobble + tendrils ------------------
         n = 180
@@ -1816,7 +1893,6 @@ class Renderer:
         th = np.linspace(-np.pi / 2, 1.5 * np.pi, n, endpoint=False)
         wob = 0.09 * np.sin(3 * th + t * 1.3) + 0.05 * np.sin(5 * th - t * 0.9)
         rr = R0 * (1.0 + wob + 0.85 * mag * (0.35 + 0.65 * rms))
-        st["ang"] += st["spin"] * (1.0 / self.fps) * (0.25 + 1.6 * bass)
         tend = np.zeros(n, np.float32)
         for ang in st["ang"]:
             dth = np.angle(np.exp(1j * (th - ang)))
@@ -1833,28 +1909,10 @@ class Renderer:
         hfield += (0.05 + 0.06 * rms) * (np.sin(xx * 0.11 + t * 1.7)
                                          * np.sin(yy * 0.13 - t * 1.1)) * (dist > 0)
 
-        # -- droplets: thrown on kicks, sprung back, merged through the blur --
-        if kick and i - st["last_kick"] > 3:
-            st["last_kick"] = i
-            for _ in range(2 + int(4 * bass)):
-                ang = rng.uniform(0, 2 * np.pi)
-                sp = (0.9 + 1.6 * bass) * R0 * 0.075
-                st["drops"].append([cx + np.cos(ang) * R0 * 0.9,
-                                    cy + np.sin(ang) * R0 * 0.9,
-                                    np.cos(ang) * sp, np.sin(ang) * sp, 0.0,
-                                    R0 * rng.uniform(0.22, 0.42)])
-        keep = []
-        for dr in st["drops"]:
-            dr[4] += 1
-            dr[0] += dr[2]; dr[1] += dr[3]
-            dr[2] += (cx - dr[0]) * 0.0055; dr[3] += (cy - dr[1]) * 0.0055
-            dr[2] *= 0.986; dr[3] *= 0.986
-            r = dr[5]
-            hfield += 0.80 * np.exp(-((xx - dr[0]) ** 2 + (yy - dr[1]) ** 2)
-                                    / (2.0 * (r * 0.75) ** 2))
-            if dr[4] < 110 and np.hypot(dr[0] - cx, dr[1] - cy) > R0 * 0.55:
-                keep.append(dr)
-        st["drops"] = keep[-40:]
+        # droplet gaussians were advanced above (state); add them in order
+        for bx_, by_, br_ in blobs:
+            hfield += 0.80 * np.exp(-((xx - bx_) ** 2 + (yy - by_) ** 2)
+                                    / (2.0 * (br_ * 0.75) ** 2))
 
         # -- viscosity + shading ---------------------------------------------
         hb = cv2.GaussianBlur(hfield, (0, 0), 3.2)
@@ -1937,6 +1995,8 @@ class Renderer:
         ph += 0.10 + 0.55 * a.bass[i] + (0.35 if drop else 0.0)
         rot += 0.004 + 0.030 * a.high[i] + (0.012 if drop else 0.0)
         self._tun_phase, self._tun_rot = ph, rot
+        if self._sim:
+            return
         n_r, n_v = 16, 40
         th = np.linspace(0, 2 * np.pi, n_v, endpoint=False)
         # spectrum wraps the ring, mirrored so bass sits top+bottom
@@ -1986,6 +2046,16 @@ class Renderer:
         p[:, 0] += (0.012 + 0.055 * a.bass[i]) * (0.6 + p[:, 2])
         burst = self._nova_burst
         self._nova_burst *= 0.90
+        if self._sim:
+            # the shockwaves still expand / fade / expire, just undrawn
+            keep = []
+            for s in self._shock:
+                s[0] += self.H * 0.020 * (1.0 + a.bass[i])
+                s[1] *= 0.90
+                if s[1] > 0.04 and s[0] < self.H * 1.3:
+                    keep.append(s)
+            self._shock = keep
+            return
         # orbit OUTSIDE the logo (first cut hid everything behind the helmet)
         base_r = self.H * (0.30 + 0.06 * a.bass[i])
         rr = base_r * p[:, 1] * (1.0 + burst * p[:, 2] * 2.8)
@@ -2020,8 +2090,9 @@ class Renderer:
         # source content that always crosses the fold wedge: full-width
         # center bars + radial spokes (v1 folded empty starfield — the rings
         # sat behind the logo, out of the sampled wedge)
-        self._viz_bars_center(img, i, a)
-        self._viz_radial(img, i, a)
+        if not self._sim:
+            self._viz_bars_center(img, i, a)
+            self._viz_radial(img, i, a)
         q = 2
         h, w = self.H // q, self.W // q
         if getattr(self, "_kal_r", None) is None:
@@ -2032,6 +2103,8 @@ class Renderer:
         rot = getattr(self, "_kal_rot", 0.0) + 0.004 + 0.022 * a.bass[i] \
             + (0.010 if a.drop[i] else 0.0)
         self._kal_rot = rot
+        if self._sim:
+            return
         small = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
         seg = np.pi / 3.0
         theta = np.abs(((self._kal_th0 + rot) % (2 * seg)) - seg)
@@ -2155,6 +2228,8 @@ class Renderer:
         p[:, 1] += p[:, 3]
         p[:, 4] -= 1.0 / (self.fps * 1.2)
         self._parts = p = p[p[:, 4] > 0]
+        if self._sim:
+            return
         col = self._pal()
         for x, y, _, _, life in p:
             xi, yi = int(x), int(y)
@@ -2364,6 +2439,8 @@ class Renderer:
             # it, not whip around.
             spin *= self.PUSH_SPIN
         self._rot += spin
+        if self._sim:
+            return
         members = [s for s in slot_spec.split("+") if s]
         bx, by = self._logo_center()
         # `far` is the STANDING framing and applies unconditionally — it is not
@@ -3146,6 +3223,10 @@ class Renderer:
             self._pal_i += 1
             self._flash = max(self._flash, (1.0 if drop else 0.45))
             self._zoom = max(self._zoom, s.zoom_punch * (1.5 if drop else 1.0))
+        if self._sim:
+            self._flash *= 0.62
+            self._zoom *= 0.80
+            return None
         # --readable turns the tearing DOWN, not off: the drop should still
         # feel violent, it just must not eat the words (Zeke 2026-08-28).
         # Gating on `i // 6` instead of `i // 2` also makes each tear last
@@ -3195,6 +3276,55 @@ class Renderer:
         return img
 
     # -- one frame --------------------------------------------------------
+    def simulate(self, i: int, t: float, a: Analysis) -> None:
+        """Advance all frame-to-frame state through frame i WITHOUT drawing.
+
+        Same call order as frame(), so every stateful method sees the same
+        inputs it would in a full render. Costs well under a millisecond per
+        frame against ~0.5 s for a drawn 1080x1920 frame."""
+        self._sim = True
+        try:
+            self._bg(i, t, a)
+            self._viz(None, i, a)
+            if self._shapes:
+                self._viz_shape(None, i, a)
+            self._fx(None, i, a)
+            if self._viz_flash > 0.01:
+                self._viz_flash *= 0.60
+        finally:
+            self._sim = False
+
+    def state_digest(self) -> str:
+        """Hash of every piece of frame-to-frame state (see `_sim`). Used to
+        prove simulate() == frame() for state; pixels are checked separately."""
+        import hashlib
+        h = hashlib.sha256()
+
+        def put(name, v):
+            h.update(name.encode())
+            if v is None:
+                h.update(b"None")
+            elif isinstance(v, np.ndarray):
+                h.update(np.ascontiguousarray(v).tobytes())
+            elif isinstance(v, dict):
+                for k in sorted(v):
+                    if k in ("rng", "xx", "yy", "plate", "post"):
+                        continue
+                    put(f"{name}.{k}", v[k])
+                if "rng" in v:
+                    put(f"{name}.rng", repr(v["rng"].bit_generator.state))
+            elif isinstance(v, (list, tuple)):
+                h.update(repr(v).encode())
+            else:
+                h.update(repr(v).encode())
+        for name in ("_stars", "_warp", "_field", "_viz_last", "_viz_flash",
+                     "_tun_phase", "_tun_rot", "_kal_rot", "_nova",
+                     "_nova_burst", "_shock", "_symb", "_parts", "_pal_i",
+                     "_flash", "_zoom", "_rot", "_shape_last"):
+            put(name, getattr(self, name, None))
+        put("style.bg", self.style.bg)
+        return h.hexdigest()[:16]
+
     def frame(self, i: int, t: float, a: Analysis) -> np.ndarray:
         img = self._bg(i, t, a)
         self._viz(img, i, a)
@@ -3540,6 +3670,120 @@ def _analyze_cached(audio: Path, fps: int) -> tuple[Analysis, np.ndarray, int]:
     return analysis, pcm, sr
 
 
+def _words_cached(audio: Path, device: str, cache: "Path | None"):
+    """transcribe_words() through an optional JSON cache -> (heard, segments).
+
+    Chunk-parallel renders (10-09) transcribe ONCE in the parent and hand the
+    file to every worker: 16 whisper loads would be 16x the VRAM next to the
+    live voice, and GPU whisper is not bit-stable run to run, so chunks that
+    each transcribed could disagree about when a word lands. JSON floats
+    round-trip exactly, so a cached run aligns identically to a fresh one."""
+    if cache is not None and Path(cache).is_file():
+        d = json.loads(Path(cache).read_text(encoding="utf-8"))
+        heard = [Word(float(s), float(e), str(t)) for s, e, t in d["heard"]]
+        segs = [(float(s0), float(s1),
+                 [Word(float(s), float(e), str(t)) for s, e, t in sw])
+                for s0, s1, sw in d["segments"]]
+        print(f"[lyric_viz] words: cache hit ({Path(cache).name}, "
+              f"{len(heard)} words)")
+        return heard, segs
+    heard = transcribe_words(audio, device)
+    segs = getattr(transcribe_words, "last_segments", None) or []
+    if cache is not None:
+        Path(cache).parent.mkdir(parents=True, exist_ok=True)
+        tmp = Path(str(cache) + ".tmp")
+        tmp.write_text(json.dumps({
+            "audio": str(audio),
+            "heard": [[w.start, w.end, w.text] for w in heard],
+            "segments": [[s0, s1, [[w.start, w.end, w.text] for w in sw]]
+                         for s0, s1, sw in segs]}), encoding="utf-8")
+        tmp.replace(cache)
+        print(f"[lyric_viz] words: cached -> {cache}")
+    return heard, segs
+
+
+def encode_lossless(out: Path, frames_iter, fps: int, W: int, H: int) -> int:
+    """Video-only, mathematically lossless RGB (libx264rgb, qp 0): the chunk
+    intermediate. Decoding it back as rgb24 returns the exact bytes rendered,
+    so the stitched video goes through ONE real encode, same as a single
+    render, with no generation loss and no quality step at the joins."""
+    import av
+    container = av.open(str(out), mode="w")
+    vs = container.add_stream("libx264rgb", rate=fps)
+    vs.pix_fmt = "rgb24"
+    vs.width, vs.height = W, H
+    vs.options = {"qp": "0", "preset": "ultrafast"}
+    n = 0
+    for rgb in frames_iter:
+        for pkt in vs.encode(av.VideoFrame.from_ndarray(rgb, format="rgb24")):
+            container.mux(pkt)
+        n += 1
+    for pkt in vs.encode():
+        container.mux(pkt)
+    container.close()
+    print(f"[lyric_viz] lossless chunk: {n} frames -> {out}")
+    return n
+
+
+def _chunk_frames(manifest: Path, f0: int, f1: int, W: int, H: int,
+                  wait: bool = False):
+    """Yield the frames of every chunk in a manifest, in order, checking that
+    the chunks tile [f0, f1) exactly and each holds exactly its frame count.
+    Any gap, overlap, missing file or short chunk RAISES — a stitched video
+    must never come out silently short.
+
+    wait=True is the STREAMING mode the parallel driver uses: the encode runs
+    while the chunks are still rendering, and each chunk is opened only once
+    the driver has written `<chunk>.ok` (its worker exited 0). An
+    `<manifest>.abort` file, or no new chunk for 2 h, raises."""
+    import av
+    items = json.loads(Path(manifest).read_text(encoding="utf-8"))
+    items = sorted(items, key=lambda c: int(c["f0"]))
+    expect = f0
+    for c in items:
+        if int(c["f0"]) != expect:
+            raise RuntimeError(f"chunk tiling broken: expected a chunk at "
+                               f"frame {expect}, got {c['f0']}")
+        expect = int(c["f1"])
+    if expect != f1:
+        raise RuntimeError(f"chunks end at frame {expect}, render ends at {f1}")
+    abort = Path(str(manifest) + ".abort")
+    for c in items:
+        p = Path(c["path"])
+        if wait:
+            ok = Path(str(p) + ".ok")
+            t_wait = time.time()
+            while not ok.is_file():
+                if abort.is_file():
+                    raise RuntimeError(f"aborted by driver while waiting "
+                                       f"for {p.name}")
+                if time.time() - t_wait > 7200:
+                    raise RuntimeError(f"gave up waiting 2 h for {p.name}")
+                time.sleep(0.5)
+        if not p.is_file():
+            raise RuntimeError(f"chunk missing: {p}")
+        want = int(c["f1"]) - int(c["f0"])
+        got = 0
+        cont = av.open(str(p))
+        cont.streams.video[0].thread_type = "AUTO"   # lossless: exact either way
+        try:
+            for fr in cont.decode(video=0):
+                rgb = fr.to_ndarray(format="rgb24")
+                if rgb.shape != (H, W, 3):
+                    raise RuntimeError(f"{p.name}: frame {rgb.shape} != "
+                                       f"{(H, W, 3)}")
+                got += 1
+                if got > want:
+                    raise RuntimeError(f"{p.name}: more than {want} frames")
+                yield rgb
+        finally:
+            cont.close()
+        if got != want:
+            raise RuntimeError(f"{p.name}: {got} frames, expected {want}")
+        print(f"[lyric_viz] assembled {p.name}: {got} frames "
+              f"[{c['f0']}, {c['f1']})")
+
+
 def main() -> int:
     # 2026-09-18: a full-song render at Normal priority starved the body's vision
     # pipeline (live_analyze 25 ms -> 3.3 s; the attention layer stopped registering
@@ -3548,6 +3792,14 @@ def main() -> int:
     try:
         import psutil as _ps
         _ps.Process().nice(_ps.BELOW_NORMAL_PRIORITY_CLASS)
+    except Exception:
+        pass
+    # Linux (the server, 10-09): BELOW_NORMAL_PRIORITY_CLASS doesn't exist
+    # there, so the line above was a silent no-op. Same rule, POSIX spelling.
+    try:
+        import os as _os
+        if hasattr(_os, "nice") and _os.nice(0) < 10:
+            _os.nice(10 - _os.nice(0))
     except Exception:
         pass
     ap = argparse.ArgumentParser(description=__doc__)
@@ -3733,8 +3985,44 @@ def main() -> int:
                          "'radial,tunnel,kaleido,bars_center'")
     ap.add_argument("--window", default="",
                     help="render only START:END seconds (e.g. 55:85) — "
-                         "cheap test renders")
+                         "cheap test renders. Frame-to-frame state is "
+                         "SIMULATED up to START, so the window looks exactly "
+                         "like those seconds of the full render")
+    # -- chunk-parallel rendering (2026-10-09; driver: scripts/server/
+    #    lyric_viz_parallel.py). A chunk = --frame-range + --lossless; the
+    #    driver stitches chunks with --assemble and muxes the audio once.
+    ap.add_argument("--frame-range", default="", metavar="A:B",
+                    help="render absolute frames [A, B) only (B may be "
+                         "'end'). State is simulated through frame A-1 first, "
+                         "so frame k is identical to frame k of a full render")
+    ap.add_argument("--lossless", action="store_true",
+                    help="write VIDEO-ONLY lossless RGB (libx264rgb qp 0, "
+                         "use .mkv) — the intermediate format for chunks")
+    ap.add_argument("--words-json", type=Path, default=None,
+                    help="transcription cache: loaded if it exists, else "
+                         "whisper runs once and writes it. Lets N chunk "
+                         "workers share ONE transcription (no N whisper loads)")
+    ap.add_argument("--prep-only", action="store_true",
+                    help="transcribe + analyse (filling --words-json and the "
+                         "analysis cache), print a PREP json line, exit")
+    ap.add_argument("--assemble", type=Path, default=None, metavar="MANIFEST",
+                    help="stitch lossless chunks listed in a manifest json "
+                         "([{path, f0, f1}, ...]) into --out with ONE encode "
+                         "and the audio muxed once. Fails on any missing or "
+                         "short chunk")
+    ap.add_argument("--assemble-wait", action="store_true",
+                    help="with --assemble: stream - start encoding before "
+                         "all chunks exist, opening each once <chunk>.ok "
+                         "appears (written by the parallel driver)")
+    ap.add_argument("--threads", type=int, default=0,
+                    help="cap OpenCV's worker threads (0 = OpenCV default). "
+                         "Parallel chunk workers use a small number each")
     args = ap.parse_args()
+    if args.threads > 0:
+        cv2.setNumThreads(int(args.threads))
+    if args.tiktok and (args.frame_range or args.assemble or args.prep_only):
+        ap.error("--tiktok picks its own window; it can't be combined with "
+                 "--frame-range / --assemble / --prep-only")
     _look_applied = _apply_look(args, sys.argv[1:])
     if _look_applied:
         print(f"[lyric_viz] LOOK '{args.look}': "
@@ -3804,11 +4092,10 @@ def main() -> int:
     t0 = time.time()
 
     heard: list[Word] = []
-    if args.no_vocals:
-        lines: list[list[Word]] = []
+    if args.no_vocals or args.assemble:
+        lines: list[list[Word]] = []      # --assemble only decodes pixels
     else:
-        heard = transcribe_words(args.audio, args.device)
-        segs = getattr(transcribe_words, "last_segments", None)
+        heard, segs = _words_cached(args.audio, args.device, args.words_json)
         if args.lyrics and args.lyrics.is_file():
             lines = align_to_lyrics(heard,
                                     args.lyrics.read_text(encoding="utf-8"),
@@ -3974,6 +4261,8 @@ def main() -> int:
         print("[lyric_viz] nod: ON (dip-and-settle on every beat)")
 
     f0, f1 = 0, n_frames
+    if args.window and args.frame_range:
+        ap.error("use --window (seconds) OR --frame-range (frames), not both")
     if args.tiktok:
         h0, h1 = pick_hook_window(analysis, lines, duration, args.fps)
         f0, f1 = int(h0 * args.fps), int(h1 * args.fps)
@@ -3986,6 +4275,39 @@ def main() -> int:
         f0, f1 = int(w0 * args.fps), int(w1 * args.fps)
         pcm = pcm[int(w0 * sr):int(w1 * sr)]
         print(f"[lyric_viz] TEST window: {w0:.1f}s -> {w1:.1f}s")
+    elif args.frame_range:
+        a_, b_ = args.frame_range.split(":")
+        f0 = int(a_)
+        f1 = n_frames if b_.strip().lower() in ("", "end") else int(b_)
+        f1 = min(f1, n_frames)
+        if not 0 <= f0 < f1:
+            ap.error(f"--frame-range {args.frame_range}: empty or out of "
+                     f"range (render has {n_frames} frames)")
+        pcm = pcm[int(f0 / args.fps * sr):int(f1 / args.fps * sr)]
+        print(f"[lyric_viz] FRAME RANGE: [{f0}, {f1}) of {n_frames}")
+
+    if args.prep_only:
+        print("PREP " + json.dumps({"n_frames": n_frames, "f0": f0, "f1": f1,
+                                    "fps": args.fps, "W": W, "H": H,
+                                    "duration": duration}))
+        return 0
+
+    if args.assemble:
+        encode(out, _chunk_frames(args.assemble, f0, f1, W, H,
+                                  wait=args.assemble_wait),
+               args.fps, pcm, sr, W, H)
+        print(f"[lyric_viz] assembled in {time.time() - t0:.1f}s -> {out} "
+              f"({out.stat().st_size / 1e6:.1f} MB)")
+        return 0
+
+    if f0 > 0:
+        # bring every integrated quantity (spin, palette index, debris depth,
+        # shockwaves, decays...) to where a full render would have it at f0
+        ts = time.time()
+        for i in range(f0):
+            r.simulate(i, i / args.fps, analysis)
+        print(f"[lyric_viz] simulated frames 0..{f0 - 1} in "
+              f"{time.time() - ts:.1f}s (state digest {r.state_digest()})")
 
     def frames():
         for i in range(f0, f1):
@@ -3993,7 +4315,12 @@ def main() -> int:
             if i > f0 and (i - f0) % (args.fps * 10) == 0:
                 print(f"[lyric_viz] {i - f0}/{f1 - f0} frames")
 
-    encode(out, frames(), args.fps, pcm, sr, W, H)
+    if args.lossless:
+        n_done = encode_lossless(out, frames(), args.fps, W, H)
+        if n_done != f1 - f0:
+            raise RuntimeError(f"rendered {n_done} frames, expected {f1 - f0}")
+    else:
+        encode(out, frames(), args.fps, pcm, sr, W, H)
     if style.strobe:
         print("[lyric_viz] WARNING: this style strobes on the drop - publish "
               "with a flash/photosensitivity warning in the caption.")
