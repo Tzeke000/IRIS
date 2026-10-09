@@ -152,7 +152,9 @@ FILLER_MIN_AUDIO_S = 0.5             # cough-guard: never early-fire on shorter 
 # Only "huh"/"uh-huh" survive synth as real sounds. So: real words + those two. Rule under
 # it — ear-test every filler token through the actual mouth before committing; don't trust
 # the spelling. (Dropped "Mm-hmm." and "So," from the prior set.)
-CALL_FILLERS = ("Okay.", "Right.", "Sure.", "Let's see.", "Uh-huh.", "Huh.", "Yeah.", "Got it.", "I see.", "Noted.")
+# Zeke 10-09 (Fish mouth): he WANTS thinking sounds — "uhhh" and "hmmm" while I think. Fish voices
+# hums as hums (unlike StyleTTS2, which spelled them); ear-test with him pending (10-09).
+CALL_FILLERS = ("Hmm.", "Okay.", "Uh...", "Right.", "Hmm, let's see.", "Um...", "Yeah.", "Hmm, okay.", "I see.", "Um, right.")   # standard spellings (research 10-09)
 
 GRACE_RESUME_TIMEOUT = 1.8             # after a cue-ending, how long to wait for him to resume
 MAX_GRACE_ROUNDS = 3                   # cap so a stutter can't loop the mic forever
@@ -966,8 +968,14 @@ def _fire_filler(ctx) -> None:
     word, masking my think-time. Plays via the normal play_queue (the mouth's ~0.9s lead),
     so my real reply queues right behind it. Rotated, non-fatal."""
     try:
-        f = CALL_FILLERS[_FILLER_I[0] % len(CALL_FILLERS)]
-        _FILLER_I[0] += 1
+        # random, never the same one twice in a row (research 10-09: rotation sounds mechanical)
+        import random as _r
+        prev = _FILLER_I[0]
+        i = _r.randrange(len(CALL_FILLERS))
+        if i == prev and len(CALL_FILLERS) > 1:
+            i = (i + 1) % len(CALL_FILLERS)
+        _FILLER_I[0] = i
+        f = CALL_FILLERS[i]
         ctx.play_queue.put(f)        # put before flag — see cmd_speak (self-listen race)
         ctx.speaking = True
     except Exception as e:

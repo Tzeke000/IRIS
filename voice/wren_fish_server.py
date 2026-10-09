@@ -1523,11 +1523,47 @@ def _produce_progressive(units, style_tag, seed, wav_q, log: list, t0: float, ma
         wav_q.put(None)
 
 
+# Zeke 10-09: "make sure you actually add emotion to about every sentence." Every sentence that
+# doesn't already open with an inline style tag gets one: its own punctuation decides first
+# ("!" -> excited, "?" -> curious), otherwise the utterance's emotion tag, otherwise a warm default.
+# Inline tags I write myself always win. FISH_AUTO_TAG=0 turns this off.
+AUTO_TAG = os.environ.get("FISH_AUTO_TAG", "1").strip().lower() not in ("0", "off", "false", "no")
+AUTO_TAG_DEFAULT = os.environ.get("FISH_AUTO_TAG_DEFAULT", "[warm, friendly]")
+
+
+def _auto_tag_sentences(units: list, style_tag: str | None) -> int:
+    if not AUTO_TAG or not units:
+        return 0
+    added = 0
+    start = 0
+    while start < len(units):
+        end = start
+        while end < len(units) - 1 and units[end].strength != 3:
+            end += 1
+        first = units[start]
+        has_style = any(_TAG_RE.fullmatch(t) and not _is_event_tag(t) for t in first.pre_tags)
+        if not has_style:
+            last = units[end]
+            tail = (last.word + "".join(p for p in last.post if not _TAG_RE.fullmatch(p))).rstrip("\"')]}»”’")
+            if tail.endswith("!"):
+                tag = style_tag if style_tag in ("[excited]", "[happy]", "[surprised]", "[shocked]") else "[excited]"
+            elif tail.endswith("?"):
+                tag = "[curious]" if style_tag in (None, "[calm]", "[calm, relaxed]", "[happy]") else style_tag
+            else:
+                tag = style_tag or AUTO_TAG_DEFAULT
+            ev = [t for t in first.pre_tags if _is_event_tag(t)]
+            first.pre_tags = [t for t in first.pre_tags if not _is_event_tag(t)] + [tag] + ev
+            added += 1
+        start = end + 1
+    return added
+
+
 def speak_progressive(text: str, style: dict | None = None, seed=None) -> dict:
     units = _units(text)
     if not units:
         return {"chars": 0, "first_audio_s": None, "total_s": 0.0}
     style_tag = (style or {}).get("tag")
+    _auto_tag_sentences(units, style_tag)
     _STOP.clear()
     t0 = time.perf_counter()
     dev_idx = _resolve_output_device()
