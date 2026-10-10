@@ -73,6 +73,10 @@ Good windows: `28:36` (build → first drop entry), `100:106` (into the big drop
 Full render (do it once, at the end): `scripts/server/lyric_viz_parallel.sh --workers 16
 <same args as test.sh, --size 1920x1080, no --window> --out state/tzeke_songs/hit_a_bump/hit_a_bump_<scene>.mp4`
 
+**Review rule (10-10):** thumbnail contact sheets hide small details (Zeke caught eyeless pumpkins
+that two sheet reviews missed). Before calling a scene done, also check full-res CLOSE-UP crops of
+every element that should read as a face or a detail: lanterns, mech heads, the logo, signage.
+
 ## Generated art (not in git)
 
 `assets/scenes/<scene>/` is git-ignored (~57 MB of sprites/maps; the repo is public and the
