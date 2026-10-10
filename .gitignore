@@ -125,3 +125,7 @@ apps/ava-control/dev/room.jpg
 models/pose/*.onnx
 models/yolox/*.onnx
 apps/ava-control/src-tauri/gen/
+
+# lyric_scenes generated art (10-10): rebuilt by scripts/lyric_scenes/blender/*.py — see scripts/lyric_scenes/README.md
+assets/scenes/
+scripts/lyric_scenes/**/__pycache__/
