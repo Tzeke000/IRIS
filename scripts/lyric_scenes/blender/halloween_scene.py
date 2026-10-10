@@ -495,8 +495,93 @@ FACES = {
 }
 
 
+def _signed_area(pts):
+    return 0.5 * sum(pts[k][0] * pts[(k + 1) % len(pts)][1]
+                     - pts[(k + 1) % len(pts)][0] * pts[k][1] for k in range(len(pts)))
+
+
+def canonicalize_pumpkins():
+    """Apply each pumpkin's boolean and rebuild the mesh in a CANONICAL order
+    (vertices sorted by position, faces by their sorted vertex ids). The exact
+    boolean is threaded: same geometry every run, but vertex/face ORDER varies,
+    and Cycles' BVH then rounds a few edge pixels differently. Canonical order
+    makes every regeneration of the assets pixel-identical."""
+    import numpy as np
+    dg = bpy.context.evaluated_depsgraph_get()
+    for p in PUMP:
+        ob = p["obj"]
+        ev = ob.evaluated_get(dg)
+        me = ev.to_mesh()
+        try:
+            nv, npl, nl = len(me.vertices), len(me.polygons), len(me.loops)
+            co = np.empty(nv * 3, np.float64)
+            me.vertices.foreach_get("co", co)
+            co = co.reshape(-1, 3)
+            ls = np.empty(npl, np.int64)
+            lt = np.empty(npl, np.int64)
+            mi = np.empty(npl, np.int64)
+            lv = np.empty(nl, np.int64)
+            me.polygons.foreach_get("loop_start", ls)
+            me.polygons.foreach_get("loop_total", lt)
+            me.polygons.foreach_get("material_index", mi)
+            me.loops.foreach_get("vertex_index", lv)
+            mats = [m.name if m else "" for m in me.materials]
+        finally:
+            ev.to_mesh_clear()
+        uniq = np.unique(co, axis=0)
+        if len(uniq) != nv:
+            raise RuntimeError(f"{ob.name}: {nv - len(uniq)} coincident vertices, "
+                               "cannot order canonically")
+        order = np.lexsort((co[:, 2], co[:, 1], co[:, 0]))
+        rank = np.empty(nv, np.int64)
+        rank[order] = np.arange(nv)
+        faces = []
+        for k in range(npl):
+            f = [int(rank[v]) for v in lv[ls[k]:ls[k] + lt[k]]]
+            j = f.index(min(f))
+            faces.append((tuple(f[j:] + f[:j]), int(mi[k])))
+        faces.sort()
+        new = bpy.data.meshes.new(ob.name + "_canon")
+        new.from_pydata([tuple(c) for c in co[order]], [], [f for f, _ in faces])
+        new.validate()
+        for nm in mats:
+            new.materials.append(bpy.data.materials.get(nm))
+        new.polygons.foreach_set("material_index", [m for _, m in faces])
+        new.polygons.foreach_set("use_smooth", [True] * len(faces))
+        new.update()
+        cut = ob.modifiers["carve"].object
+        ob.modifiers.clear()
+        old = ob.data
+        ob.data = new
+        bpy.data.meshes.remove(old)
+        if cut is not None:
+            bpy.data.objects.remove(cut, do_unlink=True)
+
+
+def verify_carving(scene):
+    """Shoot a ray through every carved hole of every pumpkin (evaluated,
+    i.e. the canonical carved mesh): it must pass the front shell and hit the
+    INSIDE of the back wall. Any hole that is not cut stops the build."""
+    dg = bpy.context.evaluated_depsgraph_get()
+    bad = []
+    for p in PUMP:
+        ob = p["obj"]
+        for part, pl in p["local"].items():
+            for j, pts in enumerate(pl):
+                cu = sum(q[0] for q in pts) / len(pts)
+                cv = sum(q[1] for q in pts) / len(pts)
+                hit, loc, _n, _i = ob.ray_cast(Vector((cu, -3.0, cv)), Vector((0, 1, 0)),
+                                               depsgraph=dg)
+                if not hit or loc.y < 0.0:
+                    bad.append(f"{ob.name}:{part}{j} (hit y={loc.y if hit else None})")
+    if bad:
+        raise RuntimeError("pumpkin holes NOT carved: " + ", ".join(bad))
+    print(f"[halloween] carving verified: every hole of {len(PUMP)} pumpkins cuts through",
+          flush=True)
+
+
 def build_pumpkin(coll, M, name, pos, size, yaw, style, seed):
-    """Ribbed pumpkin shell (solidified), carved by an exact boolean."""
+    """Ribbed hollow pumpkin shell (built in bmesh), carved by an exact boolean."""
     rng = random.Random(seed)
     me = bpy.data.meshes.new(name)
     bm = bmesh.new()
@@ -514,6 +599,20 @@ def build_pumpkin(coll, M, name, pos, size, yaw, style, seed):
             if z < -0.7:
                 zz += 0.12 * (-z - 0.7)
             v.co = Vector((x * r, y * r, zz))
+        # the hollow shell, built HERE instead of with a Solidify modifier:
+        # Solidify's threaded normal sums are not bit-stable between runs, so
+        # every render got a slightly different pumpkin (10-10 regen check).
+        # Inner wall = each outer vertex pulled radially in by the thickness,
+        # faces reversed, flesh material.
+        outer = list(bm.faces)
+        dup = bmesh.ops.duplicate(bm, geom=list(bm.verts) + list(bm.edges) + outer)
+        for v in [e for e in dup["geom"] if isinstance(e, bmesh.types.BMVert)]:
+            ln = v.co.length
+            v.co = v.co * (1.0 - 0.09 / max(ln, 0.2))
+        inner = [e for e in dup["geom"] if isinstance(e, bmesh.types.BMFace)]
+        bmesh.ops.reverse_faces(bm, faces=inner)
+        for f in inner:
+            f.material_index = 1
         bm.to_mesh(me)
     finally:
         bm.free()
@@ -523,11 +622,6 @@ def build_pumpkin(coll, M, name, pos, size, yaw, style, seed):
     for p in ob.data.polygons:
         p.use_smooth = True
     coll.objects.link(ob)
-    sol = ob.modifiers.new("shell", "SOLIDIFY")
-    sol.thickness = 0.09
-    sol.offset = -1.0
-    sol.material_offset = 1
-    sol.material_offset_rim = 1
     # carve: one prism per hole, pointing along local -y (the face side)
     F = FACES[style]
     cm = MB()
@@ -536,6 +630,13 @@ def build_pumpkin(coll, M, name, pos, size, yaw, style, seed):
         polys[part] = []
         for pg in F[part]:
             pts = [(u * 0.95, v * 0.95) for (u, v) in pg]
+            # ★ ONE winding for every cutter. The prism's faces are built from
+            # the polygon's point order, so a counter-clockwise outline gave an
+            # INSIDE-OUT prism that the exact boolean treats as negative volume
+            # and silently does not cut — that is why most eyes and every nose
+            # were never carved (Zeke 10-10: "some of them don't have eyes").
+            if _signed_area(pts) > 0:
+                pts = pts[::-1]
             n = len(pts)
             P = [(u, -2.0, v) for u, v in pts] + [(u, -0.2, v) for u, v in pts]
             fcs = [tuple(range(n - 1, -1, -1)), tuple(range(n, 2 * n))]
@@ -573,7 +674,7 @@ def build_pumpkin(coll, M, name, pos, size, yaw, style, seed):
                        for pg in pl] for k, pl in polys.items()}
     for o_ in (ob, st):
         o_["role"] = "solid"
-    PUMP.append(dict(obj=ob, lamp=lo, polys=world_polys,
+    PUMP.append(dict(obj=ob, lamp=lo, polys=world_polys, local=polys,
                      center=ob.matrix_world @ Vector((0, 0, 0)), size=size,
                      style=style))
     return [ob, st]
@@ -725,6 +826,21 @@ def build_graveyard(coll, M, cam, scene, G0):
                  pb + Vector((0, 0, zz + 0.06)), pa + Vector((0, 0, zz + 0.06))], [(0, 1, 2, 3)])
     fob = fm.build("gy_fence", M["iron"], coll)
     fob["role"] = "solid"
+    # pumpkins: (u, depth, size(radius m), style). The outer two sit well
+    # inside the frame edges: the push-in zooms the graveyard about the house,
+    # which carried lanterns at u 0.075 / 0.925 half out of frame.
+    pplan = [(0.15, 14.0, 0.52, "angry"), (0.29, 13.0, 0.58, "classic"),
+             (0.50, 17.0, 0.44, "wail"), (0.71, 13.5, 0.56, "classic"),
+             (0.85, 13.5, 0.50, "angry")]
+
+    def hides_a_face(u, d):
+        """A tuft in front of (or right beside) a lantern would draw blades
+        across its carved face — keep that ground clear."""
+        for (pu, pd, ps, _st) in pplan:
+            half_u = 1.5 * ps / (2 * tanx * pd)
+            if abs(u - pu) < half_u and d < pd + 1.0:
+                return True
+        return False
     # dead grass tufts (thin blades) scattered over the ground
     gm = MB()
     gr = random.Random(5150)
@@ -732,7 +848,13 @@ def build_graveyard(coll, M, cam, scene, G0):
         u = gr.uniform(-0.25, 1.25)
         d = 6.0 + 27.0 * gr.random() ** 1.3
         p = at(u, d)
-        for _b in range(gr.randint(3, 6)):
+        nb = gr.randint(3, 6)
+        if hides_a_face(u, d):
+            for _b in range(nb):                 # same draws: the rest of the
+                for _r in range(5):              # field stays where it was
+                    gr.random()
+            continue
+        for _b in range(nb):
             a = gr.uniform(0, 2 * math.pi)
             hh = gr.uniform(0.10, 0.32)
             lean = Vector((math.cos(a), math.sin(a), 0)) * gr.uniform(0.05, 0.25)
@@ -743,14 +865,11 @@ def build_graveyard(coll, M, cam, scene, G0):
     grob = gm.build("gy_grass", M["dgrass"], coll)
     grob["role"] = "solid"
     out = [gob, sob, fob, grob] + [o for o in coll.objects if o.name.startswith("rip")]
-    # pumpkins: (u, depth, size(radius m), style)
-    pplan = [(0.075, 14.0, 0.52, "angry"), (0.27, 13.0, 0.58, "classic"),
-             (0.50, 17.0, 0.44, "wail"), (0.72, 13.5, 0.56, "classic"),
-             (0.925, 13.5, 0.50, "angry")]
     for k, (u, d, s, style) in enumerate(pplan):
         p = at(u, d)
         to_cam = cpos - p
-        yaw = math.atan2(to_cam.x, -to_cam.y) + rng.uniform(-0.3, 0.3)
+        # face the camera (small jitter only: a turned face loses an eye)
+        yaw = math.atan2(to_cam.x, -to_cam.y) + rng.uniform(-0.10, 0.10)
         out += build_pumpkin(coll, M, f"pump{k}", p, s, yaw, style, 300 + k)
     return out
 
@@ -873,6 +992,8 @@ def main():
     candles = [p["lamp"] for p in PUMP]
 
     bpy.context.view_layer.update()      # camera matrix_world is stale until evaluated
+    canonicalize_pumpkins()
+    verify_carving(scene)
 
     def project(p):
         c = world_to_camera_view(scene, cam, p)
