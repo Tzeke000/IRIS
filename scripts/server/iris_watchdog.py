@@ -36,7 +36,12 @@ STALE_ALERT_S = 600.0    # tell Zeke if there's been no heartbeat this long (any
 REFIRE_S = 900.0
 ALERT_EVERY_S = 3600.0
 BOOT_GRACE_S = 600.0     # the body takes minutes to come up after a boot/restart
-UNITS = ("iris-mouth", "iris-ears", "iris-postoffice", "iris-postoffice-monitor")
+# 10-09 away-readiness (Zeke on vacation 10-11..~10-21): every iris unit that can fail, incl. the nightly
+# backup (a oneshot that ends "failed" when the copy to the tower fails) and the Vector stack.
+UNITS = ("iris-mouth", "iris-ears", "iris-postoffice", "iris-postoffice-monitor", "iris-presence",
+         "iris-wirepod", "iris-vector-brain", "iris-vector-nerves", "iris-backup")
+# Append-only logs that grow forever: keep the newest KEEP bytes once a file passes CAP bytes.
+LOG_CAPS = {ROOT / "state" / "attention" / "ptz_audit.jsonl": (50 << 20, 20 << 20)}
 
 
 def log(msg: str) -> None:
@@ -136,6 +141,20 @@ def main() -> int:
         r = subprocess.run(["systemctl", "--user", "is-failed", u], capture_output=True, text=True)
         if r.stdout.strip() == "failed":
             problems[f"unit:{u}"] = f"service {u} has failed"
+
+    for path, (cap, keep) in LOG_CAPS.items():
+        try:
+            if path.stat().st_size > cap:
+                with open(path, "rb") as f:
+                    f.seek(-keep, 2)
+                    tail = f.read()
+                tail = tail[tail.find(b"\n") + 1:]          # start on a whole line
+                tmp = path.with_suffix(path.suffix + ".trim")
+                tmp.write_bytes(tail)
+                os.replace(tmp, path)
+                log(f"capped {path.name}: kept newest {len(tail) >> 20} MB")
+        except Exception as e:  # noqa: BLE001
+            log(f"log cap failed for {path.name}: {e!r}")
 
     sent = st.get("alerted", {})
     for key, why in problems.items():
