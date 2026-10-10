@@ -41,6 +41,7 @@ DIFF_COMMIT = 12.0          # mean abs diff on 160x90 grey; sensor noise sits ~2
 HOLD_SAMPLES = 2            # change must persist 2 samples (~4 s)
 MIN_GAP_S = 45.0            # between change-keyframes
 HOURLY_S = 3600.0           # diary frame even if nothing changed
+NIGHT_HOURLY_S = 21600.0    # Zeke 10-09: while he sleeps (quiet hours) the diary frame is every 6 h, so it doesn't wake me
 CAPTION_MIN_GAP_S = 120.0   # cognition wakes are not free
 CAPTION_MAX_PER_DAY = 60
 # Round-2 fix 2.7 (2026-10-01): a caption that timed out (cognition held / asleep) is not
@@ -85,6 +86,19 @@ def _write_small(frame, path: Path) -> dict[str, Any]:
             return {"ok": True, "bytes": int(len(buf)), "quality": q,
                     "size": [int(img.shape[1]), int(img.shape[0])]}
         q -= 10
+
+
+def _hourly_s() -> float:
+    """Diary-frame interval: 6 h during quiet hours / a deliberate voice-off (the flag exists only then,
+    see quiet hours), else hourly. Change-keyframes are unaffected - a real change at night still lands."""
+    try:
+        import json as _json
+        flag = ROOT / "state" / "voice_deliberately_off.json"
+        if flag.is_file() and bool(_json.loads(flag.read_text(encoding="utf-8") or "{}").get("off", True)):
+            return NIGHT_HOURLY_S
+    except Exception:
+        pass
+    return HOURLY_S
 
 
 class SceneMemory:
@@ -240,7 +254,7 @@ class SceneMemory:
             return
         diff = float(abs(grey - self._base).mean())
         self.stats["last_diff"] = round(diff, 2)
-        hourly = (now - self._last_hourly_ts) >= HOURLY_S
+        hourly = (now - self._last_hourly_ts) >= _hourly_s()
         if diff >= DIFF_COMMIT:
             self._hold += 1
         else:
