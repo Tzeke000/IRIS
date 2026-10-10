@@ -747,6 +747,77 @@ LOOKS: dict[str, dict] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# 3e. SCENE PLUGINS (Zeke 2026-10-10: "make each one of those and we'll do it
+#     all to the song Hit a Bump" — steampunk, Halloween, robot fight, car
+#     street; the stage + dystopia stay in this file)
+# ---------------------------------------------------------------------------
+# Each scene is ONE module, scripts/lyric_scenes/<name>.py, so it can be built
+# and tested on its own. Contract (full text: scripts/lyric_scenes/README.md):
+#   PALETTES: dict[str, dict]   colour families; the first key is the default
+#   STYLE:    dict              Style kwargs (palette, fonts, strobe ...)
+#   BLOOM:    float             default --bloom for --look <name>
+#   draw(R, img, i, a, lv)      paint the whole frame into img (float32 HxWx3,
+#                               0..255) — STATELESS: a pure function of i
+#   fx(R, img, i, a, lv) -> img optional post-FX (flash, shake, aberration)
+# R = the Renderer, a = Analysis, lv = this module (stage_timeline,
+# _gauss_smooth, _age_since, _hash01, _font ...). Each scene becomes a style,
+# a viz mode and a --look of the same name. A scene that fails to import is
+# skipped with a warning, so a half-built scene never breaks the others.
+
+SCENE_NAMES = ("steampunk", "halloween", "robotfight", "carstreet")
+SCENE_MODS: dict = {}
+_LV = sys.modules[__name__]
+_SCENE_STYLE_BASE = dict(
+    palette=[(255, 255, 255)], bg="flat", particles=False,
+    font_title="Anton-Regular.ttf", font_lyrics="ArchivoBlack-Regular.ttf",
+    caps=True, tracking=0.04, logo_pos="center", strobe=True, glitch=False,
+    rgb_split=False, shake=0.0, zoom_punch=0.0, scramble=False,
+    breakdown_desat=False, flicker=0.0)
+
+
+def _load_scenes() -> None:
+    import importlib
+    global VIZ_MODES
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.append(here)
+    for name in SCENE_NAMES:
+        try:
+            m = importlib.import_module(f"lyric_scenes.{name}")
+        except ModuleNotFoundError as e:
+            if e.name in ("lyric_scenes", f"lyric_scenes.{name}"):
+                continue                      # not built yet
+            print(f"[lyric_viz] scene {name!r} skipped: {e!r}", file=sys.stderr)
+            continue
+        except Exception as e:                # noqa: BLE001 — isolate scenes
+            print(f"[lyric_viz] scene {name!r} skipped: {e!r}", file=sys.stderr)
+            continue
+        SCENE_MODS[name] = m
+        st = dict(_SCENE_STYLE_BASE)
+        st.update(getattr(m, "STYLE", {}))
+        st["viz"] = name
+        STYLES[name] = Style(name, **st)
+        LOOKS[name] = dict(style=name, viz=name, bg="flat",
+                           bloom=float(getattr(m, "BLOOM", 0.38)),
+                           no_lyrics=True)
+        VIZ_MODES = VIZ_MODES + (name,)
+
+
+_load_scenes()
+
+
+def scene_palette(R, m) -> dict:
+    """The colour family a scene plugin should use (--scene-palette, else the
+    scene's first). An unknown name stops the render instead of silently
+    falling back — a fallback would render the wrong video for ten minutes."""
+    name = R.scene_palette or next(iter(m.PALETTES))
+    if name not in m.PALETTES:
+        raise SystemExit(f"--scene-palette {name!r}: {m.__name__} has "
+                         f"{sorted(m.PALETTES)}")
+    return m.PALETTES[name]
+
+
 BG_MODES = ("flow", "starfield", "plasma", "flat", "metal", "tunnel",
              "warp")
 
@@ -1610,6 +1681,9 @@ class Renderer:
     _dys_T: "dict | None" = None            # megacity timeline + city geometry:
     _dys_G: "dict | None" = None            # CACHES of pure functions, not state
     _dys_pmax: float = 0.0                  # peak of lyric_zoom (punch scale)
+    scene_palette: str = ""                 # scene plugin colour family ("" = its default)
+    scene_cache: dict = field(default_factory=dict)  # scene plugins' CACHES of
+                                            # pure functions (timeline, geometry)
     # SIMULATE mode (2026-10-09, chunk-parallel renders). While True, frame()
     # advances every piece of frame-to-frame state EXACTLY as a drawn frame
     # would, and draws nothing. A chunk that starts at frame A first simulates
@@ -2186,6 +2260,8 @@ class Renderer:
             self._viz_ledwall(img, i, a)
         elif v == "megacity":
             self._viz_megacity(img, i, a)
+        elif v in SCENE_MODS:
+            SCENE_MODS[v].draw(self, img, i, a, _LV)
         else:
             self._viz_bars_bottom(img, i, a)
         if self.style.particles:
@@ -5309,6 +5385,12 @@ class Renderer:
             self._flash *= 0.62
             self._zoom *= 0.80
             return self._dys_fx(img, i, a)
+        _sv = self._viz_at(i, a)
+        if _sv in SCENE_MODS:
+            self._flash *= 0.62
+            self._zoom *= 0.80
+            _fxf = getattr(SCENE_MODS[_sv], "fx", None)
+            return _fxf(self, img, i, a, _LV) if _fxf else img
         # --readable turns the tearing DOWN, not off: the drop should still
         # feel violent, it just must not eat the words (Zeke 2026-08-28).
         # Gating on `i // 6` instead of `i // 2` also makes each tear last
@@ -5412,7 +5494,8 @@ class Renderer:
         self._viz(img, i, a)
         v_now = self._viz_at(i, a)
         stage = v_now == "ledwall"                 # the cube carries the logo
-        city = v_now == "megacity"                 # ...the hologram does here
+        city = v_now == "megacity" or v_now in SCENE_MODS  # ...the hologram
+                                                   # / the scene does here
         if self.deck:
             self._deck(img, i, a)
         elif not self._shapes and not stage and not city:
@@ -6076,6 +6159,10 @@ def main() -> int:
                     help="colour family for --viz megacity / --look dystopia: "
                          "'toxic' (sick green, acid yellow, blood red, cold "
                          "cyan on near-black) or 'ember' (orange/red smog)")
+    ap.add_argument("--scene-palette", default="",
+                    help="colour family for a scene plugin look "
+                         f"({', '.join(SCENE_MODS) or 'none loaded'}); "
+                         "'' = the scene's default. See scripts/lyric_scenes/")
     ap.add_argument("--no-lyrics", action="store_true",
                     help="draw no lyrics. Whisper still runs if --punch-words "
                          "or --lyric-models need the sung words; otherwise it "
@@ -6335,7 +6422,8 @@ def main() -> int:
                  bg_twist=args.bg_twist,
                  lasers=args.lasers, far=args.far, bg_scale=args.bg_scale,
                  stage_palette=args.stage_palette,
-                 dystopia_palette=args.dystopia_palette)
+                 dystopia_palette=args.dystopia_palette,
+                 scene_palette=args.scene_palette)
     if args.far != 1.0:
         print(f"[lyric_viz] standing framing: {args.far:.2f}x "
               f"(centrepiece sits back)")
