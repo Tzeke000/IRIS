@@ -37,6 +37,13 @@ def fx(R, img, i, a, lv) -> np.ndarray:   # optional
   `gbeat`, `bar`, `segs`. Helpers: `lv._gauss_smooth`, `lv._age_since`, `lv._hash01`,
   `lv.scene_palette(R, module)` → the chosen palette dict.
 
+## Skills (Zeke 2026-10-10: use them whenever Blender is used)
+
+Load with the Skill tool before writing bpy: `blender-rules`, `blender-headless-batch-scripting`,
+`blender-audio-reactive`, `blender-slotted-actions-animation`, `blender-drivers-and-handlers`,
+`blender-vse-python` (+ mesh / materials / geometry-nodes as needed), and for the motion
+`motion-design` + the fitting `disney-*` skills. Blender = headless `blender -b` only.
+
 ## Hard rules
 
 1. **STATELESS.** `draw(i)` is a pure function of `i` (+ cached, seeded precomputation).
@@ -65,3 +72,27 @@ Good windows: `28:36` (build → first drop entry), `100:106` (into the big drop
 
 Full render (do it once, at the end): `scripts/server/lyric_viz_parallel.sh --workers 16
 <same args as test.sh, --size 1920x1080, no --window> --out state/tzeke_songs/hit_a_bump/hit_a_bump_<scene>.mp4`
+
+## Generated art (not in git)
+
+`assets/scenes/<scene>/` is git-ignored (~57 MB of sprites/maps; the repo is public and the
+art is reproducible). Rebuild with headless Blender 5.2.1 — each generator is deterministic,
+and a scene whose assets are missing stops with its own rebuild command:
+
+```
+B="$HOME/.local/bin/blender -b --factory-startup --python-exit-code 1 --python"
+$B scripts/lyric_scenes/blender/steampunk_assets.py
+$B scripts/lyric_scenes/blender/halloween_scene.py
+$B scripts/lyric_scenes/blender/robotfight_mechs.py
+$B scripts/lyric_scenes/blender/robotfight_arena.py
+$B scripts/lyric_scenes/blender/carstreet_car.py
+```
+
+## The four scenes (built 2026-10-10, all rendered to "Hit a Bump")
+
+| look | palettes (first = default) | Zeke's verdict |
+|---|---|---|
+| `carstreet` | midnight · synth · rain | "great" — loved the big-drop tunnel |
+| `steampunk` | brass · verdigris · furnace | concept liked, "needs a little work" — parked |
+| `robotfight` | neon · industrial · toxic | — |
+| `halloween` | classic · blood · spectral | — |
