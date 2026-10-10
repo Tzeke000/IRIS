@@ -301,7 +301,7 @@ NBARS = 40
 # of truth so --viz validation can't drift from what the renderer supports.
 VIZ_MODES = ("radial", "bars_center", "bars", "wave", "tunnel", "supernova",
              "kaleido", "ncs_ring", "tn_blob", "mcat_bars", "symbiote",
-             "ledwall")
+             "ledwall", "megacity")
 
 
 def _ema(x: np.ndarray, tau_s: float, fps: int) -> np.ndarray:
@@ -658,6 +658,19 @@ STYLES: dict[str, Style] = {
                    strobe=True, glitch=False, rgb_split=False,
                    shake=0.0, zoom_punch=0.0, scramble=False,
                    breakdown_desat=False, flicker=0.0),
+    # DYSTOPIA (2026-10-09) — the megacity (viz=megacity, see section 3d).
+    # Like the stage it owns its FX (shake / lightning / chromatic split in
+    # _dys_fx); `strobe` is only the master switch --no-strobe turns off.
+    "dystopia": Style("dystopia",
+                      palette=[(90, 255, 60), (230, 255, 30), (255, 25, 45),
+                               (40, 215, 255)],
+                      bg="flat", viz="megacity", particles=False,
+                      font_title="Anton-Regular.ttf",
+                      font_lyrics="ArchivoBlack-Regular.ttf", caps=True,
+                      tracking=0.04, logo_pos="center",
+                      strobe=True, glitch=False, rgb_split=False,
+                      shake=0.0, zoom_punch=0.0, scramble=False,
+                      breakdown_desat=False, flicker=0.0),
     # deep house — soft horizontal WAVEFORM, thin minimal letterspaced
     # lowercase (Poppins Light), dark neon plasma, NO strobes.
     "deephouse": Style("deephouse",
@@ -726,6 +739,11 @@ LOOKS: dict[str, dict] = {
     # cube carrying the logo, no lyrics. 16:9 for a stage screen.
     "stage": dict(style="stage", viz="ledwall", bg="flat", bloom=0.32,
                   no_lyrics=True),
+    # dystopian megacity at night (2026-10-09, scene #2, hardcore dubstep):
+    # parallax skyline, EQ windows, hologram billboard, rain, searchlights,
+    # alarms, lightning. No lyrics, 16:9.
+    "dystopia": dict(style="dystopia", viz="megacity", bg="flat", bloom=0.40,
+                     no_lyrics=True),
 }
 
 
@@ -805,7 +823,7 @@ def _age_since(flags: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def stage_timeline(a: Analysis, fps: int, palette: str = "acid",
-                   big_min_s: float = 6.0) -> dict:
+                   big_min_s: float = 6.0, label: str = "stage") -> dict:
     """Everything the stage needs per frame, from the analysis alone.
 
     INTENSITY I (0..1) = smoothed loudness + bass. Sections = hysteresis on I
@@ -970,7 +988,7 @@ def stage_timeline(a: Analysis, fps: int, palette: str = "acid",
     rot = np.cumsum(speed.astype(np.float64) + slam).astype(np.float64)
     # THE ONE: every bar downbeat in a drop slams the whole wall to colour
     one_age, _ = _age_since(gbeat & hot & (beat_i % 4 == 0))
-    print("[lyric_viz] stage timeline: "
+    print(f"[lyric_viz] {label} timeline: "
           + " | ".join(f"{s0 / fps:.1f}-{s1 / fps:.1f}s "
                        + ("BIG" if h and big[s0] else ("drop" if h else "calm"))
                        for s0, s1, h in segs)
@@ -979,7 +997,179 @@ def stage_timeline(a: Analysis, fps: int, palette: str = "acid",
                 bar_start=bar_start, seg_id=seg_id, kage=kage, kidx=kidx,
                 sage=sage, sidx=sidx, entry_age=entry_age, pre=pre,
                 black=black, strobe_age=strobe_age, rot=rot, segs=segs,
-                bi=beat_i, ph=ph, one_age=one_age)
+                bi=beat_i, ph=ph, one_age=one_age, gbeat=gbeat,
+                entries=entries, strobe=strobe)
+
+
+# ---------------------------------------------------------------------------
+# 3d. DYSTOPIA — megacity at night (Zeke 2026-10-09, scene #2, for hardcore
+#     dubstep: "a dark megacity at night: towers whose windows pulse with the
+#     bass, acid rain, searchlights sweeping on the beat, a giant glitching
+#     hologram billboard carrying his logo, red alarm lights, lightning +
+#     screen shake when the drops hit")
+# ---------------------------------------------------------------------------
+# 2.5-D: four procedurally generated skyline layers (seeded, so every run and
+# every chunk builds the same city) scrolled at different parallax rates by a
+# camera truck that speeds up on builds and drops, with haze between layers.
+# The windows are the equaliser; the hologram is the centrepiece and reacts
+# differently to each element (kick = scale punch, snare = glitch tear,
+# hi-hat sparkle = flicker, sub-bass = colour heat, drop = "HIT A BUMP"
+# takeover, sung "bump" = a BUMP flash).
+#
+# ⚠ STATELESS BY CONSTRUCTION, exactly like the stage (3c): the camera
+# position, traffic positions and every event age are cumsums / "frames since"
+# arrays over the whole song, and every random choice is seeded by a constant
+# or an event index. A chunk starting at frame A needs nothing simulated.
+
+DYSTOPIA_PALETTES: dict[str, dict] = {
+    # sick green / acid yellow / blood red / cold cyan on near-black
+    "toxic": dict(
+        sky_top=(3, 5, 6), sky_hor=(30, 54, 40), cloud=(46, 70, 52),
+        fog=(26, 46, 36), street=(70, 150, 60), facade=(15, 20, 20),
+        rim=(70, 140, 120),
+        win_amb=[(200, 175, 105), (130, 210, 100), (110, 190, 200),
+                 (205, 210, 190)],
+        meter=[(70, 255, 50), (225, 255, 30), (255, 30, 25)],
+        neon=[(90, 255, 60), (230, 255, 30), (255, 25, 45), (40, 215, 255)],
+        holo=[(40, 225, 255), (90, 255, 120), (225, 255, 40), (255, 50, 30)],
+        beam=(190, 235, 220), beam_hot=[(200, 245, 230), (255, 35, 30),
+                                        (160, 255, 60)],
+        alarm=(255, 20, 25), rain=(150, 195, 170), bolt=(215, 235, 255),
+        traffic=[(255, 240, 200), (255, 40, 40), (90, 255, 120)]),
+    # orange / red smog, amber windows, a cold teal accent for contrast
+    "ember": dict(
+        sky_top=(6, 3, 2), sky_hor=(46, 18, 6), cloud=(110, 44, 14),
+        fog=(48, 20, 8), street=(200, 80, 20), facade=(20, 12, 10),
+        rim=(170, 80, 30),
+        win_amb=[(230, 150, 60), (255, 190, 90), (200, 90, 40),
+                 (120, 200, 200)],
+        meter=[(255, 120, 0), (255, 210, 60), (255, 245, 225)],
+        neon=[(255, 60, 20), (255, 170, 0), (255, 20, 80), (40, 220, 210)],
+        holo=[(255, 150, 30), (255, 90, 20), (255, 30, 30), (255, 240, 210)],
+        beam=(255, 210, 160), beam_hot=[(255, 220, 180), (255, 40, 10),
+                                        (255, 160, 0)],
+        alarm=(255, 30, 10), rain=(210, 150, 110), bolt=(255, 235, 215),
+        traffic=[(255, 235, 190), (255, 30, 10), (60, 230, 220)]),
+}
+
+# Skyline layers, far -> near. k = parallax (1 = moves with the camera),
+# res = render scale (hazy far layers at half res), heights/widths in units of
+# frame height, fog = aerial-perspective mix, cell = window cell height.
+DYS_LAYERS = (
+    dict(k=0.10, res=0.5, sw=2.4, hmin=0.16, hmax=0.42, wmin=0.025, wmax=0.075,
+         gap=(-0.35, 0.25), fog=0.66, cell=0.0072, signs=0.0, eq=0.35,
+         seed=11, bright=0.55),
+    dict(k=0.24, res=0.5, sw=2.4, hmin=0.18, hmax=0.50, wmin=0.04, wmax=0.10,
+         gap=(-0.30, 0.35), fog=0.46, cell=0.0092, signs=0.10, eq=0.7,
+         seed=23, bright=0.75),
+    dict(k=0.48, res=1.0, sw=2.6, hmin=0.22, hmax=0.56, wmin=0.06, wmax=0.15,
+         gap=(-0.15, 0.55), fog=0.24, cell=0.0125, signs=0.45, eq=1.0,
+         seed=37, bright=0.95),
+    dict(k=1.00, res=1.0, sw=3.0, hmin=0.50, hmax=1.10, wmin=0.11, wmax=0.21,
+         gap=(2.0, 4.5), fog=0.05, cell=0.017, signs=0.75, eq=1.0,
+         seed=53, bright=1.0),
+    # the rooftop we stand on (foreground silhouette, defocused)
+    dict(k=1.70, res=1.0, sw=2.5, roof=True, seed=71, fog=0.0, eq=0.0,
+         signs=0.0, bright=1.0),
+)
+
+# plain words / invented glyphs only on the signs — no real brands
+DYS_WORDS = ("NO EXIT", "SECTOR 9", "CURFEW", "RATIONS", "HOTEL", "OPEN 24H",
+             "SYNTH", "NEURO", "CLINIC", "BAR", "PAWN", "ARCADE", "DATA",
+             "ZONE 0", "NO SIGNAL", "COMPLY", "NOODLES", "VOID", "LIVE",
+             "REPAIR", "CHROME", "FUEL")
+DYS_TICKER = ("CURFEW IN EFFECT   //   SECTOR 0   //   STAY INDOORS   //   "
+              "COMPLIANCE IS MANDATORY   //   AIR QUALITY: TOXIC   //   ")
+
+
+def dystopia_timeline(a: Analysis, fps: int) -> dict:
+    """Everything the megacity needs per frame, from the analysis alone.
+
+    Sections, the gap-filled beat grid, drop entries, the pre-roll, the
+    half-beat blackout and the strobe budget come from stage_timeline (same
+    song logic, same fixes); this adds the camera, the event ages and the
+    per-element envelopes the hologram reacts to."""
+    T = dict(stage_timeline(a, fps, "acid", label="dystopia"))
+    n = len(a.rms)
+    I, hot, big, pre = T["I"], T["hot"], T["big"], T["pre"]
+    E = np.clip(np.maximum(I, 0.8 * pre), 0.0, 1.0).astype(np.float32)
+    E2 = _gauss_smooth(E, fps, 1.0)                 # slow: rain, haze, speed
+    hot_f = _gauss_smooth(hot.astype(np.float32), fps, 0.12)
+    # CAMERA TRUCK (in frame heights per second at parallax 1): a slow drift
+    # in the calm, faster on builds, fast in drops, fastest in the finale.
+    speed = (0.010 + 0.040 * E2 + 0.050 * pre ** 2 + 0.020 * hot_f
+             + 0.020 * big.astype(np.float32))
+    cam = np.cumsum(speed.astype(np.float64)) / fps
+    # DOLLY: a slow push-in that rides the energy (nearer layers grow more)
+    dolly = (0.020 * E2 + 0.030 * pre ** 1.5).astype(np.float32)
+    traffic = np.cumsum((1.0 + 1.4 * E2).astype(np.float64)) / fps
+    heat = np.clip(_gauss_smooth(a.bass, fps, 0.15) * 1.1, 0, 1)
+    hs = _gauss_smooth(a.high, fps, 0.35)
+    spark = np.clip((np.asarray(a.high, np.float32) - hs) * 5.0, 0, 1)
+    gbeat, bi = T["gbeat"], T["bi"]
+    ones = gbeat & (bi % 4 == 0)
+    # LIGHTNING: every drop entry; every 4th bar in a drop, every 2nd in the
+    # finale; plus rare distant sheet lightning (no bolt) on calm snares.
+    strike = np.zeros(n, np.float32)
+    bar = T["bar"]
+    for s0 in T["entries"]:
+        strike[s0] = 1.0
+    for f in np.flatnonzero(ones & hot):
+        if strike[max(0, f - 8):f + 1].any():
+            continue
+        if big[f] and bar[f] % 2 == 0:
+            strike[f] = 0.8
+        elif not big[f] and bar[f] % 4 == 0:
+            strike[f] = 0.65
+    rs = np.random.default_rng(404)
+    calm_sn = np.flatnonzero(np.asarray(a.snare, bool) & ~hot)
+    last = -10 ** 9
+    for f in calm_sn:
+        if rs.random() < 0.10 and f - last > 6 * fps:
+            strike[f] = max(strike[f], 0.22)        # distant, no bolt
+            last = f
+    lage, lidx = _age_since(strike > 0)
+    # SHAKE: drop entries hard, finale bar ONEs medium, other drop ONEs light
+    shake = np.zeros(n, np.float32)
+    shake[ones & hot] = 0.30
+    shake[ones & big] = 0.55
+    for s0 in T["entries"]:
+        shake[s0] = 1.0
+    shake[strike >= 0.6] = np.maximum(shake[strike >= 0.6], 0.7)
+    sh_age, sh_idx = _age_since(shake > 0)
+    # which bar of the current section we are in (billboard takeover order)
+    sec_bar = np.zeros(n, np.int64)
+    for s0, s1, h in T["segs"]:
+        sec_bar[s0:s1] = bar[s0:s1] - bar[s0]
+    bs = np.asarray(a.bars, np.float32)
+    bars = bs.copy()
+    bars[1:] = 0.5 * (bs[1:] + bs[:-1])      # lights switching, not noise
+    T.update(bars=bars, E=E, E2=E2, cam=cam, dolly=dolly, traffic=traffic, heat=heat,
+             spark=spark, strike=strike, lage=lage, lidx=lidx, shake=shake,
+             sh_age=sh_age, sh_idx=sh_idx, sec_bar=sec_bar, hot_f=hot_f)
+    return T
+
+
+def _hash01(x, y=0.0) -> np.ndarray:
+    """Cheap deterministic hash of (x, y) -> [0, 1). Vectorised."""
+    s = np.sin(np.asarray(x, np.float64) * 12.9898
+               + np.asarray(y, np.float64) * 78.233) * 43758.5453
+    return (s - np.floor(s)).astype(np.float32)
+
+
+def _dys_glyph(rng, size: int) -> list:
+    """An invented glyph: 2-4 strokes on a 3x4 lattice (no real script)."""
+    pts = [(x, y) for x in (0.0, 0.5, 1.0) for y in (0.0, 0.33, 0.66, 1.0)]
+    segs = []
+    for _ in range(int(rng.integers(2, 5))):
+        a_ = pts[int(rng.integers(len(pts)))]
+        b_ = pts[int(rng.integers(len(pts)))]
+        if a_ != b_ and (a_[0] == b_[0] or a_[1] == b_[1]
+                         or rng.random() < 0.3):
+            segs.append((a_, b_))
+    if not segs:
+        segs = [((0.0, 0.0), (1.0, 0.0)), ((0.5, 0.0), (0.5, 1.0))]
+    return segs
 
 
 # ---------------------------------------------------------------------------
@@ -1416,6 +1606,10 @@ class Renderer:
     stage_palette: str = "acid"             # viz=ledwall colour family (STAGE_PALETTES)
     _stage_T: "dict | None" = None          # stage timeline: a CACHE of pure
     _stage_G: "dict | None" = None          # per-frame arrays + geometry, not state
+    dystopia_palette: str = "toxic"         # viz=megacity colour family
+    _dys_T: "dict | None" = None            # megacity timeline + city geometry:
+    _dys_G: "dict | None" = None            # CACHES of pure functions, not state
+    _dys_pmax: float = 0.0                  # peak of lyric_zoom (punch scale)
     # SIMULATE mode (2026-10-09, chunk-parallel renders). While True, frame()
     # advances every piece of frame-to-frame state EXACTLY as a drawn frame
     # would, and draws nothing. A chunk that starts at frame A first simulates
@@ -1990,6 +2184,8 @@ class Renderer:
             self._viz_symbiote(img, i, a)
         elif v == "ledwall":
             self._viz_ledwall(img, i, a)
+        elif v == "megacity":
+            self._viz_megacity(img, i, a)
         else:
             self._viz_bars_bottom(img, i, a)
         if self.style.particles:
@@ -2960,6 +3156,1157 @@ class Renderer:
         sa = int(T["strobe_age"][i])
         if self.style.strobe and sa < 5:
             img += 235.0 * (0.50 ** sa)
+        return img
+
+    # -- DYSTOPIA: the megacity (see section 3d; stateless by design) -------
+    def _dys_tl(self, a: Analysis) -> dict:
+        if self._dys_T is None:
+            self._dys_T = dystopia_timeline(a, self.fps)
+        return self._dys_T
+
+    def _dys_text(self, txt: str, font: str, max_w: int, max_h: int,
+                  pad: int = 4) -> np.ndarray:
+        """Text as a float mask scaled to fit max_w x max_h (aspect kept)."""
+        from PIL import Image, ImageDraw
+        f = self.font(220, font)
+        probe = ImageDraw.Draw(Image.new("L", (4, 4)))
+        bb = probe.textbbox((0, 0), txt, font=f)
+        im = Image.new("L", (bb[2] - bb[0] + 2 * pad, bb[3] - bb[1] + 2 * pad), 0)
+        ImageDraw.Draw(im).text((pad - bb[0], pad - bb[1]), txt, font=f,
+                                fill=255)
+        arr = np.asarray(im, np.float32) / 255.0
+        sc = min(max_w / arr.shape[1], max_h / arr.shape[0])
+        tw, th = max(1, int(arr.shape[1] * sc)), max(1, int(arr.shape[0] * sc))
+        return cv2.resize(arr, (tw, th), interpolation=cv2.INTER_AREA)
+
+    def _dys_layer(self, spec: dict, P: dict, li: int) -> dict:
+        """One skyline layer as a horizontally WRAPPING strip: silhouette,
+        facade tone, a window-id map (windows are lit per frame through a
+        lookup table), neon. Seeded, so every process builds the same city."""
+        W, H = self.W, self.H
+        r = spec["res"]
+        LW, LH = max(8, int(round(W * r))), max(8, int(round(H * r)))
+        SW = int(LW * spec["sw"])
+        rng = np.random.default_rng(spec["seed"])
+        alpha = np.zeros((LH, SW), np.uint8)
+        fac = np.zeros((LH, SW), np.uint8)
+        wid = np.zeros((LH, SW), np.int32)
+        wmk = np.zeros((LH, SW), np.uint8)
+        has_neon = spec["signs"] > 0
+        neon = np.zeros((LH, SW, 3), np.uint8) if has_neon else None
+        neonf = np.zeros((LH, SW, 3), np.uint8) if has_neon else None
+        wt, wff, wrow, wr1, wr2, wr3, wcls = ([0] for _ in range(7))
+        tw_x = []
+        beacons = []                       # (x, y, phase, size)
+        cell = max(2.0, spec["cell"] * LH)
+        nw = 1
+        ti = 0
+        x = float(rng.uniform(0, 0.05 * LW))
+        sign_th = max(1, int(round(LH / 400)))
+        while x < SW:
+            w = int(max(4, rng.uniform(spec["wmin"], spec["wmax"]) * LH))
+            h = rng.uniform(spec["hmin"], spec["hmax"]) * LH
+            if rng.random() < 0.07:
+                h = min(0.97 * LH, h * 1.55)          # the odd supertall
+            top = int(LH - h)
+            ant = int(rng.uniform(0.03, 0.13) * LH) if rng.random() < 0.5 else 0
+            ys = max(0, top - ant)
+            ph = LH - ys
+            if ph < 4:
+                x += w
+                continue
+            pa = np.zeros((ph, w), np.uint8)
+            pf = np.zeros((ph, w), np.uint8)
+            pw = np.zeros((ph, w), np.int32)
+            pm = np.zeros((ph, w), np.uint8)
+            pn = np.zeros((ph, w, 3), np.uint8) if has_neon else None
+            pnf = np.zeros((ph, w, 3), np.uint8) if has_neon else None
+            base = rng.uniform(0.75, 1.2)
+            nb = int(rng.choice([1, 2, 3], p=[0.35, 0.40, 0.25]))
+            fr = sorted(rng.uniform(0.0, 0.55, nb - 1).tolist(), reverse=True)
+            btops = [top + int(f * h) for f in fr] + [top]
+            b0, b1 = 0, w
+            blocks = []
+            for k, bt in enumerate(btops):
+                if k > 0:
+                    il = int(rng.uniform(0.06, 0.24) * (b1 - b0))
+                    ir = int(rng.uniform(0.06, 0.24) * (b1 - b0))
+                    if b1 - b0 - il - ir >= 3:
+                        b0, b1 = b0 + il, b1 - ir
+                blocks.append((b0, b1, max(0, bt - ys)))
+            band_t = int(((x + w / 2) / LW) % 1.0 * NBARS)
+            cls_t = int(rng.integers(len(P["win_amb"])))
+            bias = rng.uniform(0.5, 1.6)
+            for (c0, c1, bt) in blocks:
+                pa[bt:, c0:c1] = 255
+                pf[bt:, c0:c1] = int(min(127, 100 * base))
+                rim = max(1, int((c1 - c0) * 0.035))
+                pf[bt:, c0:c0 + rim] = int(min(255, 175 * base))
+                pf[bt:bt + max(1, int(cell * 0.22)), c0:c1] = int(
+                    min(255, 160 * base))
+                # windows
+                cy = cell * rng.uniform(0.85, 1.25)
+                cx = cy * rng.uniform(0.7, 1.5)
+                style = int(rng.choice(3, p=[0.6, 0.25, 0.15]))
+                wxf, wyf = rng.uniform(0.45, 0.7), rng.uniform(0.40, 0.62)
+                if style == 2:
+                    wxf, wyf = 0.30, 0.85
+                mx = max(1.0, cx * 0.45)
+                ncol = int((c1 - c0 - 2 * mx) // cx)
+                if ncol < 1:
+                    continue
+                off = c0 + ((c1 - c0) - ncol * cx) / 2.0
+                if (c1 - c0) > 8 * cx and rng.random() < 0.5:
+                    for pc in range(1, ncol):            # panel seams
+                        if pc % 3 == 0:
+                            xs_ = int(off + pc * cx - cx * 0.25)
+                            pf[bt:, xs_:xs_ + 1] = int(70 * base)
+                seg = 3 if style == 1 else 1
+                yy = bt + cy * 0.8
+                while yy + cy * wyf < ph - 1:
+                    y0w = int(yy)
+                    y1w = max(y0w + 1, int(yy + cy * wyf))
+                    for c in range(0, ncol, seg):
+                        ce = min(ncol, c + seg)
+                        if style == 1:
+                            x0w = int(off + c * cx + 1)
+                            x1w = int(off + ce * cx - 1)
+                        else:
+                            x0w = int(off + c * cx + cx * (1 - wxf) / 2)
+                            x1w = int(off + c * cx + cx * (1 + wxf) / 2)
+                        x1w = max(x0w + 1, x1w)
+                        pw[y0w:y1w, x0w:x1w] = nw
+                        lvl = rng.uniform(0.70, 1.0)
+                        if y1w - y0w >= 6:
+                            g_ = np.linspace(0.78, 1.0, y1w - y0w)[:, None]
+                            pm[y0w:y1w, x0w:x1w] = (255 * lvl * g_).astype(
+                                np.uint8)
+                        else:
+                            pm[y0w:y1w, x0w:x1w] = int(255 * lvl)
+                        ay = ys + y0w
+                        wt.append(ti)
+                        wff.append((LH - ay) / max(1.0, LH - top))
+                        wrow.append(int(ay / cell))
+                        wr1.append(rng.random() / bias)
+                        wr2.append(rng.random())
+                        wr3.append(rng.random())
+                        wcls.append(cls_t if rng.random() < 0.7 else
+                                    int(rng.integers(len(P["win_amb"]))))
+                        nw += 1
+                    yy += cy
+            # roof: antennas with beacons, or a spire
+            c0, c1, bt = blocks[-1]
+            if ant > 0:
+                for _ in range(int(rng.integers(1, 3))):
+                    axp = int(rng.uniform(c0 + 1, max(c0 + 2, c1 - 1)))
+                    aw = max(1, int(round(w * 0.022)))
+                    ah = int(ant * rng.uniform(0.45, 1.0))
+                    at = max(0, bt - ah)
+                    pa[at:bt, axp:axp + aw] = 255
+                    pf[at:bt, axp:axp + aw] = 60
+                    beacons.append(((x + axp + aw / 2.0) % SW, ys + at,
+                                    rng.random(), 1.0))
+            elif rng.random() < 0.25 and bt > 6:
+                sh_ = int(min(bt, rng.uniform(0.04, 0.12) * LH))
+                pts = np.array([[c0, bt], [c1 - 1, bt],
+                                [(c0 + c1) // 2, bt - sh_]], np.int32)
+                cv2.fillPoly(pa, [pts], 255)
+                cv2.fillPoly(pf, [pts], int(90 * base))
+                beacons.append(((x + (c0 + c1) / 2.0) % SW, ys + bt - sh_,
+                                rng.random(), 0.8))
+            elif rng.random() < 0.5:
+                beacons.append(((x + c0 + 1) % SW, ys + bt, rng.random(), 0.6))
+            # neon: crown outlines, vertical glyph signs, word signs, holo ads
+            if has_neon and rng.random() < spec["signs"]:
+                col = P["neon"][int(rng.integers(len(P["neon"])))]
+                tgt = pnf if rng.random() < 0.35 else pn
+                kind = rng.random()
+                cb = blocks[int(rng.integers(len(blocks)))]
+                bw_ = cb[1] - cb[0]
+                if kind < 0.40 and bw_ >= 6:              # vertical glyph sign
+                    sw_ = max(5, int(bw_ * rng.uniform(0.13, 0.22)))
+                    ng = int(rng.integers(3, 7))
+                    sh_ = ng * sw_ + sw_ // 2
+                    sx = cb[0] + 2 if rng.random() < 0.5 else cb[1] - sw_ - 2
+                    lo = cb[2] + int(cell)
+                    hi = ph - sh_ - 2
+                    if hi > lo and sx >= 0:
+                        sy = int(rng.uniform(lo, lo + (hi - lo) * 0.6))
+                        pm[sy:sy + sh_, sx:sx + sw_] = 0
+                        pf[sy:sy + sh_, sx:sx + sw_] = 30
+                        cv2.rectangle(tgt, (sx, sy), (sx + sw_ - 1, sy + sh_ - 1),
+                                      col, sign_th)
+                        gs = sw_ * 0.62
+                        for g in range(ng):
+                            gx0 = sx + (sw_ - gs) / 2
+                            gy0 = sy + sw_ * 0.25 + g * sw_ + (sw_ - gs) / 2
+                            for (p0, p1) in _dys_glyph(rng, int(gs)):
+                                cv2.line(tgt,
+                                         (int(gx0 + p0[0] * gs), int(gy0 + p0[1] * gs)),
+                                         (int(gx0 + p1[0] * gs), int(gy0 + p1[1] * gs)),
+                                         col, sign_th, cv2.LINE_AA)
+                elif kind < 0.72 and bw_ >= 10:           # a word sign
+                    word = DYS_WORDS[int(rng.integers(len(DYS_WORDS)))]
+                    m = self._dys_text(word, "BebasNeue-Regular.ttf",
+                                       int(bw_ * 0.86),
+                                       int(cell * rng.uniform(1.4, 2.4)))
+                    th_, tw_ = m.shape
+                    sx = cb[0] + (bw_ - tw_) // 2
+                    sy = cb[2] + int(cell * rng.uniform(0.4, 3.0))
+                    if sy + th_ < ph and sx >= 0:
+                        pm[sy - 1:sy + th_ + 1, sx:sx + tw_] = 0
+                        sub = tgt[sy:sy + th_, sx:sx + tw_]
+                        np.maximum(sub, (m[..., None] * np.asarray(col, np.float32)
+                                         ).astype(np.uint8), out=sub)
+                elif bw_ >= 12 and li >= 2:               # holographic ad
+                    aw_ = int(bw_ * 0.78)
+                    ah_ = int(aw_ * rng.uniform(1.0, 1.5))
+                    sx = cb[0] + (bw_ - aw_) // 2
+                    sy = cb[2] + int(cell * rng.uniform(1.0, 4.0))
+                    if sy + ah_ < ph - 2:
+                        tgt = pnf
+                        pm[sy:sy + ah_, sx:sx + aw_] = 0
+                        g_ = np.linspace(0.30, 0.08, ah_, dtype=np.float32)
+                        tgt[sy:sy + ah_, sx:sx + aw_] = (
+                            g_[:, None, None] * np.asarray(col, np.float32)
+                        ).astype(np.uint8)
+                        cv2.rectangle(tgt, (sx, sy), (sx + aw_ - 1, sy + ah_ - 1),
+                                      col, sign_th)
+                        gs = aw_ * 0.55
+                        gx0, gy0 = sx + (aw_ - gs) / 2, sy + ah_ * 0.12
+                        for (p0, p1) in _dys_glyph(rng, int(gs)):
+                            cv2.line(tgt,
+                                     (int(gx0 + p0[0] * gs), int(gy0 + p0[1] * gs)),
+                                     (int(gx0 + p1[0] * gs), int(gy0 + p1[1] * gs)),
+                                     col, max(2, sign_th * 2), cv2.LINE_AA)
+                        word = DYS_WORDS[int(rng.integers(len(DYS_WORDS)))]
+                        m = self._dys_text(word, "BebasNeue-Regular.ttf",
+                                           int(aw_ * 0.85), int(ah_ * 0.16))
+                        th_, tw_ = m.shape
+                        wy_ = sy + int(ah_ * 0.80) - th_ // 2
+                        wx_ = sx + (aw_ - tw_) // 2
+                        sub = tgt[wy_:wy_ + th_, wx_:wx_ + tw_]
+                        np.maximum(sub, (m[..., None] * 255.0).astype(np.uint8),
+                                   out=sub)
+                else:                                     # neon crown outline
+                    c0_, c1_, bt_ = blocks[-1]
+                    cv2.line(tgt, (c0_, bt_), (c1_ - 1, bt_), col, sign_th)
+                    dn = int(min(ph - bt_ - 1, cell * rng.uniform(2, 8)))
+                    cv2.line(tgt, (c0_, bt_), (c0_, bt_ + dn), col, sign_th)
+                    cv2.line(tgt, (c1_ - 1, bt_), (c1_ - 1, bt_ + dn), col,
+                             sign_th)
+            # paste with horizontal wrap; later towers stand in front
+            cols = (int(x) + np.arange(w)) % SW
+            sel = pa > 0
+            for arr, p in ((alpha, pa), (fac, pf), (wid, pw), (wmk, pm)):
+                sub = arr[ys:, cols]
+                sub[sel] = p[sel]
+                arr[ys:, cols] = sub
+            if has_neon:
+                for arr, p in ((neon, pn), (neonf, pnf)):
+                    sub = arr[ys:, cols]
+                    sub[sel] = p[sel]
+                    arr[ys:, cols] = sub
+            tw_x.append((x + w / 2.0) % SW)
+            ti += 1
+            x += w * (1.0 + rng.uniform(*spec["gap"]))
+        tband = np.asarray([int(((tx / LW) % 1.0) * NBARS) for tx in tw_x]
+                           + [0], np.int64)
+        win = dict(t=np.asarray(wt, np.int64), ff=np.asarray(wff, np.float32),
+                   row=np.asarray(wrow, np.int64),
+                   r1=np.asarray(wr1, np.float32),
+                   r2=np.asarray(wr2, np.float32),
+                   r3=np.asarray(wr3, np.float32),
+                   cls=np.asarray(wcls, np.int64))
+        win["band"] = np.clip(tband[win["t"]], 0, NBARS - 1)
+        win["ids"] = np.arange(len(wt), dtype=np.float64)
+        bc = (np.asarray(beacons, np.float32).reshape(-1, 4)
+              if beacons else np.zeros((0, 4), np.float32))
+        # BAKE everything static, PREMULTIPLIED, with the strip's first
+        # columns repeated at the end, so a frame is a contiguous slice (no
+        # gathers) plus the window lookup. Facade tone + rim light + aerial
+        # fog + steady neon -> rgb; alpha -> 4th channel. Windows and the
+        # flickering neon are pre-attenuated by the same fog.
+        f32 = np.float32
+        fy = np.linspace(0.0, 1.0, LH, dtype=f32)[:, None]
+        fg = np.clip(spec["fog"] * (0.55 + 0.6 * fy), 0, 0.92)
+        fac_f = fac.astype(f32) * (1.0 / 128.0)
+        rgb = (fac_f[..., None] * np.asarray(P["facade"], f32)
+               + np.maximum(fac_f - 1.0, 0.0)[..., None]
+               * (np.asarray(P["rim"], f32) * 0.30))
+        if neon is not None:
+            rgb += neon.astype(f32) * 0.85
+        rgb = rgb * (1.0 - fg)[..., None] + (fg[..., None]
+                                             * np.asarray(P["fog"], f32))
+        al = alpha.astype(f32) * (1.0 / 255.0)
+        stat = np.empty((LH, SW, 4), np.uint8)
+        stat[..., :3] = np.clip(rgb * al[..., None] + 0.5, 0, 255)
+        stat[..., 3] = alpha
+        pad = int(np.ceil(W * r)) + 8
+        wrap = lambda a_: np.concatenate([a_, a_[:, :pad]], axis=1)
+        wmf = (wmk.astype(f32) * (1.0 / 255.0)) * ((1.0 - fg) * spec["bright"])
+        nf = None
+        if neonf is not None and neonf.any():
+            nf = wrap(np.clip(neonf.astype(f32) * (1.0 - fg)[..., None], 0,
+                              255).astype(np.uint8))
+        # keep only the rows that hold buildings: less to slice and warp
+        y0 = max(0, int(np.argmax(alpha.any(axis=1))) - 2)
+        return dict(spec=spec, LW=LW, LH=LH, SW=SW, y0=y0,
+                    stat=wrap(stat)[y0:], wid=wrap(wid)[y0:],
+                    wmf=wrap(wmf.astype(f32))[y0:],
+                    neonf=None if nf is None else nf[y0:], rimm=None,
+                    fgm=float(fg.mean()), win=win, beacons=bc, ntow=ti)
+
+    def _dys_roof(self, spec: dict, P: dict) -> dict:
+        """The rooftop we are standing on: a dark, slightly defocused
+        foreground silhouette (parapet, railing, AC units, vents, a water
+        tank, masts) rim-lit by the hologram. Same strip format as a skyline
+        layer, with no windows."""
+        W, H = self.W, self.H
+        LW, LH = W, H
+        SW = int(LW * spec["sw"])
+        rng = np.random.default_rng(spec["seed"])
+        alpha = np.zeros((LH, SW), np.uint8)
+        fac = np.zeros((LH, SW), np.uint8)
+        rim = np.zeros((LH, SW), np.float32)
+        beacons = []
+
+        def box(x0, x1, y0, y1, tone=55, edge=True):
+            xs = np.arange(int(x0), int(x1)) % SW
+            if len(xs) == 0 or y1 <= y0:
+                return
+            alpha[int(y0):int(y1), xs] = 255
+            fac[int(y0):int(y1), xs] = tone
+            if edge:
+                e = max(2, int(H / 270))
+                rim[int(y0):int(y0) + e, xs] = 1.0
+                rim[int(y0) + e:int(y0) + 4 * e, xs] = np.maximum(
+                    rim[int(y0) + e:int(y0) + 4 * e, xs], 0.25)
+        # parapet: segments of slightly different heights
+        x = 0
+        while x < SW:
+            seg = int(rng.uniform(0.25, 0.7) * W)
+            top = H * rng.uniform(0.87, 0.93)
+            box(x, x + seg + 2, top, H, 40)
+            # railing posts + rail above the parapet
+            if rng.random() < 0.6:
+                rail = top - H * 0.035
+                th = max(1, int(H / 540))
+                box(x, x + seg, rail, rail + th, 45)
+                for px_ in range(int(x), int(x + seg), int(H * 0.06)):
+                    box(px_, px_ + th, rail, top, 45, edge=False)
+            x += seg
+        # rooftop clutter
+        x = rng.uniform(0, 0.2) * W
+        while x < SW:
+            kind = rng.random()
+            base = H * 0.90
+            if kind < 0.35:                                   # AC unit
+                w_, h_ = rng.uniform(0.08, 0.15) * H, rng.uniform(0.06, 0.10) * H
+                box(x, x + w_, base - h_, base + 4, 50)
+                for gx in range(4):                           # grille lines
+                    xs_ = x + w_ * (0.2 + 0.2 * gx)
+                    fac[int(base - h_ * 0.8):int(base - h_ * 0.2),
+                        np.arange(int(xs_), int(xs_) + 1) % SW] = 25
+            elif kind < 0.55:                                 # vent stacks
+                for _ in range(int(rng.integers(1, 4))):
+                    w_ = rng.uniform(0.012, 0.024) * H
+                    h_ = rng.uniform(0.05, 0.13) * H
+                    xx = x + rng.uniform(0, 0.04) * H
+                    box(xx, xx + w_, base - h_, base + 4, 48)
+                    box(xx - w_ * 0.3, xx + w_ * 1.3, base - h_,
+                        base - h_ + max(2, w_ * 0.3), 60)
+            elif kind < 0.70:                                 # water tank
+                w_ = rng.uniform(0.09, 0.13) * H
+                h_ = w_ * rng.uniform(0.9, 1.2)
+                legs = H * 0.05
+                box(x, x + w_, base - legs - h_, base - legs, 45)
+                pts = np.array([[x, base - legs - h_],
+                                [x + w_, base - legs - h_],
+                                [x + w_ / 2, base - legs - h_ - w_ * 0.35]],
+                               np.float32)
+                for off in (0, -SW, SW):
+                    pp = (pts + [off, 0]).astype(np.int32)
+                    cv2.fillPoly(alpha, [pp], 255)
+                    cv2.fillPoly(fac, [pp], 50)
+                lw_ = max(2, int(H / 300))
+                box(x + w_ * 0.1, x + w_ * 0.1 + lw_, base - legs, base, 40, False)
+                box(x + w_ * 0.9 - lw_, x + w_ * 0.9, base - legs, base, 40, False)
+            elif kind < 0.82:                                 # mast + beacon
+                h_ = rng.uniform(0.12, 0.26) * H
+                w_ = max(2, int(H / 250))
+                box(x, x + w_, base - h_, base, 45)
+                for k in range(1, 4):                         # cross-bars
+                    yk = base - h_ * k / 4
+                    box(x - w_ * 3, x + w_ * 4, yk, yk + max(1, w_ // 2), 45)
+                beacons.append(((x + w_ / 2) % SW, base - h_, rng.random(), 1.6))
+            else:                                             # a dish
+                r_ = rng.uniform(0.04, 0.06) * H
+                for off in (0, -SW, SW):
+                    cv2.ellipse(alpha, (int(x + r_ + off), int(base - r_ * 1.4)),
+                                (int(r_), int(r_ * 0.55)), -25, 0, 360, 255, -1)
+                    cv2.ellipse(fac, (int(x + r_ + off), int(base - r_ * 1.4)),
+                                (int(r_), int(r_ * 0.55)), -25, 0, 360, 55, -1)
+                box(x + r_ * 0.9, x + r_ * 1.1, base - r_ * 1.2, base, 45, False)
+            x += rng.uniform(0.12, 0.40) * W
+        f32 = np.float32
+        fac_f = fac.astype(f32) * (1.0 / 128.0)
+        rgb = fac_f[..., None] * np.asarray(P["facade"], f32) * 0.6
+        stat = np.empty((LH, SW, 4), np.uint8)
+        stat[..., :3] = np.clip(rgb + 0.5, 0, 255)
+        stat[..., 3] = alpha
+        # defocus: the foreground is out of the lens's focus
+        sig = max(0.6, H / 700.0)
+        stat = cv2.GaussianBlur(stat, (0, 0), sig)
+        rim = cv2.GaussianBlur(rim, (0, 0), sig) * (alpha > 0)
+        pad = int(np.ceil(W)) + 8
+        wrap = lambda a_: np.concatenate([a_, a_[:, :pad]], axis=1)
+        y0 = max(0, int(np.argmax(alpha.any(axis=1))) - 4)
+        win = dict(t=np.zeros(1, np.int64), ff=np.zeros(1, f32),
+                   row=np.zeros(1, np.int64), r1=np.ones(1, f32),
+                   r2=np.zeros(1, f32), r3=np.zeros(1, f32),
+                   cls=np.zeros(1, np.int64), band=np.zeros(1, np.int64),
+                   ids=np.zeros(1, np.float64))
+        bc = (np.asarray(beacons, f32).reshape(-1, 4) if beacons
+              else np.zeros((0, 4), f32))
+        return dict(spec=spec, LW=LW, LH=LH, SW=SW, y0=y0,
+                    stat=wrap(stat)[y0:], wid=None, wmf=None, neonf=None,
+                    rimm=wrap(rim.astype(f32))[y0:], fgm=0.0, win=win,
+                    beacons=bc, ntow=0)
+
+    def _dys_geo(self) -> dict:
+        """The whole city + sky + rain + traffic + hologram assets, built once
+        per render size (a cache, not frame-to-frame state)."""
+        if self._dys_G is not None:
+            return self._dys_G
+        self._dys_pmax = (float(self.lyric_zoom.max()) - 1.0
+                          if self.lyric_zoom is not None else 0.0)
+        W, H = self.W, self.H
+        P = DYSTOPIA_PALETTES[self.dystopia_palette]
+        f32 = np.float32
+        layers = [self._dys_roof(s, P) if s.get("roof") else
+                  self._dys_layer(s, P, li) for li, s in enumerate(DYS_LAYERS)]
+        qh, qw = max(4, H // 4), max(4, W // 4)
+        # sky gradient (quarter res) + stretched smog clouds (tileable-ish)
+        yq = np.linspace(0.0, 1.0, qh, dtype=f32)[:, None, None]
+        g = np.clip(yq / 0.60, 0, 1) ** 2.2
+        g = g + 0.55 * np.exp(-((yq - 0.60) / 0.10) ** 2)   # smog-glow band
+        sky = (np.asarray(P["sky_top"], f32) * np.clip(1 - g, 0, 1)
+               + np.asarray(P["sky_hor"], f32) * g)
+        rng = np.random.default_rng(71)
+        cw = qw * 3
+        cl = np.zeros((qh, cw), f32)
+        for gh, gw, amp in ((3, 10, 1.0), (6, 26, 0.5), (12, 60, 0.25),
+                            (24, 130, 0.12)):
+            nz = rng.random((gh, gw)).astype(f32)
+            nz = np.hstack([nz, nz[:, :2]])
+            big_w = int(round(cw * (gw + 2) / gw))
+            up = cv2.resize(nz, (big_w, qh), interpolation=cv2.INTER_CUBIC)
+            cl += amp * up[:, :cw]
+        cl /= 1.87
+        prof = (0.25 + 0.75 * np.exp(-((np.linspace(0, 1, qh) - 0.30) / 0.22)
+                                     ** 2)).astype(f32)[:, None]
+        cloud = np.clip((cl - 0.42) * 2.4, 0, 1) * prof
+        # rain: (x, y, speed in H/s, length in H, brightness)
+        rr = np.random.default_rng(97)
+        rain = []
+        for n_, vlo, vhi, llo, lhi in ((1500, 1.1, 1.6, 0.018, 0.035),
+                                       (240, 1.9, 2.6, 0.05, 0.10)):
+            rain.append(np.stack([rr.random(n_), rr.random(n_),
+                                  rr.uniform(vlo, vhi, n_),
+                                  rr.uniform(llo, lhi, n_),
+                                  rr.uniform(0.35, 1.0, n_)], 1).astype(f32))
+        # traffic lanes: (y as frac H, parallax k, dir, speed in W/s, count,
+        # kind 0 = car streak, 1 = drone)
+        lanes = []
+        tr = np.random.default_rng(131)
+        for yf, k, d, v, n_, kind, grp in (
+                (0.33, 0.24, 1, 0.05, 7, 0, 0), (0.38, 0.26, -1, 0.06, 7, 0, 0),
+                (0.44, 0.30, 1, 0.07, 6, 0, 0), (0.27, 0.30, -1, 0.02, 4, 1, 0),
+                (0.22, 0.55, -1, 0.10, 4, 0, 1), (0.52, 0.60, 1, 0.12, 5, 0, 1),
+                (0.58, 0.62, -1, 0.14, 4, 0, 1), (0.18, 0.70, 1, 0.03, 3, 1, 1)):
+            lanes.append(dict(y=yf, k=k, d=d, v=v * tr.uniform(0.85, 1.15, n_),
+                              x0=tr.random(n_), kind=kind, grp=grp,
+                              ph=tr.random(n_)))
+        # searchlight bases (in a 1.8 W cycle, parallax of layer 1)
+        sb = np.random.default_rng(151)
+        beams = dict(x=sb.random(8), ph=sb.random(8) * 6.28,
+                     w=sb.uniform(0.022, 0.034, 8))
+        # full-frame x / y ramps (alarm wash), haze + street-glow gradients
+        xs = np.linspace(0.0, 1.0, W, dtype=f32)
+        ys_ = np.linspace(0.0, 1.0, H, dtype=f32)
+        hz = (np.clip((ys_ - 0.15) / 0.85, 0, 1) ** 1.3)[:, None, None]
+        street = (np.clip((ys_ - 0.55) / 0.45, 0, 1) ** 2.0)[:, None, None]
+        self._dys_G = dict(P=P, layers=layers, qh=qh, qw=qw, sky=sky,
+                           cloud=cloud, cw=cw, rain=rain, lanes=lanes,
+                           beams=beams, xs=xs, ys=ys_, hz=hz, street=street,
+                           holo=self._dys_holo_assets(P))
+        n_w = sum(len(L["win"]["t"]) for L in layers)
+        print(f"[lyric_viz] megacity: {sum(L['ntow'] for L in layers)} towers, "
+              f"{n_w} windows, {sum(len(L['beacons']) for L in layers)} "
+              f"beacons over {len(layers)} layers ({self.dystopia_palette})")
+        return self._dys_G
+
+    def _dys_holo_assets(self, P: dict) -> dict:
+        """The hologram billboard's content masks at full drop size."""
+        H = self.H
+        BH = max(40, int(H * 0.40))
+        BW = int(BH * 1.62)
+        f32 = np.float32
+
+        def place(m, cy_frac):
+            out = np.zeros((BH, BW), f32)
+            th_, tw_ = m.shape
+            y0 = int(BH * cy_frac - th_ / 2)
+            x0 = (BW - tw_) // 2
+            y0 = max(0, min(BH - th_, y0))
+            out[y0:y0 + th_, x0:x0 + tw_] = m[:BH - y0, :BW - x0]
+            return out
+
+        line = fill = red = None
+        if self.logo is not None:
+            rgb = np.asarray(self.logo.convert("RGB"), f32) / 255.0
+            al = np.asarray(self.logo.split()[-1], f32) / 255.0
+            lum = rgb.mean(axis=2)
+            sat = rgb.max(axis=2) - rgb.min(axis=2)
+            if al.std() < 0.02:
+                al = 1.0 - ((lum > 0.93) & (sat < 0.10)).astype(f32)
+            rd = ((rgb[..., 0] > 0.5) & (rgb[..., 1] < 0.35)
+                  & (rgb[..., 2] < 0.40)).astype(f32) * al
+            dk = (lum < 0.35).astype(f32) * al * (1 - rd)
+            fl = np.clip(al - rd - dk, 0, 1)
+            lh, lw = rgb.shape[:2]
+            sc = (BH * 0.66) / max(lh, lw)
+            ow, oh = max(1, int(lw * sc)), max(1, int(lh * sc))
+            line, fill, red = (place(cv2.resize(m, (ow, oh),
+                                                interpolation=cv2.INTER_AREA),
+                                     0.47) for m in (dk, fl, rd))
+        ttl = (self.title or "HIT A BUMP").upper()
+        title = place(self._dys_text(ttl, "Anton-Regular.ttf", int(BW * 0.88),
+                                     int(BH * 0.46)), 0.50)
+        bump = place(self._dys_text("BUMP", "Anton-Regular.ttf", int(BW * 0.80),
+                                    int(BH * 0.62)), 0.50)
+        sub = place(self._dys_text("TZEKE000", "BebasNeue-Regular.ttf",
+                                   int(BW * 0.30), int(BH * 0.075)), 0.835)
+        warn = place(self._dys_text("WARNING", "Anton-Regular.ttf",
+                                    int(BW * 0.70), int(BH * 0.40)), 0.50)
+        # frame: corner brackets, a faint full border, ticker rules
+        fr = np.zeros((BH, BW), f32)
+        t_ = max(2, BH // 110)
+        L_ = int(BH * 0.13)
+        for (x0, y0, dx, dy) in ((0, 0, 1, 1), (BW - 1, 0, -1, 1),
+                                 (0, BH - 1, 1, -1), (BW - 1, BH - 1, -1, -1)):
+            cv2.line(fr, (x0, y0), (x0 + dx * L_, y0), 1.0, t_ * 2)
+            cv2.line(fr, (x0, y0), (x0, y0 + dy * L_), 1.0, t_ * 2)
+        cv2.rectangle(fr, (0, 0), (BW - 1, BH - 1), 0.35, t_)
+        y_top, y_bot = int(BH * 0.11), int(BH * 0.89)
+        cv2.line(fr, (int(BW * 0.04), y_top), (int(BW * 0.96), y_top), 0.45, t_)
+        cv2.line(fr, (int(BW * 0.04), y_bot), (int(BW * 0.96), y_bot), 0.45, t_)
+        # tick marks along the rules
+        for k in range(1, 40):
+            xk = int(BW * (0.04 + 0.92 * k / 40))
+            cv2.line(fr, (xk, y_top), (xk, y_top - BH // 60), 0.35, 1)
+        tk = self._dys_text(DYS_TICKER * 2, "BebasNeue-Regular.ttf",
+                            10 ** 6, int(BH * 0.065))
+        tk2 = self._dys_text(("UNIT 000   ::   SECTOR 0 OBSERVATION   ::   "
+                              "SIGNAL LOST   ::   GRID LOAD 99%   ::   ") * 3,
+                             "BebasNeue-Regular.ttf", 10 ** 6, int(BH * 0.05))
+        return dict(BH=BH, BW=BW, line=line, fill=fill, red=red, title=title,
+                    bump=bump, sub=sub, warn=warn, frame=fr, ticker=tk,
+                    ticker2=tk2, y_top=y_top, y_bot=y_bot,
+                    rows=np.arange(BH, dtype=f32)[:, None])
+
+    @staticmethod
+    def _lerp_cols(cols, h: float) -> np.ndarray:
+        """Piecewise-linear colour ramp through `cols` at h in [0, 1]."""
+        c = np.asarray(cols, np.float32)
+        x = float(np.clip(h, 0, 1)) * (len(c) - 1)
+        k = min(len(c) - 2, int(x))
+        f = x - k
+        return c[k] * (1 - f) + c[k + 1] * f
+
+    def _viz_megacity(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        """The whole megacity frame (see section 3d)."""
+        T = self._dys_tl(a)
+        G = self._dys_geo()
+        P = G["P"]
+        W, H = self.W, self.H
+        t = i / float(self.fps)
+        f32 = np.float32
+        hot = bool(T["hot"][i])
+        hotf = float(T["hot_f"][i])
+        big = bool(T["big"][i])
+        E, E2 = float(T["E"][i]), float(T["E2"][i])
+        pre = float(T["pre"][i])
+        heat = float(T["heat"][i])
+        kage = int(T["kage"][i])
+        kenv = 0.72 ** kage if kage < 40 else 0.0
+        black = bool(T["black"][i])
+        cam = float(T["cam"][i])
+        dolly = float(T["dolly"][i])
+        lz = 1.0
+        if self.lyric_zoom is not None:
+            lz = float(self.lyric_zoom[i])
+        # power cut: the half-beat before each drop the whole city goes dark
+        power = 0.0 if black else 1.0
+        la = int(T["lage"][i])
+        lstr = float(T["strike"][int(T["lidx"][i])]) if la < 10 else 0.0
+        flick = (1.0, 0.35, 0.95, 0.55, 0.30, 0.18, 0.10, 0.06, 0.03, 0.01)
+        lflash = lstr * flick[la] if la < 10 else 0.0
+        # SKY
+        cq = G["cloud"]
+        co = int(cam * H * 0.03 / 4.0)
+        cols = (co + np.arange(G["qw"])) % G["cw"]
+        c = cq[:, cols][..., None]
+        glow = 0.30 + 0.35 * E2 + 0.25 * heat * hotf
+        skyq = G["sky"] * (0.85 + 0.30 * heat * hotf) + c * (
+            np.asarray(P["cloud"], f32) * glow
+            + np.asarray(P["bolt"], f32) * (1.2 * lflash))
+        skyq = skyq + np.asarray(P["bolt"], f32) * (0.12 * lflash)
+        img[:] = cv2.resize(skyq.astype(f32), (W, H),
+                            interpolation=cv2.INTER_LINEAR)
+        yc = H * 0.62
+        zoom_g = 1.0 + 0.10 * (lz - 1.0)          # a sung "bump" pushes in
+        layers = G["layers"]
+        # far layer, then the lightning bolt + searchlights behind the rest
+        self._dys_layer_draw(img, layers[0], i, t, T, P, cam, dolly, zoom_g,
+                             yc, kenv, power, E, hotf, pre, lflash)
+        oa = int(T["one_age"][i])
+        red = (0.35 + 0.45 * (0.80 ** oa if oa < 30 else 0.0)) if big else 0.0
+        red *= power
+        self._dys_haze(img, G, P, 0.08 + 0.05 * heat, lflash, red)
+        if la < 7 and lstr >= 0.5:
+            self._dys_bolt(img, int(T["lidx"][i]), lflash, P)
+        self._dys_beams(img, i, t, T, G, P, cam, E, hotf, big, kenv, power)
+        self._dys_layer_draw(img, layers[1], i, t, T, P, cam, dolly, zoom_g,
+                             yc, kenv, power, E, hotf, pre, lflash)
+        self._dys_haze(img, G, P, 0.08 + 0.06 * heat, lflash, red)
+        self._dys_traffic(img, G, T, i, cam, dolly, zoom_g, yc, 0, power)
+        self._dys_layer_draw(img, layers[2], i, t, T, P, cam, dolly, zoom_g,
+                             yc, kenv, power, E, hotf, pre, lflash)
+        self._dys_haze(img, G, P, 0.05 + 0.06 * heat, lflash, red * 0.6)
+        self._dys_traffic(img, G, T, i, cam, dolly, zoom_g, yc, 1, power)
+        # street-level light pollution pulsing on the sub — BEHIND the near
+        # towers, so they stand out of it as silhouettes
+        img += G["street"] * np.asarray(P["street"], f32) * (
+            (0.12 + 0.28 * heat + 0.22 * kenv * hotf) * (0.3 + 0.7 * power))
+        self._dys_layer_draw(img, layers[3], i, t, T, P, cam, dolly, zoom_g,
+                             yc, kenv, power, E, hotf, pre, lflash)
+        self._dys_billboard(img, i, t, a, T, G, P, kenv, black, lz)
+        hcol = self._lerp_cols(P["holo"], 0.08 + 0.45 * heat
+                               + 0.45 * heat * hotf)
+        rimc = hcol * (0.0 if black else (0.85 + 0.45 * kenv * hotf)) \
+            + np.asarray(P["bolt"], f32) * (1.5 * lflash)
+        self._dys_layer_draw(img, layers[4], i, t, T, P, cam, dolly, zoom_g,
+                             yc, kenv, power, E, hotf, pre, lflash, rimc)
+        self._dys_rain(img, G, T, i, t, cam, E2, lflash)
+        # RED ALARM: a rotating-beacon wash sweeping the frame on the beat
+        if hotf > 0.02 and not black:
+            ph2 = ((float(T["bi"][i]) + float(T["ph"][i])) / 2.0) % 1.0
+            xcen = ph2 * 1.6 - 0.3
+            wx = np.exp(-((G["xs"] - xcen) / 0.20) ** 2)
+            wy = np.exp(-(G["ys"] / 0.55) ** 2) * 0.8 + 0.2
+            amt = hotf * (22.0 + 26.0 * kenv) * (1.7 if big else 1.0)
+            img += (wy[:, None] * wx[None, :] * amt)[..., None] * \
+                (np.asarray(P["alarm"], f32) / 255.0)
+
+    def _dys_haze(self, img, G, P, amt: float, lflash: float,
+                  red: float = 0.0) -> None:
+        h = G["hz"] * amt
+        img *= (1.0 - h)
+        fc = np.asarray(P["fog"], np.float32) * (1.0 + 2.0 * lflash)
+        if red > 0:                         # the finale's alarm-red smog
+            fc = fc * (1 - red) + np.asarray(P["alarm"], np.float32) * 0.40 * red
+        img += h * fc
+
+    def _dys_layer_draw(self, img, L, i, t, T, P, cam, dolly, zoom_g, yc,
+                        kenv, power, E, hotf, pre, lflash,
+                        rimc=None) -> None:
+        f32 = np.float32
+        W, H = self.W, self.H
+        spec = L["spec"]
+        r, k = spec["res"], spec["k"]
+        LW, LH, SW = L["LW"], L["LH"], L["SW"]
+        ox = cam * H * k * r
+        zl = (1.0 + dolly * (0.4 + 1.2 * k)) * zoom_g
+        s = r / zl
+        u_min = ox + LW / 2.0 - (W / 2.0) * s
+        c0 = int(np.floor(u_min)) - 1
+        cw = int(np.ceil(W * s)) + 3
+        cm = c0 % SW                              # strips are wrap-padded
+        y0L = L["y0"]                             # rows above hold nothing
+        prem = L["stat"][:, cm:cm + cw].astype(f32)
+        rgb = prem[..., :3]
+        # WINDOWS = the equaliser, through a per-window lookup table
+        wn = L["win"]
+        n = len(wn["t"])
+        bi = int(T["bi"][i])
+        if L["rimm"] is not None:                 # the hologram rim-lights it
+            rgb += L["rimm"][:, cm:cm + cw, None] * rimc
+        if power > 0 and L["wid"] is not None:
+            p_amb = 0.08 + 0.14 * E
+            slot = np.floor(t * 0.18 + wn["r3"] * 7.0)
+            amb_on = (_hash01(wn["ids"] * 1.37, slot) * (0.4 + wn["r1"])
+                      < p_amb).astype(f32)
+            amb = amb_on * (0.30 + 0.30 * wn["r2"])
+            bars = T["bars"][i]
+            eqg = spec["eq"] * (1.10 * hotf + 0.65 * pre ** 1.2
+                                + 0.30 * E * (1.0 - hotf))
+            lvl = bars[wn["band"]] * eqg
+            eq = (wn["ff"] < lvl).astype(f32) * (0.65 + 0.35 * wn["r2"])
+            # kick: whole FLOORS slam on (rows across the skyline)
+            slam = np.zeros(n, f32)
+            if kenv > 0.05 and (hotf > 0.3 or pre > 0.2):
+                kidx = int(T["kidx"][i])
+                rows = ((wn["row"] * 3 + kidx * 7) % 6 == 0)
+                slam = rows.astype(f32) * kenv * (0.6 + 0.4 * hotf)
+            # bar ONE in a drop: a random third of the towers light up whole
+            oa = int(T["one_age"][i])
+            if oa < 14 and hotf > 0.3:
+                tsel = _hash01(wn["t"].astype(np.float64) * 3.1,
+                               float(T["bar"][i])) < 0.30
+                slam = np.maximum(slam, tsel.astype(f32) * (0.82 ** oa))
+            # the surge when the power comes back on a drop entry
+            ea = int(T["entry_age"][i])
+            surge = 0.85 ** ea if ea < 25 else 0.0
+            amb_c = np.asarray(P["win_amb"], f32)[wn["cls"]]
+            mt = np.asarray(P["meter"], f32)
+            ffc = np.clip(wn["ff"] / np.maximum(lvl, 0.35), 0, 1)[:, None]
+            meter = np.where(ffc < 0.6, mt[0] + (mt[1] - mt[0]) * (ffc / 0.6),
+                             mt[1] + (mt[2] - mt[1]) * ((ffc - 0.6) / 0.4))
+            lut = (amb_c * amb[:, None] + meter * eq[:, None]
+                   + mt[1] * slam[:, None] * 0.9
+                   + 255.0 * surge * 0.45).astype(f32)
+            lut[0] = 0.0                          # id 0 = not a window
+            win = np.take(lut, L["wid"][:, cm:cm + cw], axis=0)
+            win *= L["wmf"][:, cm:cm + cw, None]
+            rgb += win
+            if L["neonf"] is not None:
+                nf = 0.55 + 0.75 * kenv * (0.4 + 0.6 * hotf)
+                sp = float(T["spark"][i])
+                if sp > 0.05 and _hash01(i, 7.0) < 0.5 + 0.5 * sp:
+                    nf *= 1.0 - 0.8 * sp             # hats flicker the signs
+                if _hash01(i // 3, 11.0) < 0.04:
+                    nf *= 0.25                       # dying neon
+                rgb += L["neonf"][:, cm:cm + cw].astype(f32) * nf
+        elif power == 0:
+            rgb *= 0.55                               # power cut: brown-out
+        if lflash > 0.01:                             # lightning lights the fog
+            rgb += prem[..., 3:4] * (np.asarray(P["bolt"], f32)
+                                     * (0.9 * lflash * L["fgm"] / 255.0))
+        # beacons: slow red aviation blink when calm, alarm strobe in a drop
+        bc = L["beacons"]
+        if len(bc) and power > 0:
+            bx = (bc[:, 0] - c0) % SW
+            vis = bx < cw
+            ph = float(T["ph"][i])
+            rad = max(1, int(round(2.2 * r * (0.6 + 0.6 * k) * H / 1080)))
+            alarm = hotf > 0.3 or pre > 0.5
+            for (xb, yb, phs, sz) in zip(bx[vis], bc[vis, 1], bc[vis, 2],
+                                         bc[vis, 3]):
+                if alarm:
+                    on = ((bi + (1 if phs > 0.5 else 0)) % 2 == 0) and ph < 0.45
+                    lv = 1.0
+                else:
+                    on = ((t * 0.55 + phs) % 1.0) < 0.16
+                    lv = 0.8
+                if on:
+                    rr_ = max(1, int(rad * sz * (1.6 if alarm else 1.0)))
+                    cv2.circle(prem, (int(xb), int(yb) - y0L), rr_,
+                               (255.0 * lv, 30.0 * lv, 25.0 * lv, 255.0), -1,
+                               cv2.LINE_AA)
+        # output rows above the layer's first building row stay untouched
+        Ys = int(max(0, np.floor((y0L - yc * (r - s)) / s) - 1))
+        if Ys >= H:
+            return
+        M = np.float32([[s, 0, u_min - c0],
+                        [0, s, s * Ys + yc * (r - s) - y0L]])
+        out = cv2.warpAffine(prem, M, (W, H - Ys),
+                             flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                             borderMode=cv2.BORDER_CONSTANT)
+        a_ = out[..., 3:4] * (1.0 / 255.0)
+        sub = img[Ys:]
+        sub *= (1.0 - a_)
+        sub += out[..., :3]
+
+    def _dys_bolt(self, img, idx: int, lflash: float, P) -> None:
+        """A forked lightning bolt, seeded by its event: same bolt in every
+        chunk."""
+        W, H = self.W, self.H
+        rng = np.random.default_rng(9100 + idx)
+        lay = np.zeros((H, W), np.float32)
+        x = W * rng.uniform(0.15, 0.85)
+        y = -5.0
+        yend = H * rng.uniform(0.32, 0.48)
+        pts = [(x, y)]
+        steps = 14
+        for k in range(steps):
+            y += (yend + 5) / steps
+            x += rng.normal(0, W * 0.018)
+            pts.append((x, y))
+        th = max(1, int(round(H / 360)))
+        p = np.int32(np.round(pts))
+        cv2.polylines(lay, [p], False, 1.0, th * 2, cv2.LINE_AA)
+        for _ in range(int(rng.integers(2, 4))):
+            k0 = int(rng.integers(2, steps - 3))
+            bx, by = pts[k0]
+            br = [(bx, by)]
+            dirn = rng.choice([-1, 1])
+            for _k in range(int(rng.integers(3, 6))):
+                bx += dirn * abs(rng.normal(W * 0.02, W * 0.01))
+                by += H * rng.uniform(0.015, 0.035)
+                br.append((bx, by))
+            cv2.polylines(lay, [np.int32(np.round(br))], False, 0.7, th,
+                          cv2.LINE_AA)
+        q = cv2.resize(lay, (W // 4, H // 4), interpolation=cv2.INTER_AREA)
+        q = cv2.GaussianBlur(q, (0, 0), 3.0)
+        glow = cv2.resize(q, (W, H), interpolation=cv2.INTER_LINEAR)
+        tot = (lay * 255.0 + glow * 900.0) * min(1.0, lflash * 1.3)
+        img += tot[..., None] * (np.asarray(P["bolt"], np.float32) / 255.0)
+
+    def _dys_beams(self, img, i, t, T, G, P, cam, E, hotf, big, kenv,
+                   power) -> None:
+        """Searchlights from behind the mid towers. Calm: two slow, dim
+        sweeps. Build: more, faster. Drop: they swing to an extreme ON every
+        beat (cosine of the beat phase, so they dwell on the hit)."""
+        if power == 0:
+            return
+        W, H = self.W, self.H
+        qh, qw = G["qh"], G["qw"]
+        lay = np.zeros((qh, qw, 3), np.float32)
+        B = G["beams"]
+        pre = float(T["pre"][i])
+        nb = 2 + int(round(2 * pre + 4 * hotf)) + (2 if big else 0)
+        nb = min(nb, len(B["x"]))
+        beat = float(T["bi"][i]) + float(T["ph"][i])
+        span = 1.8 * qw
+        L = qh * 1.5
+        for k in range(nb):
+            bx = (B["x"][k] * span - cam * H * 0.24 / 4.0) % span - 0.4 * qw
+            by = qh * 0.70
+            if hotf > 0.3:
+                sgn = 1 if k % 2 == 0 else -1
+                ang = sgn * 0.55 * np.cos(np.pi * beat + B["ph"][k] * 0.2) \
+                    + (k - nb / 2) * 0.05
+                col = P["beam_hot"][k % len(P["beam_hot"])]
+                lv = 0.45 + 0.35 * kenv
+            else:
+                ang = 0.45 * np.sin(t * (0.25 + 0.6 * pre) + B["ph"][k]) + \
+                    (0.18 if k % 2 else -0.18)
+                col = P["beam"]
+                lv = 0.16 + 0.22 * pre + 0.10 * E
+            hw = B["w"][k] * (1.0 + 0.6 * kenv * hotf)
+            pts = np.array([[bx, by],
+                            [bx + np.sin(ang - hw) * L, by - np.cos(ang - hw) * L],
+                            [bx + np.sin(ang + hw) * L, by - np.cos(ang + hw) * L]],
+                           np.float32)
+            cv2.fillPoly(lay, [np.round(pts).astype(np.int32)],
+                         tuple(float(c) * lv for c in col), cv2.LINE_AA)
+        lay = cv2.GaussianBlur(lay, (0, 0), 1.5)
+        lay *= (0.25 + 0.75 * np.linspace(0.0, 1.0, qh, dtype=np.float32)
+                ** 0.8)[:, None, None]
+        img += cv2.resize(lay, (W, H), interpolation=cv2.INTER_LINEAR)
+
+    def _dys_traffic(self, img, G, T, i, cam, dolly, zoom_g, yc, grp,
+                     power) -> None:
+        """Flying traffic: light streaks in lanes (white head, red tail) and
+        blinking drones. Positions are pure functions of a precomputed
+        cumsum, so any chunk can start anywhere."""
+        W, H = self.W, self.H
+        P = G["P"]
+        trs = float(T["traffic"][i])
+        th = max(1, int(round(H / 540)))
+        for ln in G["lanes"]:
+            if ln["grp"] != grp:
+                continue
+            k = ln["k"]
+            zl = (1.0 + dolly * (0.4 + 1.2 * k)) * zoom_g
+            span = 1.5 * W
+            xw = ((ln["x0"] * span + ln["d"] * ln["v"] * W * trs
+                   - cam * H * k) % span) - 0.25 * W
+            y = yc + (ln["y"] * H - yc) * zl
+            sc = (0.5 + 0.8 * k) * zl
+            for j, xv in enumerate(xw):
+                X = W / 2.0 + (xv - W / 2.0) * zl
+                if X < -50 or X > W + 50:
+                    continue
+                yy = y + np.sin(trs * 2.0 + ln["ph"][j] * 6.28) * 2.0 * sc
+                if ln["kind"] == 0:
+                    ln_px = (14 + 26 * k) * sc * (H / 1080)
+                    tail = X - ln["d"] * ln_px
+                    cv2.line(img, (int(tail), int(yy)), (int(X), int(yy)),
+                             tuple(0.55 * c for c in P["traffic"][1]), th,
+                             cv2.LINE_AA)
+                    cv2.circle(img, (int(X), int(yy)), max(1, int(1.6 * sc)),
+                               tuple(float(c) for c in P["traffic"][0]), -1,
+                               cv2.LINE_AA)
+                else:
+                    on = ((trs * 1.3 + ln["ph"][j]) % 1.0) < 0.25
+                    cv2.circle(img, (int(X), int(yy)), max(1, int(1.2 * sc)),
+                               tuple(0.5 * c for c in P["traffic"][2]), -1,
+                               cv2.LINE_AA)
+                    if on:
+                        cv2.circle(img, (int(X), int(yy)),
+                                   max(1, int(2.2 * sc)),
+                                   tuple(float(c) for c in P["traffic"][1]),
+                                   -1, cv2.LINE_AA)
+
+    def _dys_rain(self, img, G, T, i, t, cam, E2, lflash) -> None:
+        """Acid rain: two depths of streaks, denser and more slanted with the
+        energy. Each drop's position is a pure function of t."""
+        W, H = self.W, self.H
+        P = G["P"]
+        slant = 0.10 + 0.32 * E2
+        dens = 0.30 + 0.70 * E2
+        for li, (R, res, gain, thk) in enumerate(((G["rain"][0], 0.5, 0.40, 1),
+                                                  (G["rain"][1], 1.0, 0.40,
+                                                   max(1, H // 700)))):
+            lw, lh = int(W * res), int(H * res)
+            nd = int(len(R) * dens)
+            Rn = R[:nd]
+            yv = ((Rn[:, 1] + Rn[:, 2] * t) % 1.25 - 0.12) * lh
+            ln_ = Rn[:, 3] * lh * (1.0 + 0.6 * E2)
+            xv = ((Rn[:, 0] * 1.3 + (cam * (0.3 + 0.7 * li)) * H / W)
+                  % 1.3 - 0.15) * lw + slant * yv
+            x2 = xv - slant * ln_
+            y2 = yv - ln_
+            lay = np.zeros((lh, lw), np.float32)
+            segs = np.stack([np.stack([xv, yv], 1), np.stack([x2, y2], 1)],
+                            1).round().astype(np.int32)
+            for lvl in (1.0, 0.6):
+                sel = (Rn[:, 4] > 0.65) if lvl == 1.0 else (Rn[:, 4] <= 0.65)
+                if sel.any():
+                    cv2.polylines(lay, list(segs[sel]), False, lvl, thk,
+                                  cv2.LINE_AA)
+            if li == 1:
+                lay = cv2.GaussianBlur(lay, (0, 0), 0.8)
+            if res != 1.0:
+                lay = cv2.resize(lay, (W, H), interpolation=cv2.INTER_LINEAR)
+            amt = gain * (0.35 + 0.35 * E2 + 2.0 * lflash)
+            img += lay[..., None] * (np.asarray(P["rain"], np.float32) * amt)
+
+    def _dys_billboard(self, img, i, t, a, T, G, P, kenv, black, lz) -> None:
+        """The giant hologram. Different element, different reaction:
+        kick = scale punch · snare = glitch tear + RGB split · hi-hat sparkle
+        = flicker · sub-bass = colour heat · drop = "HIT A BUMP" takeover ·
+        sung "bump" = a BUMP flash + punch-in · power cut = off."""
+        if black:
+            return
+        HB = G["holo"]
+        BH, BW = HB["BH"], HB["BW"]
+        W, H = self.W, self.H
+        f32 = np.float32
+        hot = bool(T["hot"][i])
+        hotf = float(T["hot_f"][i])
+        big = bool(T["big"][i])
+        bi = int(T["bi"][i])
+        pre = float(T["pre"][i])
+        heat = float(T["heat"][i])
+        spark = float(T["spark"][i])
+        pmax = self._dys_pmax
+        punch = max(0.0, (lz - 1.0) / pmax) if pmax > 0 else 0.0
+        sb = int(T["sec_bar"][i])
+        ea = int(T["entry_age"][i])
+        # ---- content
+        if punch > 0.12:
+            mode = "bump"
+        elif hot:
+            if big:                      # the takeover opens on the title
+                mode = "title" if (sb < 1 or (bi // 2) % 2 == 0) else "logo"
+            else:
+                mode = "title" if (sb < 2 or sb % 2 == 0) else "logo"
+        elif pre > 0.55 and (bi % 2 == 1):
+            mode = "warn"
+        else:
+            mode = "logo"
+        plume = None
+        if mode == "logo" and HB["line"] is not None:
+            lum = HB["line"] * 1.0 + HB["fill"] * 0.38 + HB["sub"] * 0.9
+            plume = HB["red"]
+        elif mode == "logo":
+            lum = HB["title"].copy()
+        else:
+            # big solid letters: at full gain the hot yellow + scanline roll
+            # + glow + bloom blew them out and the counters filled in
+            lum = HB[mode] * 0.70
+        lum = lum + HB["frame"]
+        # tickers: top scrolls left, bottom scrolls right
+        for key, y0, spd in (("ticker", HB["y_top"], 90.0),
+                             ("ticker2", HB["y_bot"], -60.0)):
+            tk = HB[key]
+            th_, tw_ = tk.shape
+            span = max(1, tw_ // 2)
+            off = int(t * spd * (1.0 + 1.5 * hotf)) % span
+            xs = (off + np.arange(int(BW * 0.92))) % tw_
+            ya = y0 - th_ - max(2, BH // 80) if key == "ticker" else \
+                y0 + max(2, BH // 80)
+            ya = max(0, min(BH - th_, ya))
+            xa = int(BW * 0.04)
+            lum[ya:ya + th_, xa:xa + len(xs)] += tk[:, xs] * 0.75
+        # ---- colour: the sub-bass heats it from cold to hot
+        hh = 0.08 + 0.45 * heat + 0.45 * heat * hotf
+        col = self._lerp_cols(P["holo"], hh)
+        if mode in ("warn",):
+            col = np.asarray(P["alarm"], f32)
+        rgb = lum[..., None] * col
+        if plume is not None:
+            rgb += plume[..., None] * np.asarray((255.0, 30.0, 35.0), f32)
+        # ---- scanlines + a rolling refresh bar
+        rows = HB["rows"]
+        scan = 0.66 + 0.34 * ((rows % 3) != 0)
+        roll = 1.0 + 0.30 * np.exp(-((rows / BH - ((t * 0.37) % 1.3 - 0.15))
+                                     * 8.0) ** 2)
+        rgb *= (scan * roll)[..., None].astype(f32)
+        # ---- hi-hat sparkle = flicker; calm = an occasional dying blink
+        fl = 1.0
+        if spark > 0.05:
+            fl -= 0.45 * spark * float(_hash01(i, 3.0))
+        if not hot and _hash01(i // 2, 5.0) < 0.025:
+            fl *= 0.35
+        if ea < 8:                                   # flicker back ON
+            fl *= (0.2, 1.0, 0.3, 1.0, 0.6, 1.0, 0.8, 1.0)[ea]
+        rgb *= fl
+        # ---- snare = GLITCH: slices tear sideways, RGB splits, a band inverts
+        sage = int(T["sage"][i])
+        # The tear lasts 2 frames per snare and the split fades over 4: with
+        # 4-frame tears 28% of all drop frames were torn and the title stopped
+        # reading (measured on Hit a Bump); 2 frames = 14%.
+        if sage < 4:
+            rng = random.Random(int(T["sidx"][i]) * 131 + 7)
+            amp = (0.04 + 0.10 * hotf) * BW
+            n_sl = rng.randint(2, 5 if hot else 3)
+            for _ in range(n_sl if sage < 2 else 0):
+                y0 = rng.randrange(0, BH - 4)
+                hh_ = rng.randint(max(2, BH // 40), max(3, BH // 7))
+                sh = int(rng.uniform(-amp, amp))
+                rgb[y0:y0 + hh_] = np.roll(rgb[y0:y0 + hh_], sh, axis=1)
+            if hot and sage < 2 and rng.random() < 0.6:
+                y0 = rng.randrange(0, BH - 4)
+                hh_ = rng.randint(BH // 20, BH // 6)
+                band = rgb[y0:y0 + hh_]
+                rgb[y0:y0 + hh_] = np.clip(col * 0.55 - band, 0, None)
+            so = int((4 + 12 * hotf) * (1.0 - sage / 4.0) * BW / 700)
+        else:
+            so = int((2 * hotf) * BW / 700)
+        if so > 0:
+            rgb[..., 0] = np.roll(rgb[..., 0], so, axis=1)
+            rgb[..., 2] = np.roll(rgb[..., 2], -so, axis=1)
+        # ---- size: calm smaller, drops full; kick punch; drop-entry slam;
+        # sung "bump" punch
+        s = 0.86 + 0.14 * hotf
+        s *= 1.0 + (0.035 + 0.06 * hotf) * kenv
+        if ea < 30:
+            # DROP ENTRY = TAKEOVER: the hologram slams up to fill the frame,
+            # then eases back to its post over about a beat and a half
+            u_ = ea / 30.0
+            s *= 1.0 + (0.85 if big else 0.55) * (1.0 - u_) ** 3
+        s *= 1.0 + 0.16 * punch
+        cx, cy = W / 2.0, H * 0.42
+        hw, hh2 = BW * s / 2.0, BH * s / 2.0
+        yaw = 0.05 * np.sin(t * 0.21) + 0.02 * np.sin(t * 0.53)
+        dst = np.float32([[cx - hw, cy - hh2 * (1 + yaw)],
+                          [cx + hw, cy - hh2 * (1 - yaw)],
+                          [cx + hw, cy + hh2 * (1 - yaw)],
+                          [cx - hw, cy + hh2 * (1 + yaw)]])
+        pad = int(H * 0.02)
+        x0 = int(np.floor(dst[:, 0].min())) - pad
+        x1 = int(np.ceil(dst[:, 0].max())) + pad
+        y0 = int(np.floor(dst[:, 1].min())) - pad
+        y1 = int(np.ceil(dst[:, 1].max())) + pad
+        bx0, by0, bx1, by1 = max(0, x0), max(0, y0), min(W, x1), min(H, y1)
+        if bx1 <= bx0 or by1 <= by0:
+            return
+        bw, bh = x1 - x0, y1 - y0
+        src = np.float32([[0, 0], [BW, 0], [BW, BH], [0, BH]])
+        M = cv2.getPerspectiveTransform(src, dst - np.float32([x0, y0]))
+        wt = cv2.warpPerspective(rgb.astype(f32), M, (bw, bh),
+                                 flags=cv2.INTER_LINEAR,
+                                 borderMode=cv2.BORDER_CONSTANT)
+        glass = cv2.warpPerspective(np.ones((BH, BW), f32), M, (bw, bh),
+                                    flags=cv2.INTER_LINEAR,
+                                    borderMode=cv2.BORDER_CONSTANT)
+        sl = (slice(by0 - y0, by1 - y0), slice(bx0 - x0, bx1 - x0))
+        reg = img[by0:by1, bx0:bx1]
+        # dark tinted glass behind the light, so the city never fights it
+        reg *= (1.0 - (0.80 + 0.10 * hotf) * glass[sl])[..., None]
+        reg += glass[sl][..., None] * (col * (0.05 + 0.04 * hotf))
+        op = 0.95 * (0.85 + 0.15 * hotf)
+        reg += wt[sl] * op
+        # hologram glow (quarter res) + the projector cone from below
+        q = cv2.resize(wt, (max(1, bw // 4), max(1, bh // 4)),
+                       interpolation=cv2.INTER_AREA)
+        q = cv2.GaussianBlur(q, (0, 0), 2.5 + 1.5 * hotf)
+        gl = cv2.resize(q, (bw, bh), interpolation=cv2.INTER_LINEAR)
+        reg += gl[sl] * (0.40 + 0.25 * kenv)
+        # the hologram lights the smog around it: a wide, faint halo
+        q2 = cv2.resize(q, (max(1, bw // 16), max(1, bh // 16)),
+                        interpolation=cv2.INTER_AREA)
+        hx0, hy0 = max(0, x0 - bw // 2), max(0, y0 - bh // 2)
+        hx1, hy1 = min(W, x1 + bw // 2), min(H, y1 + bh // 2)
+        big_ = np.zeros(((hy1 - hy0 + 15) // 16 + 1, (hx1 - hx0 + 15) // 16 + 1,
+                         3), f32)
+        oy, ox_ = (y0 - hy0) // 16, (x0 - hx0) // 16
+        hh_, ww_ = min(q2.shape[0], big_.shape[0] - oy), \
+            min(q2.shape[1], big_.shape[1] - ox_)
+        big_[oy:oy + hh_, ox_:ox_ + ww_] = q2[:hh_, :ww_]
+        big_ = cv2.GaussianBlur(big_, (0, 0), 3.0)
+        halo = cv2.resize(big_, (hx1 - hx0, hy1 - hy0),
+                          interpolation=cv2.INTER_LINEAR)
+        img[hy0:hy1, hx0:hx1] += halo * (0.9 + 0.6 * hotf)
+        qh, qw = G["qh"], G["qw"]
+        cone = np.zeros((qh, qw), f32)
+        pts = np.array([[qw / 2.0, qh * 1.05],
+                        [dst[3, 0] / 4.0, dst[3, 1] / 4.0],
+                        [dst[2, 0] / 4.0, dst[2, 1] / 4.0]], np.float32)
+        cv2.fillPoly(cone, [np.round(pts).astype(np.int32)], 1.0, cv2.LINE_AA)
+        cone = cv2.GaussianBlur(cone, (0, 0), 3.0)
+        cone *= np.linspace(0.3, 1.0, qh, dtype=f32)[:, None]
+        img += cv2.resize(cone, (W, H), interpolation=cv2.INTER_LINEAR
+                          )[..., None] * (col * (0.07 + 0.05 * hotf) * fl)
+
+    def _dys_fx(self, img: np.ndarray, i: int, a: Analysis) -> np.ndarray:
+        """Post-FX for the megacity: lightning flash, strobe on the biggest
+        hits only, chromatic aberration in drops, camera shake on drop hits,
+        a push-in on sung "bump"s."""
+        T = self._dys_tl(a)
+        P = self._dys_geo()["P"]
+        W, H = self.W, self.H
+        hotf = float(T["hot_f"][i])
+        kage = int(T["kage"][i])
+        kenv = 0.72 ** kage if kage < 40 else 0.0
+        if T["black"][i]:
+            img *= 0.6
+        la = int(T["lage"][i])
+        if la < 10:
+            lstr = float(T["strike"][int(T["lidx"][i])])
+            fl = (1.0, 0.35, 0.95, 0.55, 0.30, 0.18, 0.10, 0.06, 0.03, 0.01)[la]
+            lift = 40.0 * lstr * fl * (1.0 if self.style.strobe else 0.35)
+            img += np.asarray(P["bolt"], np.float32) * (lift / 255.0)
+        sa = int(T["strobe_age"][i])
+        if self.style.strobe and sa < 5:
+            img += 125.0 * (0.50 ** sa)
+        if hotf > 0.05:
+            off = int(round((1.0 + 3.0 * kenv) * hotf * W / 1920))
+            if off > 0:
+                img[..., 0] = np.roll(img[..., 0], off, axis=1)
+                img[..., 2] = np.roll(img[..., 2], -off, axis=1)
+        z = 1.0
+        if self.lyric_zoom is not None and self._dys_pmax > 0:
+            z += 0.05 * (float(self.lyric_zoom[i]) - 1.0) / self._dys_pmax
+        z += 0.012 * kenv * hotf
+        dx = dy = 0.0
+        sh_a = int(T["sh_age"][i])
+        if sh_a < 14:
+            amp = float(T["shake"][int(T["sh_idx"][i])]) * 0.016 * H \
+                * (0.74 ** sh_a)
+            th = 6.2832 * float(_hash01(i, 13.0))
+            dx, dy = amp * np.cos(th), amp * np.sin(th)
+            z += 0.02 * float(T["shake"][int(T["sh_idx"][i])]) * (0.7 ** sh_a)
+        if z > 1.0005 or abs(dx) + abs(dy) > 0.3:
+            M = np.array([[z, 0, (1 - z) * W / 2 + dx],
+                          [0, z, (1 - z) * H / 2 + dy]], np.float32)
+            img = cv2.warpAffine(img, M, (W, H), flags=cv2.INTER_LINEAR,
+                                 borderMode=cv2.BORDER_REFLECT)
         return img
 
     def _logo(self, img: np.ndarray, i: int, a: Analysis) -> None:
@@ -3958,6 +5305,10 @@ class Renderer:
             self._flash *= 0.62
             self._zoom *= 0.80
             return self._stage_fx(img, i, a)
+        if self._viz_at(i, a) == "megacity":
+            self._flash *= 0.62
+            self._zoom *= 0.80
+            return self._dys_fx(img, i, a)
         # --readable turns the tearing DOWN, not off: the drop should still
         # feel violent, it just must not eat the words (Zeke 2026-08-28).
         # Gating on `i // 6` instead of `i // 2` also makes each tear last
@@ -4059,10 +5410,12 @@ class Renderer:
     def frame(self, i: int, t: float, a: Analysis) -> np.ndarray:
         img = self._bg(i, t, a)
         self._viz(img, i, a)
-        stage = self._viz_at(i, a) == "ledwall"    # the cube carries the logo
+        v_now = self._viz_at(i, a)
+        stage = v_now == "ledwall"                 # the cube carries the logo
+        city = v_now == "megacity"                 # ...the hologram does here
         if self.deck:
             self._deck(img, i, a)
-        elif not self._shapes and not stage:
+        elif not self._shapes and not stage and not city:
             self._logo(img, i, a)
         if self._shapes:
             self._viz_shape(img, i, a)
@@ -4718,14 +6071,19 @@ def main() -> int:
                     help="colour family for --viz ledwall / --look stage: "
                          "'acid' (toxic green, magenta, cyan, UV) or 'inferno' "
                          "(red, orange, amber, white-hot)")
+    ap.add_argument("--dystopia-palette", default="toxic",
+                    choices=sorted(DYSTOPIA_PALETTES),
+                    help="colour family for --viz megacity / --look dystopia: "
+                         "'toxic' (sick green, acid yellow, blood red, cold "
+                         "cyan on near-black) or 'ember' (orange/red smog)")
     ap.add_argument("--no-lyrics", action="store_true",
                     help="draw no lyrics. Whisper still runs if --punch-words "
                          "or --lyric-models need the sung words; otherwise it "
-                         "is skipped entirely (--look stage sets this)")
+                         "is skipped entirely (--look stage / dystopia set this)")
     ap.add_argument("--viz", default="",
                     help="override the style's centerpiece visualization: "
                          "radial|bars_center|bars|wave|tunnel|supernova|kaleido|symbiote|"
-                         "ledwall"
+                         "ledwall|megacity"
                          ". COMMA-LIST to ROTATE through several on the beat "
                          "grid (see --viz-every), e.g. "
                          "'radial,tunnel,kaleido,bars_center'")
@@ -4976,7 +6334,8 @@ def main() -> int:
                  bg_mirror=args.bg_mirror, jaw=args.jaw,
                  bg_twist=args.bg_twist,
                  lasers=args.lasers, far=args.far, bg_scale=args.bg_scale,
-                 stage_palette=args.stage_palette)
+                 stage_palette=args.stage_palette,
+                 dystopia_palette=args.dystopia_palette)
     if args.far != 1.0:
         print(f"[lyric_viz] standing framing: {args.far:.2f}x "
               f"(centrepiece sits back)")
