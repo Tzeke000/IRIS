@@ -716,6 +716,15 @@ def _cam(T, i, k, f, W, H):
     return z, ox, oy
 
 
+def _fg_lift(zf, oyf, foc, H):
+    """The push-in zooms the graveyard about the house, which drives its
+    bottom edge (and the lanterns on it) down out of frame. Lift the layer by
+    90 % of that drop: the lanterns stay put while the stones and the hill
+    still read the push. The plate's bottom row stays at/below the frame
+    bottom ((1 - 0.9) * (zf - 1) * (H - foc) >= 0), so no gap opens."""
+    return oyf - 0.9 * (zf - 1.0) * (H - foc[1])
+
+
 def _rows(M, h, H):
     top = M[1, 2]
     bot = M[1, 1] * h + M[1, 2]
@@ -1204,17 +1213,20 @@ def draw(R, img, i, a, lv) -> None:
     _tree(img, G, T, i, t, P, wind, wph, ea, ztr, oxt, oyt, foc, moon_c, moon_on,
           lflash, W, H)
     # ---------------- GRAVEYARD LAYER (stones + jack-o'-lanterns)
-    zf, oxf, oyf = _cam(T, i, K_FG, foc, W, H)
-    oyf -= 0.6 * (zf - 1.0) * (H - foc[1])   # keep the lanterns' faces in frame
+    # the graveyard zooms about the frame's centre line (not the house), so
+    # the outer lanterns spread symmetrically instead of off the right edge
+    ffoc = (W / 2.0, foc[1])
+    zf, oxf, oyf = _cam(T, i, K_FG, ffoc, W, H)
+    oyf = _fg_lift(zf, oyf, ffoc, H)
     skin = _c(P["skin"]) / 255.0
     stem = _c(P["stem"]) / 255.0
     stone = _c(P["stone"]) / 255.0
     Lk = lightc * 255.0 * 1.10 * kI
     Lf = _c(P["fill"]) * 0.95 * (0.5 + 0.5 * moon_on) * (1.0 - 0.7 * min(1.0, lflash))
-    Cf = np.stack([Lk * stone, Lk * skin * 1.25, Lk * stem,
-                   Lf * stone, Lf * skin * 1.4, Lf * stem,
+    Cf = np.stack([Lk * stone, Lk * skin * 0.85, Lk * stem,
+                   Lf * stone, Lf * skin * 1.0, Lf * stem,
                    _c(P["rim"]) * 0.30 * rimI + moon_c * 0.12 * rimI]).astype(f32)
-    M = _plate_M(zf, oxf, oyf, foc, s0, cpl, cfr, G["f_y0"])
+    M = _plate_M(zf, oxf, oyf, ffoc, s0, cpl, cfr, G["f_y0"])
     _layer(img, G["f_stack"], M,
            [np.ascontiguousarray(Cf[0:4].T),
             np.ascontiguousarray(np.vstack([Cf[4:7], np.zeros((1, 3), f32)]).T)])
@@ -1224,7 +1236,7 @@ def draw(R, img, i, a, lv) -> None:
         lu = np.zeros((pb[1] - pb[0], pb[3] - pb[2]), f32)
     for k_, pm in enumerate(G["pumps"]):
         sd = pm["seed"]
-        g = (0.48 + 0.62 * heat) * (0.84 + 0.32 * _vn(t * 7.0 + sd, sd, lv))
+        g = (0.62 + 0.50 * heat) * (0.84 + 0.32 * _vn(t * 7.0 + sd, sd, lv))
         g += spark * 0.45 * (float(lv._hash01(i, sd)) - 0.35)
         g += 0.25 * kenv * hotf + 0.2 * bigf + 0.4 * sp
         g = max(0.0, g) * power
