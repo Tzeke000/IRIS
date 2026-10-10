@@ -300,7 +300,8 @@ NBARS = 40
 # every centrepiece visualization Renderer._viz can dispatch to. Single source
 # of truth so --viz validation can't drift from what the renderer supports.
 VIZ_MODES = ("radial", "bars_center", "bars", "wave", "tunnel", "supernova",
-             "kaleido", "ncs_ring", "tn_blob", "mcat_bars", "symbiote")
+             "kaleido", "ncs_ring", "tn_blob", "mcat_bars", "symbiote",
+             "ledwall")
 
 
 def _ema(x: np.ndarray, tau_s: float, fps: int) -> np.ndarray:
@@ -642,6 +643,21 @@ STYLES: dict[str, Style] = {
                         shake=0.0, zoom_punch=0.05, scramble=False,
                         breakdown_desat=False, flicker=0.0,
                         text_col=(250, 245, 250)),
+    # STAGE (2026-10-09) — the LED-wall show (viz=ledwall, see section 3c).
+    # The stage owns its own FX: snare-gated tears instead of per-frame drop
+    # glitch, no camera shake or zoom punch (a real LED wall does not move),
+    # strobe only on the big hits. `strobe` here is just the master switch
+    # that --no-strobe turns off.
+    "stage": Style("stage",
+                   palette=[(120, 255, 0), (255, 0, 170), (0, 200, 255),
+                            (255, 220, 0)],
+                   bg="flat", viz="ledwall", particles=False,
+                   font_title="Anton-Regular.ttf",
+                   font_lyrics="ArchivoBlack-Regular.ttf", caps=True,
+                   tracking=0.04, logo_pos="center",
+                   strobe=True, glitch=False, rgb_split=False,
+                   shake=0.0, zoom_punch=0.0, scramble=False,
+                   breakdown_desat=False, flicker=0.0),
     # deep house — soft horizontal WAVEFORM, thin minimal letterspaced
     # lowercase (Poppins Light), dark neon plasma, NO strobes.
     "deephouse": Style("deephouse",
@@ -706,11 +722,265 @@ LOOKS: dict[str, dict] = {
     "hologram": dict(gpu3d="solid_wire", bg="flow", bloom=0.50),
     # lyrics-first: metal centrepiece, nothing else moving behind the words.
     "void": dict(gpu3d="metal", bg="flat", bloom=0.30, readable=True),
+    # big-room LED show (2026-10-09): pixel-mapped LED wall + rotating LED
+    # cube carrying the logo, no lyrics. 16:9 for a stage screen.
+    "stage": dict(style="stage", viz="ledwall", bg="flat", bloom=0.32,
+                  no_lyrics=True),
 }
 
 
 BG_MODES = ("flow", "starfield", "plasma", "flat", "metal", "tunnel",
              "warp")
+
+# ---------------------------------------------------------------------------
+# 3c. STAGE — the LED-wall show mode (Zeke 2026-10-09, "Hit a Bump" remake:
+#     "rave dubstep visuals ... that can go on a huge stage")
+# ---------------------------------------------------------------------------
+# The STYLE of a big-room LED show, not anybody's show: a pixel-mapped wall of
+# LED panels that slams in blocks, checkers, chases and sweeps on the beat,
+# and a big rotating LED cube in the middle carrying Tzeke000's own logo.
+# No lyrics (the wall is the show), 16:9, legible from the back of a field.
+#
+# ⚠ STATELESS BY CONSTRUCTION. Everything the stage draws is a pure function
+# of (frame index, the whole-song analysis): the cube's spin is a precomputed
+# cumsum, kick/snare decays are "frames since the last onset", section colours
+# come from a segmentation of the whole song. So a chunk that starts at frame
+# A needs nothing simulated for the stage and matches a single render by
+# construction — the chunk-parallel driver's equivalence holds without any
+# new entries in Renderer.simulate / state_digest. Keep it that way: if a
+# future stage feature needs to integrate something, precompute it HERE.
+
+# Per-section colour pairs (A = primary, B = secondary). Calm sections cycle
+# through "calm", drops through "hot", and the song's FINAL long drop gets the
+# "big" list, rotating one colour per bar.
+STAGE_PALETTES: dict[str, dict] = {
+    # neon dubstep: toxic green / magenta / cyan / UV
+    "acid": {
+        "calm": [((0, 70, 255), (0, 200, 255)),
+                 ((120, 30, 255), (0, 150, 255))],
+        "hot": [((120, 255, 0), (255, 0, 170)),
+                ((0, 255, 200), (255, 30, 80)),
+                ((255, 0, 210), (0, 190, 255)),
+                ((255, 220, 0), (160, 0, 255))],
+        "big": [(255, 0, 170), (120, 255, 0), (0, 200, 255), (255, 220, 0)],
+    },
+    # fire: red / orange / amber, cold-white peaks
+    "inferno": {
+        "calm": [((150, 0, 40), (255, 70, 0)),
+                 ((100, 0, 130), (255, 0, 70))],
+        "hot": [((255, 40, 0), (255, 180, 0)),
+                ((255, 0, 60), (255, 130, 0)),
+                ((255, 90, 0), (255, 0, 140)),
+                ((255, 200, 40), (255, 20, 20))],
+        "big": [(255, 30, 0), (255, 170, 0), (255, 0, 90), (255, 240, 210)],
+    },
+}
+
+
+def _gauss_smooth(x: np.ndarray, fps: int, sec: float) -> np.ndarray:
+    """Centred (non-causal) gaussian smoothing — fine here, the whole song is
+    known up front, and centring keeps section edges where they really are."""
+    k = max(1, int(3 * sec * fps))
+    t = np.arange(-k, k + 1, dtype=np.float64)
+    w = np.exp(-0.5 * (t / max(1e-6, sec * fps)) ** 2)
+    w /= w.sum()
+    xp = np.pad(np.asarray(x, np.float64), (k, k), mode="edge")
+    return np.convolve(xp, w, mode="valid").astype(np.float32)
+
+
+def _age_since(flags: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(frames since the last True, index of that True); 10**6 / -1 before
+    the first one."""
+    n = len(flags)
+    age = np.full(n, 10 ** 6, np.int64)
+    idx = np.full(n, -1, np.int64)
+    last = -1
+    for i in range(n):
+        if flags[i]:
+            last = i
+        if last >= 0:
+            age[i] = i - last
+            idx[i] = last
+    return age, idx
+
+
+def stage_timeline(a: Analysis, fps: int, palette: str = "acid",
+                   big_min_s: float = 6.0) -> dict:
+    """Everything the stage needs per frame, from the analysis alone.
+
+    INTENSITY I (0..1) = smoothed loudness + bass. Sections = hysteresis on I
+    (hot above 0.55, back to calm below 0.32), so a drop is one block even
+    where the bass briefly dips. Each drop ENTRY is snapped to the strongest
+    kick within ±0.6 s of the threshold crossing, because the smoothing pulls
+    the crossing early and the slam has to land WITH the drop, not before it.
+    """
+    n = len(a.rms)
+    I = np.clip((0.6 * _gauss_smooth(a.rms, fps, 0.5)
+                 + 0.4 * _gauss_smooth(a.bass, fps, 0.5) - 0.25) / 0.55,
+                0.0, 1.0).astype(np.float32)
+    hot = np.zeros(n, bool)
+    on = False
+    for i in range(n):
+        if not on and I[i] > 0.55:
+            on = True
+        elif on and I[i] < 0.32:
+            on = False
+        hot[i] = on
+    # snap every drop entry to the kick that actually starts it
+    bass = np.asarray(a.bass, np.float32)
+    win = int(round(0.6 * fps))
+    for s0 in (np.flatnonzero(np.diff(hot.astype(np.int8)) == 1) + 1):
+        lo, hi = max(1, s0 - win), min(n - 3, s0 + win)
+        cand = [f for f in range(lo, hi) if a.kick[f]]
+        if not cand:
+            continue
+        rise = [float(bass[min(n - 1, f + 3)] - bass[max(0, f - 3)])
+                for f in cand]
+        f = cand[int(np.argmax(rise))]
+        if f < s0:
+            hot[f:s0] = True
+        else:
+            hot[s0:f] = False
+    cuts = list(np.flatnonzero(np.diff(hot.astype(np.int8))) + 1)
+    bounds = [0] + [int(c) for c in cuts] + [n]
+    segs = [(bounds[k], bounds[k + 1], bool(hot[bounds[k]]))
+            for k in range(len(bounds) - 1) if bounds[k + 1] > bounds[k]]
+    # the BIG drop = the last drop long enough to be one (the finale)
+    big = np.zeros(n, bool)
+    longs = [s for s in segs if s[2] and (s[1] - s[0]) >= big_min_s * fps]
+    if longs:
+        big[longs[-1][0]:longs[-1][1]] = True
+    beat_f = fps * 60.0 / max(60.0, float(a.bpm) or 120.0)   # frames per beat
+    # A GAP-FREE BEAT GRID. The tracker drops beats where the drums thin out
+    # and gives up in a fade (Hit a Bump: 0 beats in 114-117 s while the bass
+    # is still pumping) — the wall then FROZE on one pattern and colour. Fill
+    # any gap longer than 1.6 beats, and run the grid on to both ends, at the
+    # median tracked period.
+    bf = np.flatnonzero(np.asarray(a.beat, bool))
+    per = float(np.median(np.diff(bf))) if len(bf) >= 4 else beat_f
+    if len(bf) >= 2:
+        grid = [int(bf[0])]
+        for b in bf[1:]:
+            gap = int(b) - grid[-1]
+            k = int(round(gap / per))
+            if gap > 1.6 * per and k > 1:
+                grid += [int(round(grid[-1] + gap * j / k)) for j in range(1, k)]
+            grid.append(int(b))
+        f = grid[-1] + per
+        while f < n:
+            grid.append(int(round(f)))
+            f += per
+        f = grid[0] - per
+        while f >= 0:
+            grid.insert(0, int(round(f)))
+            f -= per
+    else:
+        grid = [int(round(x)) for x in np.arange(0.0, n, per)]
+    grid = np.unique(np.clip(np.asarray(grid, np.int64), 0, n - 1))
+    gbeat = np.zeros(n, bool)
+    gbeat[grid] = True
+    beat_i = np.maximum(0, np.cumsum(gbeat) - 1).astype(np.int64)
+    ph = np.zeros(n, np.float32)
+    nxt = np.append(grid[1:], n)
+    for b, e in zip(grid, nxt):
+        if e > b:
+            ph[b:e] = np.linspace(0.0, 1.0, e - b, endpoint=False)
+    bar = beat_i // 4
+    bar_start = np.zeros(n, np.int64)
+    first: dict = {}
+    for i in range(n):
+        bar_start[i] = first.setdefault(int(bar[i]), i)
+    tier = np.where(hot, 2, np.where(I[bar_start] > 0.25, 1, 0)).astype(np.int8)
+    # (the 2-bar pre-roll into each drop is forced to BUILD below)
+    # colours per section
+    P = STAGE_PALETTES[palette]
+    A = np.zeros((n, 3), np.float32)
+    B = np.zeros((n, 3), np.float32)
+    seg_id = np.zeros(n, np.int32)
+    nh = nc = 0
+    for k, (s0, s1, h) in enumerate(segs):
+        seg_id[s0:s1] = k
+        if h and big[s0]:
+            bl = P["big"]
+            j = bar[s0:s1] % len(bl)
+            A[s0:s1] = np.asarray(bl, np.float32)[j]
+            B[s0:s1] = np.asarray(bl, np.float32)[(j + 1) % len(bl)]
+        elif h:
+            pa, pb = P["hot"][nh % len(P["hot"])]
+            nh += 1
+            A[s0:s1], B[s0:s1] = pa, pb
+        else:
+            pa, pb = P["calm"][nc % len(P["calm"])]
+            nc += 1
+            A[s0:s1], B[s0:s1] = pa, pb
+    # drop entries: the slam, the 2-bar pre-roll, the half-beat blackout
+    entry_age = np.full(n, 10 ** 6, np.int64)
+    pre = np.zeros(n, np.float32)
+    black = np.zeros(n, bool)
+    entries = []
+    for s0, s1, h in segs:
+        if not h or s0 == 0:
+            continue
+        entries.append(s0)
+        entry_age[s0:s1] = np.arange(s1 - s0)
+        p0 = max(0, s0 - int(round(8 * beat_f)))
+        ramp = np.linspace(0.0, 1.0, s0 - p0, endpoint=False, dtype=np.float32)
+        calm = ~hot[p0:s0]
+        pre[p0:s0] = np.where(calm, np.maximum(pre[p0:s0], ramp), pre[p0:s0])
+        b0 = max(0, s0 - max(1, int(round(0.5 * beat_f))))
+        black[b0:s0] = ~hot[b0:s0]
+    tier[(pre > 0) & ~hot] = 1
+    # ANTICIPATION: across the pre-roll the wall's colours slide toward the
+    # drop's own, so the drop arrives in a colour the build already promised
+    for s0, s1, h in segs:
+        if not h or s0 == 0:
+            continue
+        p0 = max(0, s0 - int(round(8 * beat_f)))
+        w = pre[p0:s0, None] ** 1.5
+        A[p0:s0] = A[p0:s0] * (1 - w) + A[s0] * w
+        B[p0:s0] = B[p0:s0] * (1 - w) + B[s0] * w
+    kage, kidx = _age_since(np.asarray(a.kick, bool))
+    sage, sidx = _age_since(np.asarray(a.snare, bool))
+    # STROBES ONLY ON THE BIG HITS: every drop entry, plus at most one per bar
+    # on a heavy kick inside the big drop. Not every kick — then it stops
+    # meaning anything (and it is the photosensitivity budget).
+    strobe = np.zeros(n, bool)
+    for s0 in entries:
+        strobe[s0] = True
+    last = -10 ** 9
+    for f in np.flatnonzero(np.asarray(a.kick, bool) & big):
+        if strobe[max(0, f - 3):f + 1].any():
+            last = f
+            continue
+        if f - last >= 0.9 * 4 * beat_f and bass[f] > 0.6:
+            strobe[f] = True
+            last = f
+    strobe_age, _ = _age_since(strobe)
+    # CUBE SPIN, integrated up front: a slow drift that speeds with intensity,
+    # plus a quarter-turn SLAM on every bar downbeat in a drop (every second
+    # beat in the big one), eased out so it snaps then settles.
+    speed = (0.15 + 0.30 * I) / float(fps)
+    L = max(2, int(round(0.28 * fps)))
+    dE = np.diff(1.0 - (1.0 - np.linspace(0.0, 1.0, L + 1)) ** 3) * (np.pi / 2)
+    slam_at = gbeat & hot & np.where(big, beat_i % 2 == 0, beat_i % 4 == 0)
+    slam = np.zeros(n, np.float64)
+    for f in np.flatnonzero(slam_at):
+        seg = slam[f:f + L]
+        seg += dE[:len(seg)]
+    rot = np.cumsum(speed.astype(np.float64) + slam).astype(np.float64)
+    # THE ONE: every bar downbeat in a drop slams the whole wall to colour
+    one_age, _ = _age_since(gbeat & hot & (beat_i % 4 == 0))
+    print("[lyric_viz] stage timeline: "
+          + " | ".join(f"{s0 / fps:.1f}-{s1 / fps:.1f}s "
+                       + ("BIG" if h and big[s0] else ("drop" if h else "calm"))
+                       for s0, s1, h in segs)
+          + f"; {int(strobe.sum())} strobe hits")
+    return dict(I=I, hot=hot, big=big, tier=tier, A=A, B=B, bar=bar,
+                bar_start=bar_start, seg_id=seg_id, kage=kage, kidx=kidx,
+                sage=sage, sidx=sidx, entry_age=entry_age, pre=pre,
+                black=black, strobe_age=strobe_age, rot=rot, segs=segs,
+                bi=beat_i, ph=ph, one_age=one_age)
+
 
 # ---------------------------------------------------------------------------
 # LYRIC-DRIVEN MODELS
@@ -1143,6 +1413,9 @@ class Renderer:
     _shapes: "list | None" = None           # parsed shape list (set in __post_init__)
     _shape_last: int = -1                   # last slot index, for swap logging
     _symb: "dict | None" = None             # symbiote viz state (droplets, tendrils, plate)
+    stage_palette: str = "acid"             # viz=ledwall colour family (STAGE_PALETTES)
+    _stage_T: "dict | None" = None          # stage timeline: a CACHE of pure
+    _stage_G: "dict | None" = None          # per-frame arrays + geometry, not state
     # SIMULATE mode (2026-10-09, chunk-parallel renders). While True, frame()
     # advances every piece of frame-to-frame state EXACTLY as a drawn frame
     # would, and draws nothing. A chunk that starts at frame A first simulates
@@ -1670,6 +1943,15 @@ class Renderer:
             self._viz_last = slot
         return self.viz_deck[slot % len(self.viz_deck)]
 
+    def _viz_at(self, i: int, a: Analysis) -> str:
+        """_viz_now without its transition bookkeeping — safe to ask twice."""
+        if not self.viz_deck:
+            return self.style.viz
+        if len(self.viz_deck) == 1 or self.viz_every <= 0:
+            return self.viz_deck[0]
+        slot = int(a.beat_i[i]) // int(self.viz_every)
+        return self.viz_deck[slot % len(self.viz_deck)]
+
     def _viz(self, img: np.ndarray, i: int, a: Analysis) -> None:
         v = self._viz_now(i, a)
         if self._sim:
@@ -1706,6 +1988,8 @@ class Renderer:
             self._viz_mcat_bars(img, i, a)
         elif v == "symbiote":
             self._viz_symbiote(img, i, a)
+        elif v == "ledwall":
+            self._viz_ledwall(img, i, a)
         else:
             self._viz_bars_bottom(img, i, a)
         if self.style.particles:
@@ -2235,6 +2519,448 @@ class Renderer:
             xi, yi = int(x), int(y)
             if 1 <= xi < self.W - 1 and 1 <= yi < self.H - 1:
                 img[yi - 1:yi + 2, xi - 1:xi + 2] += col * life * 0.8
+
+    # -- STAGE: LED wall + LED cube (see section 3c; stateless by design) ----
+    _CUBE_FACES = (
+        # name, outward normal, corners TL TR BR BL as seen from outside
+        ("front", (0, 0, 1), ((-1, 1, 1), (1, 1, 1), (1, -1, 1), (-1, -1, 1))),
+        ("right", (1, 0, 0), ((1, 1, 1), (1, 1, -1), (1, -1, -1), (1, -1, 1))),
+        ("back", (0, 0, -1), ((1, 1, -1), (-1, 1, -1), (-1, -1, -1), (1, -1, -1))),
+        ("left", (-1, 0, 0), ((-1, 1, -1), (-1, 1, 1), (-1, -1, 1), (-1, -1, -1))),
+        ("top", (0, 1, 0), ((-1, 1, -1), (1, 1, -1), (1, 1, 1), (-1, 1, 1))),
+        ("bottom", (0, -1, 0), ((-1, -1, 1), (1, -1, 1), (1, -1, -1), (-1, -1, -1))),
+    )
+    STAGE_FACE_CELLS = 40      # LED cells across one cube face
+    STAGE_OFF = (11.0, 11.0, 17.0)   # an unlit LED still shows: the grid texture
+
+    @staticmethod
+    def _led_dot(c: int) -> np.ndarray:
+        """One LED cell, c x c: a rounded square with a dark gap round it and
+        a slightly hotter centre. Tiled, this IS the pixel-grid texture."""
+        y, x = (np.mgrid[0:c, 0:c].astype(np.float32) + 0.5) / c * 2.0 - 1.0
+        r = (np.abs(x) ** 4 + np.abs(y) ** 4) ** 0.25
+        m = np.clip((0.80 - r) / 0.20, 0.0, 1.0)
+        return (m * (0.82 + 0.18 * np.exp(-(x * x + y * y) * 1.5))
+                ).astype(np.float32)
+
+    def _stage_tl(self, a: Analysis) -> dict:
+        if self._stage_T is None:
+            self._stage_T = stage_timeline(a, self.fps, self.stage_palette)
+        return self._stage_T
+
+    def _stage_geo(self) -> dict:
+        """Wall + cube geometry, built once per render size (a cache, not
+        frame-to-frame state)."""
+        if self._stage_G is not None:
+            return self._stage_G
+        from PIL import Image, ImageDraw
+        W, H = self.W, self.H
+        cs = max(3, int(round(min(W, H) / 54)))
+        GW, GH = -(-W // cs), -(-H // cs)
+        mask = np.tile(self._led_dot(cs), (GH, GW))[:H, :W][..., None]
+        gy, gx = np.mgrid[0:GH, 0:GW].astype(np.float32)
+        u, v = (gx + 0.5) / GW, (gy + 0.5) / GH
+        npx, npy = 8, 6                                  # LED panels
+        px, py = np.floor(u * npx), np.floor(v * npy)
+        dx, dy = (u - 0.5) * GW / GH, v - 0.5
+        cheb = np.maximum(np.abs(dx), np.abs(dy))
+        # dark pocket + backlight around the cube so it always reads first
+        Y, X = np.mgrid[0:H, 0:W].astype(np.float32)
+        rr = np.sqrt((X - W / 2) ** 2 + (Y - H * 0.5) ** 2) / H
+        pocket = np.exp(-(rr / 0.36) ** 2)[..., None]
+        halo = np.exp(-(rr / 0.55) ** 2)[..., None]
+        # face texture
+        FC = self.STAGE_FACE_CELLS
+        fp = max(3, int(round(0.40 * H / FC)))
+        TT = FC * fp
+        fmask = np.tile(self._led_dot(fp), (FC, FC))[..., None]
+        fy, fx = np.mgrid[0:FC, 0:FC].astype(np.float32)
+        fu, fv = (fx + 0.5) / FC, (fy + 0.5) / FC
+        fcheb = np.maximum(np.abs(fu - 0.5), np.abs(fv - 0.5))
+        border = (fcheb > 0.5 - 1.0 / FC).astype(np.float32)
+        # the logo, separated into LED layers (outline / fill / plume)
+        logo_l = None
+        if self.logo is not None:
+            rgb = np.asarray(self.logo.convert("RGB"), np.float32) / 255.0
+            al = np.asarray(self.logo.split()[-1], np.float32) / 255.0
+            lum = rgb.mean(axis=2)
+            sat = rgb.max(axis=2) - rgb.min(axis=2)
+            if al.std() < 0.02:          # baked white background
+                al = 1.0 - ((lum > 0.93) & (sat < 0.10)).astype(np.float32)
+            red = ((rgb[..., 0] > 0.5) & (rgb[..., 1] < 0.35)
+                   & (rgb[..., 2] < 0.40)).astype(np.float32) * al
+            dark = (lum < 0.35).astype(np.float32) * al * (1 - red)
+            fill = np.clip(al - red - dark, 0, 1)
+            inner = int(round(FC * 0.90))
+            lh, lw = rgb.shape[:2]
+            sc = inner / max(lh, lw)
+            ow, oh = max(1, int(round(lw * sc))), max(1, int(round(lh * sc)))
+            x0, y0 = (FC - ow) // 2, (FC - oh) // 2
+            logo_l = []
+            for lay in (dark, fill, red):
+                small = cv2.resize(lay, (ow, oh), interpolation=cv2.INTER_AREA)
+                full = np.zeros((FC, FC), np.float32)
+                full[y0:y0 + oh, x0:x0 + ow] = small
+                logo_l.append(np.clip((full - 0.30) / 0.40, 0, 1))
+        # title in LED block letters, split either side of the cube
+        title_m = None
+        if self.title:
+            title_m = np.zeros((GH, GW), np.float32)
+            words = self.title.upper().split()
+            half = max(1, (len(words) + 1) // 2)
+            parts = [" ".join(words[:half]), " ".join(words[half:])]
+            box_w, box_h = int(GW * 0.30), int(GH * 0.36)
+            for k, txt in enumerate(parts):
+                if not txt:
+                    continue
+                f = self.font(200, "Anton-Regular.ttf")
+                probe = ImageDraw.Draw(Image.new("L", (4, 4)))
+                bb = probe.textbbox((0, 0), txt, font=f)
+                im = Image.new("L", (bb[2] - bb[0] + 8, bb[3] - bb[1] + 8), 0)
+                ImageDraw.Draw(im).text((4 - bb[0], 4 - bb[1]), txt,
+                                        font=f, fill=255)
+                arr = np.asarray(im, np.float32) / 255.0
+                sc = min(box_w / arr.shape[1], box_h / arr.shape[0])
+                tw = max(1, int(arr.shape[1] * sc))
+                th = max(1, int(arr.shape[0] * sc))
+                cells = cv2.resize(arr, (tw, th), interpolation=cv2.INTER_AREA)
+                cells = (cells > 0.30).astype(np.float32)
+                cxk = int(GW * (0.17 if k == 0 else 0.83))
+                xa, ya = cxk - tw // 2, GH // 2 - th // 2
+                title_m[ya:ya + th, xa:xa + tw] = np.maximum(
+                    title_m[ya:ya + th, xa:xa + tw], cells)
+        self._stage_G = dict(cs=cs, GW=GW, GH=GH, mask=mask, u=u, v=v, px=px,
+                             py=py, npx=npx, npy=npy, cheb=cheb, gx=gx, gy=gy,
+                             pocket=pocket, halo=halo, FC=FC, fp=fp, TT=TT,
+                             fmask=fmask, fu=fu, fv=fv, fcheb=fcheb,
+                             border=border, logo=logo_l, title=title_m,
+                             ones=np.ones((TT, TT), np.float32))
+        return self._stage_G
+
+    def _viz_ledwall(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        """The whole stage frame: LED wall, beams, the cube on top."""
+        T = self._stage_tl(a)
+        G = self._stage_geo()
+        t = i / float(self.fps)
+        tier = int(T["tier"][i])
+        I = float(T["I"][i])
+        kage = int(T["kage"][i])
+        kenv = 0.72 ** kage if kage < 40 else 0.0
+        black = bool(T["black"][i])
+        cells = self._stage_wall(i, t, a, T, G, tier, I, kenv)
+        if black:
+            cells *= 0.0
+        up = cv2.resize(cells, (G["GW"] * G["cs"], G["GH"] * G["cs"]),
+                        interpolation=cv2.INTER_NEAREST)[:self.H, :self.W]
+        off = np.asarray(self.STAGE_OFF, np.float32)
+        np.multiply(up + off, G["mask"], out=img)
+        # the cube sits in a darker pocket of the wall, with a coloured haze
+        # behind it in the drops — it must read FIRST from the back of a field
+        k_pocket = 0.45 if tier < 2 else 0.62
+        img *= (1.0 - k_pocket * G["pocket"])
+        if tier >= 1 and not black:
+            img += G["halo"] * T["A"][i] * (0.05 + (0.22 * kenv + 0.08)
+                                            * (tier == 2))
+        if tier == 2 and not black:
+            self._stage_beams(img, i, t, a, T, I, kenv)
+        self._stage_cube(img, i, t, a, T, G, tier, I, kenv, black)
+
+    def _stage_wall(self, i, t, a, T, G, tier, I, kenv) -> np.ndarray:
+        """LED wall content at CELL resolution (GH x GW x 3, 0..255)."""
+        u, v, px, py, cheb = G["u"], G["v"], G["px"], G["py"], G["cheb"]
+        GH, GW, npx, npy = G["GH"], G["GW"], G["npx"], G["npy"]
+        ph = float(T["ph"][i])
+        bi = int(T["bi"][i])
+        bar = int(T["bar"][i])
+        seg = int(T["seg_id"][i])
+        A, B = T["A"][i], T["B"][i]
+        big = bool(T["big"][i])
+        bars = a.bars[i]
+        m = np.zeros((GH, GW), np.float32)
+        mix = np.zeros((GH, GW), np.float32)
+        title_b = 0.0
+        if tier == 2:
+            sel = (bi // 2) if big else bar
+            order = np.random.default_rng(1000 + seg).permutation(6)
+            pat = int(order[sel % 6])
+            if pat == 0:                       # panel checkerboard, beat flip
+                c = ((px + py + bi) % 2).astype(np.float32)
+                m = 0.12 + c * (0.55 + 0.45 * kenv)
+                mix = c
+            elif pat == 1:                     # alternating panel columns
+                c = ((px + bi) % 2 == 0).astype(np.float32)
+                band = np.exp(-((v - ph) * 5.0) ** 2)
+                m = c * (0.55 + 0.45 * band) + (1 - c) * 0.18 * band
+                mix = 1 - c
+            elif pat == 2:                     # diagonal sweeps, 2 per beat
+                w = u * 1.6 + v * 0.9 - ph * 2.0
+                m = (w - np.floor(w) < 0.24).astype(np.float32) + 0.08
+                mix = (np.floor(w) % 2).astype(np.float32)
+            elif pat == 3:                     # square rings out of the centre
+                w = cheb * 3.0 - ph
+                m = ((w - np.floor(w) < 0.32) * (1.0 - 0.45 * cheb)
+                     ).astype(np.float32) + 0.06
+                mix = (np.floor(w) % 2).astype(np.float32)
+            elif pat == 4:                     # spectrum, mirrored, blocky
+                k = np.clip((np.abs(u - 0.5) * 2 * (NBARS - 1)).astype(int),
+                            0, NBARS - 1)
+                h = bars[k] * 1.05
+                d = np.abs(v - 0.5) * 2
+                lit = (d < h).astype(np.float32)
+                m = lit * (0.55 + 0.45 * d / np.maximum(h, 1e-3)) + 0.05
+                mix = d
+            else:                              # random panels slam per kick
+                kidx = int(T["kidx"][i])
+                r = np.random.default_rng(5000 + max(0, kidx)).random(
+                    (npy, npx)).astype(np.float32)
+                sel_p = (r < 0.45).astype(np.float32)
+                c = sel_p[py.astype(int), px.astype(int)]
+                m = c * (0.30 + 0.70 * kenv) + 0.07
+                mix = (r[py.astype(int), px.astype(int)] < 0.2
+                       ).astype(np.float32)
+            m = m + 0.22 * kenv                 # the whole wall breathes on the kick
+            gain = 0.78 + 0.22 * I
+        elif tier == 1:
+            pre = float(T["pre"][i])
+            sub = 1 if pre < 0.5 else (2 if pre < 0.85 else 4)
+            step = int(np.floor((bi + ph) * sub))
+            k = step % npx
+            lit = ((px == k) | (px == (k + npx // 2) % npx)).astype(np.float32)
+            m = lit * 0.75 + 0.05
+            mix = lit
+            level = max(pre, 0.25 * I)
+            rise = ((1.0 - v) < level).astype(np.float32)
+            stripes = 0.5 + 0.5 * np.sin(v * GH * 0.9 - t * 18.0)
+            m = np.maximum(m, rise * (0.25 + 0.45 * stripes))
+            gain = 0.55 + 0.45 * pre
+            title_b = 0.65 if pre < 0.5 else 0.0
+        else:
+            pat = (bar // 2) % 3
+            prog = ((bi % 4) + ph) / 4.0
+            if pat == 0:                       # one line scanning the wall
+                m = np.exp(-((u - prog) * GW / 1.4) ** 2).astype(np.float32)
+                m += 0.10 * (0.5 + 0.5 * np.sin(v * 9.0 - t * 1.2))
+                mix = v
+            elif pat == 1:                     # a low spectrum on the floor
+                k = np.clip((u * (NBARS - 1)).astype(int), 0, NBARS - 1)
+                h = bars[k] * 0.42
+                m = ((1.0 - v) < h).astype(np.float32) * 0.85
+                mix = 1.0 - v
+            else:                              # sparse twinkle + slow breath
+                r = np.random.default_rng(9000 + int(t * 8)).random(
+                    (GH, GW)).astype(np.float32)
+                m = (r > 0.985).astype(np.float32) * 0.9
+                m += 0.10 * (0.5 + 0.5 * np.sin(t * 0.9 + u * 5.0))
+                mix = r
+            gain = 0.40 + 0.55 * I
+            # the title holds for 4 bars, then gives the wall 4 bars back
+            title_b = 0.70 if (bar // 4) % 2 == 0 else 0.0
+        col = A[None, None] + (B - A)[None, None] * mix[..., None]
+        out = col * (np.clip(m, 0, 1.25) * gain)[..., None]
+        # TITLE in block letters either side of the cube, calm + build only
+        tm = G["title"]
+        if tm is not None and title_b > 0:
+            sweep = 0.6 + 0.4 * np.exp(-((u - ((t * 0.25) % 1.4 - 0.2))
+                                          * 6.0) ** 2)
+            tcol = B * 0.65 + 255.0 * 0.35
+            w_ = (tm * title_b * sweep)[..., None]
+            out = out * (1.0 - tm[..., None]) + tcol * w_
+        # DROP ENTRY: the whole wall slams to the section colour and decays
+        oa = int(T["one_age"][i])
+        if tier == 2 and oa < 10:
+            f = 0.50 * 0.62 ** oa
+            out = out * (1.0 - f) + A * f
+        ea = int(T["entry_age"][i])
+        if ea < 16:
+            f = 0.80 ** ea
+            out = out * (1.0 - f) + A * f
+        # GLITCH on snares: whole rows of cells slide sideways (and in a
+        # drop one band swaps colour channels) for three frames
+        sage = int(T["sage"][i])
+        if sage < 3 and tier >= 1:
+            rng = random.Random(int(T["sidx"][i]) * 7919 + 17)
+            for _ in range(rng.randint(2, 4 if tier == 2 else 2)):
+                y0 = rng.randrange(0, GH)
+                h = rng.randint(1, max(2, GH // 6))
+                sh = rng.randint(-GW // 6, GW // 6)
+                out[y0:y0 + h] = np.roll(out[y0:y0 + h], sh, axis=1)
+            if tier == 2:
+                y0 = rng.randrange(0, GH)
+                h = rng.randint(2, max(3, GH // 5))
+                out[y0:y0 + h] = out[y0:y0 + h][..., ::-1]
+        return out.astype(np.float32)
+
+    def _stage_beams(self, img, i, t, a, T, I, kenv) -> None:
+        """Stage light beams fanning up from the floor, swept on a 2-bar
+        cycle. Drawn at quarter res and blurred: they are haze, not lines."""
+        q = 4
+        lw, lh = max(2, self.W // q), max(2, self.H // q)
+        lay = np.zeros((lh, lw, 3), np.float32)
+        big = bool(T["big"][i])
+        nb = 8 if big else 6
+        cyc = (float(T["bi"][i]) + float(T["ph"][i])) / 8.0
+        A, B = T["A"][i], T["B"][i]
+        for k in range(nb):
+            sx, sy = (k + 0.5) / nb * lw, lh + 2.0
+            ang = (np.sin(2 * np.pi * cyc + k * 0.8) * 0.55
+                   + (k - (nb - 1) / 2) * 0.07)
+            L, hw = lh * 1.35, 0.022 + 0.018 * kenv
+            pts = np.array([[sx, sy],
+                            [sx + np.sin(ang - hw) * L, sy - np.cos(ang - hw) * L],
+                            [sx + np.sin(ang + hw) * L, sy - np.cos(ang + hw) * L]],
+                           np.float32)
+            col = A if k % 2 == 0 else B
+            cv2.fillPoly(lay, [np.round(pts).astype(np.int32)],
+                         tuple(float(c) for c in col), cv2.LINE_AA)
+        lay = cv2.GaussianBlur(lay, (0, 0), 1.6)
+        lay *= (0.15 + 0.85 * np.linspace(0.0, 1.0, lh, dtype=np.float32)
+                )[:, None, None]
+        up = cv2.resize(lay, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
+        img += up * ((0.26 + 0.30 * kenv) * I * (1.25 if big else 1.0))
+
+    def _stage_face(self, name, i, t, a, T, G, tier, I, kenv) -> np.ndarray:
+        """One cube face as an LED panel texture (TT x TT x 3)."""
+        FC = G["FC"]
+        fu, fv, fcheb = G["fu"], G["fv"], G["fcheb"]
+        A, B = T["A"][i], T["B"][i]
+        ph = float(T["ph"][i])
+        bi = int(T["bi"][i])
+        hotf = tier == 2
+        logo_face = (name in ("front", "back")
+                     or (name in ("left", "right") and not hotf))
+        if logo_face and G["logo"] is not None:
+            dark, fill, red = G["logo"]
+            # the helmet reads like the real logo: BRIGHT pale fill, a
+            # coloured outline, the red plume — then the beat swaps tints
+            flip = hotf and (bi % 2 == (1 if name == "front" else 0))
+            out_col = (B if flip else A) * 0.85
+            tint = A if flip else B
+            fill_col = 0.30 * tint + 0.70 * 255.0
+            bg = B * (0.07 + (0.20 * kenv if hotf else 0.0))
+            lay = dark + fill + red
+            c = (bg[None, None] * (1 - np.clip(lay, 0, 1))[..., None]
+                 + out_col * dark[..., None]
+                 + fill_col * (fill * (0.80 + 0.20 * I))[..., None]
+                 + np.array((255.0, 25.0, 35.0), np.float32) * red[..., None])
+        elif name in ("left", "right"):
+            if hotf:
+                if name == "left":
+                    w = fcheb * 2.5 - ph
+                    mm = (w - np.floor(w) < 0.35).astype(np.float32)
+                    mx = (np.floor(w) % 2).astype(np.float32)
+                else:
+                    k = np.clip((fu * (NBARS - 1)).astype(int), 0, NBARS - 1)
+                    mm = ((1.0 - fv) < a.bars[i][k] * 1.1).astype(np.float32)
+                    mx = 1.0 - fv
+                mm = mm * (0.6 + 0.4 * kenv)
+            else:
+                prog = ((bi % 4) + ph) / 4.0
+                mm = np.exp(-((fv - prog) * FC / 2.0) ** 2) * 0.7
+                mx = fu
+            c = (A[None, None] + (B - A)[None, None] * mx[..., None]) \
+                * mm[..., None]
+        else:                                     # top / bottom
+            blk = (np.floor(fu * 4) + np.floor(fv * 4) + bi) % 2
+            mm = (blk * (0.65 if hotf else 0.18) * (0.6 + 0.4 * kenv)
+                  ).astype(np.float32)
+            c = (A if (bi % 2) else B)[None, None] * mm[..., None]
+        c = c + A[None, None] * G["border"][..., None] * 0.9
+        g = 0.55 + 0.45 * I + 0.25 * kenv
+        c = c * g
+        up = cv2.resize(c.astype(np.float32), (G["TT"], G["TT"]),
+                        interpolation=cv2.INTER_NEAREST)
+        return (up + np.asarray(self.STAGE_OFF, np.float32)) * G["fmask"]
+
+    def _stage_cube(self, img, i, t, a, T, G, tier, I, kenv, black) -> None:
+        """The big rotating LED cube, warped face by face (painter's order —
+        a cube is convex, so the visible faces never overlap anyway)."""
+        H, W = self.H, self.W
+        yaw = float(T["rot"][i]) + 0.42
+        pitch = 0.36 + 0.04 * np.sin(t * 0.7)
+        s = H * 0.19 * (0.86 + 0.22 * I) * (1.0 + 0.07 * kenv * (tier == 2))
+        if self.lyric_zoom is not None:
+            s *= float(self.lyric_zoom[i])
+        cx, cy = W / 2.0, H * 0.50
+        if tier == 2:
+            cy += H * 0.012 * max(0.0, 1.0 - float(T["ph"][i]) * 4.0)
+        cp, sp = np.cos(pitch), np.sin(pitch)
+        cyw, syw = np.cos(yaw), np.sin(yaw)
+        Rx = np.array([[1, 0, 0], [0, cp, -sp], [0, sp, cp]], np.float64)
+        Ry = np.array([[cyw, 0, syw], [0, 1, 0], [-syw, 0, cyw]], np.float64)
+        R = Rx @ Ry
+        D = 5.0
+        vis = []
+        for name, n, quad in self._CUBE_FACES:
+            P = np.asarray(quad, np.float64) @ R.T
+            nn = R @ np.asarray(n, np.float64)
+            c = P.mean(axis=0)
+            if float(nn @ (np.array([0.0, 0.0, D]) - c)) <= 1e-3:
+                continue
+            f = D / (D - P[:, 2])
+            xs = cx + P[:, 0] * s * f
+            ys = cy - P[:, 1] * s * f
+            vis.append((float(c[2]), name, xs, ys, nn))
+        if not vis:
+            return
+        vis.sort(key=lambda r_: r_[0])
+        allx = np.concatenate([v_[2] for v_ in vis])
+        ally = np.concatenate([v_[3] for v_ in vis])
+        pad = int(H * 0.06)
+        x0, x1 = int(np.floor(allx.min())) - pad, int(np.ceil(allx.max())) + pad
+        y0, y1 = int(np.floor(ally.min())) - pad, int(np.ceil(ally.max())) + pad
+        bx0, by0 = max(0, x0), max(0, y0)
+        bx1, by1 = min(W, x1), min(H, y1)
+        if bx1 <= bx0 or by1 <= by0:
+            return
+        bw, bh = x1 - x0, y1 - y0
+        TT = G["TT"]
+        src = np.float32([[0, 0], [TT, 0], [TT, TT], [0, TT]])
+        reg = img[by0:by1, bx0:bx1]
+        sl = (slice(by0 - y0, by1 - y0), slice(bx0 - x0, bx1 - x0))
+        edges = np.zeros((bh, bw, 3), np.float32)
+        ecol = np.minimum(255.0, T["A"][i] * 0.85 + 70.0)
+        thick = max(2, int(round(H / 300)))
+        dimf = 0.18 if black else 1.0
+        for _z, name, xs, ys, nn in vis:
+            tex = self._stage_face(name, i, t, a, T, G, tier, I, kenv)
+            dst = np.float32(np.stack([xs - x0, ys - y0], axis=1))
+            M = cv2.getPerspectiveTransform(src, dst)
+            wt = cv2.warpPerspective(tex, M, (bw, bh), flags=cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_CONSTANT)
+            wm = cv2.warpPerspective(G["ones"], M, (bw, bh),
+                                     flags=cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_CONSTANT)[..., None]
+            shade = (0.50 + 0.50 * max(0.0, float(nn[2]))) * dimf
+            reg *= (1.0 - wm[sl])
+            reg += wt[sl] * (wm[sl] * shade)
+            cv2.polylines(edges, [np.round(dst).astype(np.int32)], True,
+                          tuple(float(c) for c in ecol * dimf), thick,
+                          cv2.LINE_AA)
+        glow = cv2.GaussianBlur(edges, (0, 0), max(1.0, H / 140.0))
+        reg += (edges + glow * (0.9 + 0.9 * kenv))[sl]
+
+    def _stage_fx(self, img: np.ndarray, i: int, a: Analysis) -> np.ndarray:
+        """Post-FX for the stage: replaces the style's per-frame drop
+        glitch/shake/zoom (a real LED wall does not shake) with snare-gated
+        slice tears + RGB split, and a white strobe only on the big hits."""
+        T = self._stage_tl(a)
+        tier = int(T["tier"][i])
+        sage = int(T["sage"][i])
+        if sage < 2 and tier == 2 and not T["black"][i]:
+            rng = random.Random(int(T["sidx"][i]) * 31 + 5)
+            for _ in range(rng.randint(1, 3)):
+                y0 = rng.randrange(0, max(1, self.H - 8))
+                h = rng.randint(max(2, self.H // 50), max(3, self.H // 9))
+                amp = int(self.W * rng.uniform(0.02, 0.07))
+                sh = amp if rng.random() < 0.5 else -amp
+                img[y0:y0 + h] = np.roll(img[y0:y0 + h], sh, axis=1)
+            off = max(1, int(self.W * 0.004))
+            img[..., 0] = np.roll(img[..., 0], off, axis=1)
+            img[..., 2] = np.roll(img[..., 2], -off, axis=1)
+        sa = int(T["strobe_age"][i])
+        if self.style.strobe and sa < 5:
+            img += 235.0 * (0.50 ** sa)
+        return img
 
     def _logo(self, img: np.ndarray, i: int, a: Analysis) -> None:
         mask = self._logo_mask
@@ -3227,6 +3953,11 @@ class Renderer:
             self._flash *= 0.62
             self._zoom *= 0.80
             return None
+        if self._viz_at(i, a) == "ledwall":
+            # same decays as below, so state stays identical to a sim pass
+            self._flash *= 0.62
+            self._zoom *= 0.80
+            return self._stage_fx(img, i, a)
         # --readable turns the tearing DOWN, not off: the drop should still
         # feel violent, it just must not eat the words (Zeke 2026-08-28).
         # Gating on `i // 6` instead of `i // 2` also makes each tear last
@@ -3328,9 +4059,10 @@ class Renderer:
     def frame(self, i: int, t: float, a: Analysis) -> np.ndarray:
         img = self._bg(i, t, a)
         self._viz(img, i, a)
+        stage = self._viz_at(i, a) == "ledwall"    # the cube carries the logo
         if self.deck:
             self._deck(img, i, a)
-        elif not self._shapes:
+        elif not self._shapes and not stage:
             self._logo(img, i, a)
         if self._shapes:
             self._viz_shape(img, i, a)
@@ -3356,16 +4088,20 @@ class Renderer:
                            np.float32)
             img += self._viz_flash * 0.30 * col
             self._viz_flash *= 0.60
-        img *= self._vignette
+        if not stage:
+            # an LED wall is lit edge to edge and its texture IS the grid:
+            # no vignette, no film grain on the stage
+            img *= self._vignette
         if self.style.breakdown_desat:
             sat = 0.45 + 0.55 * max(a.rms[i], 1.0 if a.drop[i] else 0.0)
             if sat < 0.99:
                 gray = img.mean(axis=2, keepdims=True)
                 img = gray + (img - gray) * sat
-        noise = np.random.default_rng(i).standard_normal(
-            (self.H // 2, self.W // 2, 1)).astype(np.float32)
-        img += cv2.resize(noise, (self.W, self.H))[..., None] * \
-            (2.0 + 5.0 * a.rms[i])
+        if not stage:
+            noise = np.random.default_rng(i).standard_normal(
+                (self.H // 2, self.W // 2, 1)).astype(np.float32)
+            img += cv2.resize(noise, (self.W, self.H))[..., None] * \
+                (2.0 + 5.0 * a.rms[i])
         # clip IN PLACE then convertScaleAbs (12ms vs 38ms for .astype).
         # ⚠ convertScaleAbs takes the ABSOLUTE value, so the clip to >=0 above
         # is load-bearing, not tidiness — on unclipped data a -8 becomes 8.
@@ -3977,9 +4713,19 @@ def main() -> int:
     ap.add_argument("--no-strobe", action="store_true",
                     help="disable the hard white kick-flash on the drop "
                          "(photosensitivity-safe; everything else unchanged)")
+    ap.add_argument("--stage-palette", default="acid",
+                    choices=sorted(STAGE_PALETTES),
+                    help="colour family for --viz ledwall / --look stage: "
+                         "'acid' (toxic green, magenta, cyan, UV) or 'inferno' "
+                         "(red, orange, amber, white-hot)")
+    ap.add_argument("--no-lyrics", action="store_true",
+                    help="draw no lyrics. Whisper still runs if --punch-words "
+                         "or --lyric-models need the sung words; otherwise it "
+                         "is skipped entirely (--look stage sets this)")
     ap.add_argument("--viz", default="",
                     help="override the style's centerpiece visualization: "
-                         "radial|bars_center|bars|wave|tunnel|supernova|kaleido|symbiote"
+                         "radial|bars_center|bars|wave|tunnel|supernova|kaleido|symbiote|"
+                         "ledwall"
                          ". COMMA-LIST to ROTATE through several on the beat "
                          "grid (see --viz-every), e.g. "
                          "'radial,tunnel,kaleido,bars_center'")
@@ -4092,7 +4838,9 @@ def main() -> int:
     t0 = time.time()
 
     heard: list[Word] = []
-    if args.no_vocals or args.assemble:
+    need_words = not (args.no_lyrics and not args.punch_words
+                      and not args.lyric_models)
+    if args.no_vocals or args.assemble or not need_words:
         lines: list[list[Word]] = []      # --assemble only decodes pixels
     else:
         heard, segs = _words_cached(args.audio, args.device, args.words_json)
@@ -4102,6 +4850,8 @@ def main() -> int:
                                     segments=segs)
         else:
             lines = lines_from_transcript(heard)
+        if args.no_lyrics:
+            lines = []                    # words kept for punches, not drawn
 
     analysis, pcm, sr = _analyze_cached(args.audio, args.fps)
     if sr > 48000:
@@ -4225,7 +4975,8 @@ def main() -> int:
                  bg_deck=bg_deck, bg_every=args.bg_every,
                  bg_mirror=args.bg_mirror, jaw=args.jaw,
                  bg_twist=args.bg_twist,
-                 lasers=args.lasers, far=args.far, bg_scale=args.bg_scale)
+                 lasers=args.lasers, far=args.far, bg_scale=args.bg_scale,
+                 stage_palette=args.stage_palette)
     if args.far != 1.0:
         print(f"[lyric_viz] standing framing: {args.far:.2f}x "
               f"(centrepiece sits back)")
