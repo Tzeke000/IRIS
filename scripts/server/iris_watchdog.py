@@ -103,8 +103,19 @@ def main() -> int:
         return 0                                   # deliberately not running here: stay quiet
     problems: dict[str, str] = {}
 
-    hb = load(HB, {})
-    hb_age = now - float(hb.get("ts") or 0.0)
+    # 10-10: a read that lands mid-write gives {} -> ts 0 -> "no heartbeat for 29 million min" -> a false
+    # alarm + "recovered" pair DM'd to Zeke at 05:44 and 05:47 while he slept. Retry; if the file still
+    # has no ts, treat the heartbeat as UNKNOWN this round (no wedge, no stale alert) instead of ancient.
+    hb = {}
+    for _ in range(4):
+        hb = load(HB, {})
+        if hb.get("ts"):
+            break
+        time.sleep(0.5)
+    hb_known = bool(hb.get("ts"))
+    hb_age = (now - float(hb["ts"])) if hb_known else 0.0
+    if not hb_known:
+        log("heartbeat file unreadable/empty this round - treating as unknown, not stale")
     rt_pid = int(hb.get("pid") or 0)
     rt_alive = bool(rt_pid) and pid_alive(rt_pid)
     sup_alive = proc_running("iris_supervise.sh")
