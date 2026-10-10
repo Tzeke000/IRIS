@@ -115,13 +115,15 @@ BLOOM = 0.36
 # rig constants. Units: 1.0 ~ a mech's height. Local x = toward the opponent.
 # ---------------------------------------------------------------------------
 MECH = (
-    dict(key="A", name="BRAWLER", hip_h=0.465, feet=(0.15, -0.17), knee=+1,
+    dict(key="A", name="BRAWLER", hip_h=0.490, feet=(0.15, -0.17), knee=+1,
          guard_n=(0.285, -0.010), guard_f=(0.215, -0.095), facing=+1),
-    dict(key="B", name="STRIKER", hip_h=0.480, feet=(0.13, -0.15), knee=-1,
+    dict(key="B", name="STRIKER", hip_h=0.505, feet=(0.13, -0.15), knee=-1,
          guard_n=(0.285, -0.075), guard_f=(0.215, -0.150), facing=-1),
 )
 PARTS = ("torso", "head", "uarm", "farm", "fist", "thigh", "shin", "foot")
 GAP_FIGHT, GAP_CALM, GAP_BACK, GAP_CLASH, GAP_BEAM = 0.68, 0.74, 1.10, 0.90, 1.02
+GAP_MIN, GAP_MAX, STANCE_MAX = 0.58, 1.16, 0.78   # hard footwork limits
+FOOT_L = 0.12                                    # ankle -> toe, for heel pivots
 
 # camera contract (must match blender/robotfight_arena.py)
 CAM_D, CAM_H, VIS_H, HOR_Y = 3.0, 0.55, 1.0 / 0.58, 0.60
@@ -471,8 +473,8 @@ def _timeline(R, a, lv) -> dict:
                     bump_own[m, f] = j
             else:
                 big_ = 1.0 if kind != "jab" or not S["blocked"] else 0.6
-                lun = {"jab": 0.08, "cross": 0.10, "hook": 0.07, "upper": 0.06,
-                       "body": 0.09, "clash": 0.10}[kind] * min(1.3, s) * big_
+                lun = {"jab": 0.05, "cross": 0.06, "hook": 0.045, "upper": 0.04,
+                       "body": 0.055, "clash": 0.06}[kind] * min(1.3, s) * big_
                 ln = {"jab": 0.18, "cross": 0.24, "hook": 0.30, "upper": 0.14,
                       "body": 0.30, "clash": 0.28}[kind] * min(1.3, s) * big_
                 cr = {"upper": 0.05, "body": 0.04}.get(kind, 0.015)
@@ -500,7 +502,7 @@ def _timeline(R, a, lv) -> dict:
             body = kind == "body"
             rs = 1.0 / fr
             add(dx, m, f0, 0, int(22 * fr),
-                lambda t: -0.075 * ss * _resp(t * rs - 1.0))
+                lambda t: -0.05 * ss * _resp(t * rs - 1.0))
             add(lean, m, f0, 0, int(22 * fr),
                 lambda t: (0.24 if body else -0.30) * ss * _resp(t * rs))
             add(tilt, m, f0, 0, int(22 * fr),
@@ -526,59 +528,21 @@ def _timeline(R, a, lv) -> dict:
         crouch[m] += bob + 0.055 * pre + 0.04 * T["beam"]
         lean[m] += (0.035 * np.sin(2 * np.pi * bif / 4.0 + m * np.pi) * (1 - hotf)
                     + 0.10 * pre + 0.16 * T["beam"] + 0.09 * hotf)
-        crouch[m] += 0.025 * hotf
+        crouch[m] += 0.012 * hotf
         dx[m] += 0.012 * np.sin(2 * np.pi * bif / 8.0 + m * 1.7) * (1 - hotf)
         tilt[m] += 0.04 * np.sin(2 * np.pi * bif / 4.0 + 0.8 + m) * (1 - hotf)
-    # ---- STANCE: gap between the mechs + a slow shared circling drift
-    hotb = hot.astype(np.float32)
-    gap = (GAP_CALM - (GAP_CALM - GAP_FIGHT) * sm(hotb, fps, 0.3)).astype(np.float64)
-    ss_pre = pre * pre * (3 - 2 * pre)
-    gap += (GAP_BACK - GAP_CALM) * ss_pre * (1 - hotb)
-    gap = gap * (1 - T["beam"]) + GAP_BEAM * T["beam"]
-    for e in entries:
-        p0 = max(0, e - nblk - 2)
-        g0 = float(gap[p0])
-        for f in range(p0, min(n, e + 1)):              # the charge, accelerating
-            u = (f - p0) / max(1, e - p0)
-            gap[f] = g0 + (GAP_CLASH - g0) * _ease(u, "in")
-        for f in range(e, min(n, e + int(34 * fr))):     # knocked apart, settle
-            t = (f - e) / fr
-            kb = 0.20 * (1 - math.exp(-t / 2.0)) * math.exp(-t / 9.0)
-            u = _ease(min(1.0, t / 30.0), "io")
-            gap[f] = GAP_CLASH * (1 - u) + GAP_FIGHT * u + kb
-    tt = np.arange(n) / fps
-    cx = 0.07 * np.sin(2 * np.pi * tt / 13.0) * (1 - 0.6 * hotf)
-    T["stance"] = np.stack([cx - gap / 2, cx + gap / 2]).astype(np.float32)
-    T["cx"] = cx.astype(np.float32)
-    # ---- FEET: step on alternate grid beats toward the stance (stateless)
-    gb = np.flatnonzero(T["gbeat"])
-    feet = np.zeros((2, 2, n), np.float32)
-    lift = np.zeros((2, 2, n), np.float32)
-    stp = max(2, int(5 * fr))
-    for m in (0, 1):
-        st = T["stance"][m]
-        for k in (0, 1):
-            off = MECH[m]["feet"][k] * MECH[m]["facing"]
-            beats = gb[(np.arange(len(gb)) % 2) == k]
-            cur = float(st[0]) + off
-            prev_b = 0
-            for b in list(beats) + [n]:
-                tgt = float(st[min(n - 1, b)]) + off if b < n else cur
-                seg = slice(prev_b, min(n, b))
-                feet[m, k, seg] = cur
-                if b >= n:
-                    break
-                src = cur
-                for f in range(b, min(n, b + stp)):
-                    u = (f - b + 1) / stp
-                    feet[m, k, f] = src + (tgt - src) * _ease(u, "io")
-                    if abs(tgt - src) > 0.006:
-                        lift[m, k, f] = 0.035 * math.sin(math.pi * u)
-                cur = tgt
-                prev_b = min(n, b + stp)
+    # ---- FOOTWORK (Zeke 10-10: "maybe a little more footwork from them").
+    # The FEET are primary: a step planner places every foot, the stance is
+    # derived from where the feet are, so a weight-bearing foot never slides.
+    fw = _footwork(T, strikes, n, fps, fr, beat_f, lv)
+    crouch += fw["crouch"]
     T.update(dx=dx, lean=lean, crouch=crouch, tilt=tilt, squash=squash,
              flash=flash, flail=flail, own=own, blk=blk, bump_own=bump_own,
-             feet=feet, lift=lift, gap=gap.astype(np.float32))
+             feet=fw["feet"], lift=fw["lift"], heel=fw["heel"],
+             stance=fw["stance"], cx=fw["cx"], steps=fw["steps"])
+    hotb = hot.astype(np.float32)
+    ss_pre = pre * pre * (3 - 2 * pre)
+    tt = np.arange(n) / fps
     # ---- CAMERA: zoom (dolly), pan, height
     zt = 1.0 - 0.05 * ss_pre * (1 - hotb) + 0.11 * hotf + 0.04 * big.astype(np.float32)
     zt = sm(zt, fps, 0.45).astype(np.float64)
@@ -587,7 +551,7 @@ def _timeline(R, a, lv) -> dict:
             zt[f] += 0.06 * math.exp(-(f - e) / (9.0 * fr))
     zt += 0.05 * punch                       # sung "bump" pushes in
     zt += 0.012 * np.sin(2 * np.pi * tt / 9.0) * (1 - hotf)
-    camx = cx * 0.8
+    camx = sm(T["cx"], fps, 0.5) * 0.85
     nud = np.zeros(n, np.float32)
     for S in strikes:
         if S["att"] == 2:
@@ -623,6 +587,242 @@ def _timeline(R, a, lv) -> dict:
           f"{sum(1 for S in strikes if S['kind'] == 'headbutt')} headbutts, "
           f"{len(entries)} clashes), beam {int((beam > 0).sum())} frames")
     return T
+
+
+def _footwork(T, strikes, n, fps, fr, beat_f, lv) -> dict:
+    """Plan every footstep of the song, then derive the stance from the feet.
+
+    A time-ordered planner (run ONCE over the whole song, so draw() stays a
+    pure function of the frame) places the lead/rear foot of each mech.
+    Between its steps a foot is PLANTED (constant x): no sliding while it
+    bears weight. Step sources, in musical order:
+      * strike step-in   lead foot lands with / just before the contact frame,
+                         the rear foot drags up after it (weight behind it)
+      * hit step-back    rear foot steps away a frame after a hit, lead follows
+      * drop-entry       two charge steps through the blackout into the clash,
+                         then two knocked-back steps
+      * beat steps       on grid beats, toward a section target that drifts
+                         across the ring (circling / exchanging ground); in the
+                         calm an in-and-out boxer shuffle, in the build a
+                         step back each beat
+    Hard limits: the fighters' gap stays in [GAP_MIN, GAP_MAX], each stance
+    stays inside +-STANCE_MAX, stance width stays sane. Hip height sells the
+    weight: it rises through each swing and dips on landing; a heel pivot on
+    hooks/crosses and an on-the-toes bounce in the calm drive heel arrays."""
+    hot, pre, black, big = T["hot"], T["pre"], T["black"], T["big"]
+    beam = T["beam"]
+    sm = lv._gauss_smooth
+    hotb = hot.astype(np.float32)
+    ss_pre = pre * pre * (3 - 2 * pre)
+    gap_t = GAP_CALM - (GAP_CALM - GAP_FIGHT) * sm(hotb, fps, 0.3)
+    gap_t = gap_t + (GAP_BACK - GAP_CALM) * ss_pre * (1 - hotb)
+    gap_t = gap_t * (1 - beam) + GAP_BEAM * beam
+    tt = np.arange(n) / fps
+    seg_ph = np.zeros(n, np.float32)
+    for k, (s0, s1, h) in enumerate(T["segs"]):
+        seg_ph[s0:s1] = 1.9 * k
+    c_t = np.where(hot, 0.14 * np.sin(2 * np.pi * tt / 9.0 + seg_ph),
+                   0.17 * np.sin(2 * np.pi * tt / 13.0 + seg_ph))
+    c_t = sm(c_t, fps, 0.8)
+    fac = [M["facing"] for M in MECH]
+    off = [M["feet"] for M in MECH]                  # (lead, rear) local x
+    mid_off = [fac[m] * (off[m][0] + off[m][1]) / 2.0 for m in (0, 1)]
+    # initial placement
+    g0 = float(gap_t[0])
+    st0 = [float(c_t[0]) - g0 / 2, float(c_t[0]) + g0 / 2]
+    xf = [[st0[m] + fac[m] * off[m][0], st0[m] + fac[m] * off[m][1]] for m in (0, 1)]
+    init = [list(xf[0]), list(xf[1])]
+    busy = [[-10 ** 9, -10 ** 9], [-10 ** 9, -10 ** 9]]
+    steps = [[[], []], [[], []]]                     # (s, e, x0, x1)
+
+    def stance(m):
+        return (xf[m][0] + xf[m][1]) / 2.0 - mid_off[m]
+
+    def place(m, foot, s0, dur, dfwd, tol, wide=False):
+        """Schedule foot `foot` of mech m to move dfwd (toward the opponent
+        if > 0) starting at s0. Returns the moved distance (0 = dropped).
+        The gap is kept in a band around the section's target gap (wide=True:
+        the global band, for the entry charge / knock-back)."""
+        s1 = max(s0, busy[m][foot], busy[m][1 - foot])   # other foot planted
+        if s1 - s0 > tol or s1 >= n - 2:
+            return 0.0
+        x0 = xf[m][foot]
+        # allowed landing interval = stance-width limits (lead stays 0.20-0.42
+        # ahead of rear) INTERSECTED with the gap + frame limits; a step that
+        # cannot satisfy both is not taken
+        other = xf[m][1 - foot]
+        sg = fac[m] * (1 if foot == 0 else -1)
+        w_a, w_b = other + sg * 0.20, other + sg * 0.42
+        if wide:
+            g_lo, g_hi = GAP_MIN, GAP_MAX
+        else:
+            gt = float(gap_t[min(n - 1, s1)])
+            g_lo, g_hi = max(GAP_MIN, gt - 0.10), min(GAP_MAX, gt + 0.14)
+        st_o = stance(1 - m)
+        if m == 0:
+            lo, hi = st_o - g_hi, st_o - g_lo
+        else:
+            lo, hi = st_o + g_lo, st_o + g_hi
+        stm = stance(m)
+        # outside the band: any step that does not make it WORSE is allowed
+        lo, hi = min(lo, stm), max(hi, stm)
+        lo, hi = max(lo, -STANCE_MAX), min(hi, STANCE_MAX)
+        x_lo = max(min(w_a, w_b), x0 + 2.0 * (lo - stm))
+        x_hi = min(max(w_a, w_b), x0 + 2.0 * (hi - stm))
+        if x_lo > x_hi:
+            return 0.0
+        x1 = min(max(x0 + fac[m] * dfwd, x_lo), x_hi)
+        # never step AGAINST the requested direction to satisfy a limit
+        if (x1 - x0) * fac[m] * dfwd < 0:
+            return 0.0
+        if abs(x1 - x0) < 0.008:
+            return 0.0
+        e = min(n - 1, s1 + dur)
+        steps[m][foot].append((s1, e, x0, x1))
+        xf[m][foot] = x1
+        busy[m][foot] = e
+        return fac[m] * (x1 - x0)
+
+    # ---- requests: (start, prio, kind, args)
+    reqs = []
+    act = np.zeros((2, n), bool)                     # strike-step activity
+    for j, S in enumerate(strikes):
+        f0, s_ = S["f0"], min(1.3, S["s"])
+        if S["att"] == 2:
+            continue
+        a_, d_ = S["att"], 1 - S["att"]
+        hb = S["kind"] == "headbutt"
+        if S["blocked"]:
+            din, dur = 0.035, int(5 * fr)
+        else:
+            din = (0.085 if hb else 0.075) * s_
+            dur = int(max(3 * fr, min(5 * fr, S["W"] - 1)))
+        # step-in: lead foot LANDS on f0-1 (with the punch's weight behind it)
+        reqs.append((f0 - 1 - dur, 1, "step", (a_, 0, dur, din, int(1 * fr))))
+        reqs.append((f0 + int(2 * fr), 2, "step", (a_, 1, int(5 * fr), din, int(6 * fr))))
+        # step-back after taking it (blocked jabs: a small give)
+        dback = (0.022 if S["blocked"] else 0.065 * s_ * (0.7 if S["kind"] == "body" else 1.0))
+        reqs.append((f0 + int(1 * fr), 1, "step", (d_, 1, int(3 * fr), -dback, int(2 * fr))))
+        if not S["blocked"]:
+            reqs.append((f0 + int(4 * fr), 2, "step", (d_, 0, int(4 * fr), -dback, int(4 * fr))))
+        lo = max(0, f0 - int(8 * fr))
+        act[a_, lo:f0 + int(9 * fr)] = True
+        act[d_, f0:f0 + int(11 * fr)] = True
+    ent_busy = np.zeros(n, bool)
+    for e in T["entries"]:
+        sh = {}
+        for m in (0, 1):
+            # charge through the blackout: rear foot, then lead foot (lands e-1)
+            reqs.append((e - int(11 * fr), 0, "charge", (m, 1, int(4 * fr), e, sh)))
+            reqs.append((e - int(6 * fr), 0, "charge", (m, 0, int(5 * fr), e, sh)))
+            # knocked back by the collision
+            reqs.append((e + int(2 * fr), 0, "kback", (m, 1, int(4 * fr), -0.11, 99)))
+            reqs.append((e + int(6 * fr), 0, "kback", (m, 0, int(5 * fr), -0.11, 99)))
+        ent_busy[max(0, e - int(16 * fr)):min(n, e + int(16 * fr))] = True
+    gb = np.flatnonzero(T["gbeat"])
+    bi = T["bi"]
+    for b in gb:
+        if black[b] or beam[b] > 0 or ent_busy[b]:
+            continue
+        for m in (0, 1):
+            if act[m, b]:
+                continue
+            if not hot[b] and pre[b] < 0.12 and (int(bi[b]) + m) % 2:
+                continue          # calm: the fighters take turns shuffling
+            reqs.append((int(b), 3, "auto", (m, int(b))))
+    reqs.sort(key=lambda r: (r[0], r[1]))
+    for start, _, kind, args in reqs:
+        if start < 0:
+            start = 0
+        if kind == "step":
+            m, foot, dur, d, tol = args
+            place(m, foot, start, dur, d, tol)
+        elif kind == "kback":
+            m, foot, dur, d, tol = args
+            place(m, foot, start, dur, d, tol, wide=True)
+        elif kind == "charge":
+            m, foot, dur, e, sh = args
+            if m not in sh:      # stance distance to the clash mark
+                tgt = (float(c_t[e]) - GAP_CLASH / 2) if m == 0 else \
+                    (float(c_t[e]) + GAP_CLASH / 2)
+                sh[m] = fac[m] * (tgt - stance(m))
+            place(m, foot, start, dur, sh[m], 99, wide=True)
+        else:                     # beat step toward the drifting target
+            m, b = args
+            calm = not hot[b] and pre[b] < 0.12
+            tgt = (float(c_t[b]) - float(gap_t[b]) / 2) if m == 0 else \
+                (float(c_t[b]) + float(gap_t[b]) / 2)
+            err = fac[m] * (tgt - stance(m))           # + = toward opponent
+            if calm and abs(err) < 0.025:
+                # the boxer shuffle: in on one bar, out on the next
+                err = 0.024 * (1.0 if (int(bi[b]) // 4 + m) % 2 == 0 else -1.0)
+            cap = 0.05 if calm else 0.075
+            err = max(-cap, min(cap, err))
+            if abs(err) < 0.012:
+                continue
+            dur = int((6 if calm else 4) * fr)
+            first = 0 if err > 0 else 1                # lead first going in
+            if place(m, first, b, dur, err, int(1 * fr)) != 0.0:
+                place(m, 1 - first, b + dur + int(1 * fr), dur, err, int(3 * fr))
+    # ---- arrays: planted between steps, an arc through the air during one
+    feet = np.zeros((2, 2, n), np.float32)
+    lift = np.zeros((2, 2, n), np.float32)
+    crouch = np.zeros((2, n), np.float32)
+    for m in (0, 1):
+        for foot in (0, 1):
+            cur = init[m][foot]
+            pos = 0
+            for (s0, e, x0, x1) in sorted(steps[m][foot]):
+                feet[m, foot, pos:s0 + 1] = cur
+                L = max(1, e - s0)
+                u = np.arange(1, L + 1, dtype=np.float32) / L
+                ue = u * u * (3 - 2 * u)
+                feet[m, foot, s0 + 1:e + 1] = (x0 + (x1 - x0) * ue)[:max(0, min(n, e + 1) - s0 - 1)]
+                d = abs(x1 - x0)
+                h = min(0.05, 0.018 + 0.30 * d)
+                lift[m, foot, s0 + 1:e + 1] = (h * np.sin(np.pi * u))[:max(0, min(n, e + 1) - s0 - 1)]
+                # hips: up through the swing, weight LANDS (dip, then recover)
+                dip = 0.004 + 0.07 * d
+                crouch[m, s0 + 1:e + 1] -= (0.35 * dip * np.sin(np.pi * u))[:max(0, min(n, e + 1) - s0 - 1)]
+                k = np.arange(0, int(10 * fr))
+                seg = crouch[m, e:e + len(k)]
+                seg += (dip * np.exp(-k / (2.5 * fr)))[:len(seg)]
+                cur = x1
+                pos = e + 1
+            feet[m, foot, pos:] = cur
+    # ---- heel pivots (hooks: lead foot; crosses/uppercuts: rear foot) and
+    # the calm on-the-toes bounce
+    heel = np.zeros((2, 2, n), np.float32)
+    for S in strikes:
+        if S["att"] == 2 or S["kind"] not in ("hook", "cross", "upper"):
+            continue
+        m = S["att"]
+        foot = 0 if S["kind"] == "hook" else 1
+        f0, W, Rr = S["f0"], S["W"], S["R"]
+        A_ = max(2, int(round(0.42 * W)))
+        K = [(-A_, 0.0, "lin"), (0, 0.38, "in"), (2, 0.38, "lin"), (Rr + 4, 0.0, "io")]
+        for f in range(max(0, f0 - A_), min(n, f0 + Rr + 5)):
+            heel[m, foot, f] = max(heel[m, foot, f], _keys(f - f0, K))
+    calm_w = (1 - T["hot_f"]) * (1 - np.clip(pre * 3, 0, 1)) * (~black)
+    bounce = (0.5 - 0.5 * np.cos(2 * np.pi * T["ph"])) * calm_w     # 0 on the beat
+    for m in (0, 1):
+        crouch[m] -= 0.010 * bounce
+        for foot in (0, 1):
+            planted = lift[m, foot] < 1e-4
+            heel[m, foot] = np.maximum(heel[m, foot], 0.16 * bounce * planted)
+    # ---- the stance is DERIVED from the feet (weight between them); a light
+    # centred smoothing lets the hips start shifting just before a step lands
+    stn = np.zeros((2, n), np.float32)
+    for m in (0, 1):
+        mid = (feet[m, 0] + feet[m, 1]) / 2.0 - mid_off[m]
+        stn[m] = sm(mid, fps, 0.07)
+    cx = sm((stn[0] + stn[1]) / 2.0, fps, 0.15)
+    nst = sum(len(steps[m][k]) for m in (0, 1) for k in (0, 1))
+    gapv = stn[1] - stn[0]
+    print(f"[robotfight] footwork: {nst} steps, gap {gapv.min():.2f}-{gapv.max():.2f}, "
+          f"stance x {stn.min():.2f}..{stn.max():.2f}")
+    return dict(feet=feet, lift=lift, heel=heel, crouch=crouch, stance=stn,
+                cx=cx.astype(np.float32), steps=steps)
 
 
 # ---------------------------------------------------------------------------
@@ -663,7 +863,10 @@ def _bones(R):
             l_ua=-P[f"{k}_uarm"]["bone"][1], l_fa=-P[f"{k}_farm"]["bone"][1],
             l_fist=-P[f"{k}_fist"]["bone"][1], l_th=-P[f"{k}_thigh"]["bone"][1],
             l_sh=-P[f"{k}_shin"]["bone"][1],
-            ankle=(ft["pivot"][1] - ft["anchors"]["sole"][1]) / ppu))
+            # ankle height above the floor (sole is BELOW the pivot in image
+            # px; this sign was flipped until 10-10 and sank the feet 0.07
+            # under the floor, legs locked straight)
+            ankle=(ft["anchors"]["sole"][1] - ft["pivot"][1]) / ppu))
     C["bones"] = B
     return B
 
@@ -781,7 +984,7 @@ def _rig(R, T, f):
             reach = b["l_ua"] + b["l_fa"] + b["l_fist"] * 0.6
             d = math.hypot(tgt[0] - sh[0], tgt[1] - sh[1])
             if j >= 0 and d > reach:
-                ex = d - reach
+                ex = min(d - reach, 0.10)
                 ux = (tgt[0] - sh[0]) / d
                 for kk in ("hip", "neck", "core", "sh_n", "sh_f", "hip_n",
                            "hip_f", "head_c", "head_f"):
@@ -794,20 +997,38 @@ def _rig(R, T, f):
             el, wr = _ik(sh, wrist_t, b["l_ua"], b["l_fa"], "down")
             arms[arm] = dict(sh=sh, el=el, wr=wr, stretch=stretch)
         rg["arms"] = arms
-        # HEADBUTT: the head drives forward with the lean (already in tilt)
-        # LEGS: feet planted (stepping), knees by IK
+        # LEGS: the feet are PLANTED where the footwork put them (heel
+        # pivots lift the ankle about the toe); knees by IK. If a leg cannot
+        # reach its planted foot, the HIPS drop (weight sinks into the stance)
+        # instead of the foot sliding.
+        ank = {}
+        for k_ in (0, 1):
+            fxw = float(T["feet"][m, k_, f])
+            hl = float(T["heel"][m, k_, f])
+            ank[k_] = ((fxw - rg["st"]) * rg["fac"],
+                       b["ankle"] + float(T["lift"][m, k_, f]) + FOOT_L * math.sin(hl))
+        Lmax = (b["l_th"] + b["l_sh"]) * 0.985
+        drop = 0.0
+        for k_, hk in ((0, "hip_n"), (1, "hip_f")):
+            hp = rg[hk]
+            dxh = abs(ank[k_][0] - hp[0])
+            vmax = math.sqrt(max(1e-6, Lmax * Lmax - dxh * dxh))
+            drop = max(drop, (hp[1] - ank[k_][1]) - vmax)
+        drop = min(drop, 0.08)
+        if drop > 0:
+            for kk in ("hip", "neck", "core", "sh_n", "sh_f", "hip_n", "hip_f",
+                       "head_c", "head_f"):
+                rg[kk] = (rg[kk][0], rg[kk][1] - drop)
+            for A_ in arms.values():
+                for kk in ("sh", "el", "wr"):
+                    A_[kk] = (A_[kk][0], A_[kk][1] - drop)
         legs = {}
         for k_, hk in ((0, "hip_n"), (1, "hip_f")):
-            fx = (float(T["feet"][m, k_, f]) - rg["st"]) * rg["fac"]
-            ank = (fx, b["ankle"] + float(T["lift"][m, k_, f]))
             hp = rg[hk]
-            Lmax = b["l_th"] + b["l_sh"] - 1e-3
-            d = math.hypot(ank[0] - hp[0], ank[1] - hp[1])
-            if d > Lmax:                 # the foot slides with the body
-                ux, uy = (ank[0] - hp[0]) / d, (ank[1] - hp[1]) / d
-                ank = (hp[0] + ux * Lmax, max(b["ankle"], hp[1] + uy * Lmax))
-            kn, an = _ik(hp, ank, b["l_th"], b["l_sh"], M["knee"])
-            legs[k_] = dict(hip=hp, kn=kn, an=an)
+            kn, an = _ik(hp, ank[k_], b["l_th"], b["l_sh"], M["knee"])
+            legs[k_] = dict(hip=hp, kn=kn, an=ank[k_] if math.hypot(
+                an[0] - ank[k_][0], an[1] - ank[k_][1]) < 0.02 else an,
+                heel=float(T["heel"][m, k_, f]))
         rg["legs"] = legs
     return out
 
@@ -1186,8 +1407,9 @@ def _render_mechs(R, T, G, P, rig, cam, i):
             elif j1 == "head":
                 th = rg["hth"]
                 d = (fac * math.sin(th), -math.cos(th))
-            elif j1 == "flat":
-                d = (fac * 1.0, 0.0)
+            elif j1 == "flat":           # heel pivot: toe down, about the toe
+                hl = Lg[0 if shade > 0.9 else 1]["heel"]
+                d = (fac * math.cos(hl), math.sin(hl))
             elif j1 is None:            # fist follows the forearm
                 arm = A[0] if shade > 0.9 else A[1]
                 e, w_ = W2(arm["el"]), W2(arm["wr"])
@@ -1271,8 +1493,9 @@ def _floor(R, img, T, G, P, cam, i, mech, power, heat, kenv, hotf):
     # emblem under the fighters (world circle centred between them)
     ecx = float(T["cx"][i])
     er = G["emblem_r"]
+    emx = 0.0                            # the emblem is PAINTED: world-fixed
     es = G["emblem"].shape[0]
-    mu = ((xw - ecx) / (2 * er) + 0.5) * es
+    mu = ((xw - emx) / (2 * er) + 0.5) * es
     mv = np.broadcast_to(((yw - 0.35) / (2 * er) + 0.5) * es, mu.shape)
     emb = cv2.remap(G["emblem"], mu.astype(np.float32), mv.astype(np.float32),
                     cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
