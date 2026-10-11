@@ -37,6 +37,11 @@ def fx(R, img, i, a, lv) -> np.ndarray:   # optional
   `gbeat`, `bar`, `segs`. Helpers: `lv._gauss_smooth`, `lv._age_since`, `lv._hash01`,
   `lv.scene_palette(R, module)` → the chosen palette dict.
 
+## Look online first (Zeke 2026-10-10)
+
+For any new scene, search for existing models (characters, vehicles, props, sets) before
+building: CC0 / PD / CC-BY only (no NC, no ND), URL + licence in the scene's ASSETS.md.
+
 ## Skills (Zeke 2026-10-10: use them whenever Blender is used)
 
 Load with the Skill tool before writing bpy: `blender-rules`, `blender-headless-batch-scripting`,
