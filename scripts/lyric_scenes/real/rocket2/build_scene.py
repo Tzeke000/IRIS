@@ -61,6 +61,12 @@ def parse_args():
     ap.add_argument("--out", default=os.path.join(REPO, "scratch", "scenes", "rocket2", "rocket2.blend"))
     ap.add_argument("--samples", type=int, default=0, help="0 = tuned default")
     ap.add_argument("--res-pct", type=int, default=100)
+    # per-song story anchors (seconds). Default = first 5 drop entries / auto MECO (Hit a Bump).
+    ap.add_argument("--beats", default="", help="IGN,MAXQ,BSEP,FAIRSEP,SES in seconds (snapped to entries)")
+    ap.add_argument("--meco", type=float, default=-1.0, help="MECO time in s (default: calm before SES)")
+    ap.add_argument("--e-start", type=float, default=-1.0, help="E_calm shot start in s (default: end of max-Q seg)")
+    ap.add_argument("--pad-end", type=float, default=-1.0, help="end of the pad/liftoff act in s (default: end of drop 1)")
+    ap.add_argument("--title", default="HIT A BUMP", help="countdown-clock title")
     return ap.parse_args(argv)
 
 
@@ -94,9 +100,17 @@ def age_env(age, tau):
 
 ENT = sorted(int(e) for e in TL["entries"])
 assert len(ENT) >= 5, f"need 5 drop entries, got {ENT}"
-IGN, MAXQ, BSEP, FAIRSEP, SES = ENT[:5]
+if ARGS.beats:
+    _want = [float(v) * FPS for v in ARGS.beats.split(",")]
+    assert len(_want) == 5, "--beats needs 5 values"
+    IGN, MAXQ, BSEP, FAIRSEP, SES = [min(ENT, key=lambda e: abs(e - w)) for w in _want]
+else:
+    IGN, MAXQ, BSEP, FAIRSEP, SES = ENT[:5]
 SEGS = [tuple(int(v) for v in s) for s in TL["segs"]]
-MECO = max(s0 for s0, s1, h in SEGS if h == 0 and s1 <= SES)          # calm before the big drop
+if ARGS.meco >= 0:
+    MECO = min((s0 for s0, s1, h in SEGS), key=lambda s0: abs(s0 - ARGS.meco * FPS))
+else:
+    MECO = max(s0 for s0, s1, h in SEGS if h == 0 and s1 <= SES)      # calm before the big drop
 SECO = min(s0 for s0, s1, h in SEGS if h == 0 and s0 > SES)           # outro start
 
 KICK = age_env(TL["T_kage"], 3.0)
@@ -168,6 +182,8 @@ ALT = 0.5 * 5.0 * T_SEC ** 2                                  # metres above the
 
 # --- sets (which world is on screen) ---------------------------------------------------
 PAD_END = [s1 for s0, s1, h in SEGS if s0 == IGN][0]          # end of drop 1
+if ARGS.pad_end >= 0:                                          # long liftoff acts span several drops
+    PAD_END = min((s1 for s0, s1, h in SEGS), key=lambda s1: abs(s1 - ARGS.pad_end * FPS))
 SET = np.zeros(N, np.int32)                                    # 0 pad, 1 clouds, 2 high, 3 space
 SET[PAD_END:] = 1
 SET[BSEP:] = 2
@@ -190,20 +206,26 @@ def seg_after(f):
 A_CUTS = [0, snap(IGN * 0.30), snap(IGN * 0.56), snap(IGN * 0.80)]
 B_END = PAD_END
 B_CUTS = [IGN, snap(IGN + 3.0 * BAR), snap(IGN + 5.5 * BAR), snap(IGN + 7.0 * BAR)]
+if ARGS.pad_end >= 0:                                          # spread the four liftoff shots over the act
+    B_CUTS = [IGN] + [snap(IGN + (PAD_END - IGN) * q) for q in (0.22, 0.48, 0.74)]
 C_CUTS = [PAD_END, snap(PAD_END + (MAXQ - PAD_END) * 0.52)]
-D_END = seg_after(MAXQ)
+D_END = seg_after(MAXQ)                                        # max-Q vapour cone window
+E_START = (min((s0 for s0, s1, h in SEGS), key=lambda s0: abs(s0 - ARGS.e_start * FPS))
+           if ARGS.e_start >= 0 else D_END)
 D_CUTS = [MAXQ, snap(MAXQ + 2.5 * BAR), snap(MAXQ + 4.5 * BAR)]
 F_END = seg_after(BSEP)
 F_CUTS = [BSEP, snap(BSEP + 3 * BAR), snap(BSEP + 5.5 * BAR)]
 H_END = seg_after(FAIRSEP)
 H_CUTS = [FAIRSEP, snap(FAIRSEP + 2 * BAR)]
 J_CUTS = [SES, snap(SES + 3 * BAR), snap(SES + 6 * BAR)]
+if SECO - SES > 14 * BAR:                                      # long big drop: spread the three shots
+    J_CUTS = [SES, snap(SES + (SECO - SES) * 0.34), snap(SES + (SECO - SES) * 0.67)]
 SHOTS = [  # (start index, name)
     (A_CUTS[0], "A1_wide"), (A_CUTS[1], "A2_clock"), (A_CUTS[2], "A3_logo"), (A_CUTS[3], "A4_low"),
     (B_CUTS[0], "B1_ign"), (B_CUTS[1], "B2_tower"), (B_CUTS[2], "B3_track"), (B_CUTS[3], "B4_tail"),
     (C_CUTS[0], "C1_cloud"), (C_CUTS[1], "C2_side"),
     (D_CUTS[0], "D1_maxq"), (D_CUTS[1], "D2_under"), (D_CUTS[2], "D3_wide"),
-    (D_END, "E_calm"),
+    (E_START, "E_calm"),
     (F_CUTS[0], "F1_sep"), (F_CUTS[1], "F2_tail"), (F_CUTS[2], "F3_wide"),
     (F_END, "G_calm"),
     (H_CUTS[0], "H1_fair"), (H_CUTS[1], "H2_side"),
@@ -2264,7 +2286,7 @@ def text_obj(name, body, size, loc, mat, parent, align="CENTER", extrude=0.0):
 
 
 text_obj("ClockT", "T", 1.15, (-2.42, -0.01, -0.62), emissive("LEDAmber", (1.0, 0.42, 0.05), 9.0), CLK)
-text_obj("ClockTitle", "HIT A BUMP", 0.62, (0.55, -0.01, 0.62), emissive("LEDWhite", (1.0, 0.95, 0.88), 6.0), CLK)
+text_obj("ClockTitle", ARGS.title.replace("_", " "), 0.62, (0.55, -0.01, 0.62), emissive("LEDWhite", (1.0, 0.95, 0.88), 6.0), CLK)
 text_obj("ClockSub", "MISSION", 0.26, (-2.0, -0.01, 0.62), emissive("LEDWhiteDim", (0.9, 0.85, 0.8), 2.5), CLK)
 
 

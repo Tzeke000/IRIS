@@ -7,4 +7,4 @@ set -e
 [ $# -ge 2 ] || { echo "usage: $0 <unit-name> <command> [args...]" >&2; exit 2; }
 name=$1; shift
 exec systemd-run --user --unit="$name" --slice=iris-render.slice \
-  -p OOMScoreAdjust=500 -p MemoryMax=20G "$@"
+  -p OOMScoreAdjust=500 -p MemoryMax=${MEM:-20G} -p Nice=10 "$@"
