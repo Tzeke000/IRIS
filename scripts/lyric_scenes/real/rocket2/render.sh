@@ -34,7 +34,7 @@ PCT="${PCT:-100}"
 SAMPLES="${SAMPLES:-0}"
 MP4="${MP4:-$OUT_DIR/hit_a_bump_rocket2.mp4}"
 VRAMFLAG=""; [[ "${VRAM:-0}" == 1 ]] && VRAMFLAG="--vram"
-LOCK=/tmp/iris_gpu_render.lock
+LOCK="${LOCK:-/tmp/iris_gpu_render.lock}"   # parallel workers: give each its own
 FPS=30
 
 gpu() { flock "$LOCK" nice -n 15 "$@"; }
@@ -55,13 +55,13 @@ build() {
   [[ -f "$LIB" ]] || prep
   "$BLENDER" -b --factory-startup --python-exit-code 1 \
     --python "$HERE/build_scene.py" -- --timeline "$TIMELINE" --audio "$AUDIO" --out "$BLEND" \
-    --assets "$ASSETS" --lib "$LIB"
+    --assets "$ASSETS" --lib "$LIB" ${BUILD_ARGS:-}
 }
 
 render_range() {  # START END
   local s=$1 e=$2 c ce
   mkdir -p "$OUT_DIR/frames"
-  rm -f "$OUT_DIR"/frames/.tmp_f_*.png                 # leftovers of a killed run
+  [[ "${NO_TMP_CLEAN:-0}" == 1 ]] || rm -f "$OUT_DIR"/frames/.tmp_f_*.png   # leftovers of a killed run (parallel workers: skip)
   for ((c = s; c <= e; c += CHUNK)); do
     ce=$((c + CHUNK - 1)); ((ce > e)) && ce=$e
     # skip whole chunks that are already complete (no Blender launch at all)
