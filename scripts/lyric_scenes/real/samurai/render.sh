@@ -31,7 +31,7 @@ CHUNK="${CHUNK:-60}"
 PCT="${PCT:-100}"
 SAMPLES="${SAMPLES:-0}"
 MP4="${MP4:-$OUT_DIR/pull_me_close_samurai.mp4}"
-LOCK=/tmp/iris_gpu_render.lock
+LOCK="${LOCK:-/tmp/iris_gpu_render.lock}"   # parallel workers: give each its own
 FPS=30
 
 gpu() { flock "$LOCK" nice -n 15 "$@"; }
@@ -65,7 +65,7 @@ build() {
 render_range() {  # START END
   local s=$1 e=$2 c ce
   mkdir -p "$OUT_DIR/frames"
-  rm -f "$OUT_DIR"/frames/.tmp_f_*.png
+  [[ "${NO_TMP_CLEAN:-0}" == 1 ]] || rm -f "$OUT_DIR"/frames/.tmp_f_*.png   # parallel workers must not wipe each other
   for ((c = s; c <= e; c += CHUNK)); do
     ce=$((c + CHUNK - 1)); ((ce > e)) && ce=$e
     local missing=0 f
