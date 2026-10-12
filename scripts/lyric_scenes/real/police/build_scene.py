@@ -1,26 +1,29 @@
-"""POLICE — a realistic night police chase down a wet downtown boulevard (Blender 5.2, EEVEE).
+"""POLICE v2 — a night police chase: downtown avenue → exit ramp → elevated expressway → bridge → NITRO jump.
 
-Zeke 2026-10-12: rework the car-street scene "so it's a bit more realistic, the car and the buildings",
-using the new skills + MCP, to his hardstyle track "police". The 2.5-D carstreet look (beat-locked
-street, lights passing on the beat, nitro on the drop) is rebuilt in true 3-D:
+Zeke 2026-10-12 (v1 notes → v2):
+  * both cars drove backwards (models' noses are -Y)            → yaw 180 by default
+  * Corvette: only the tyre turned                               → whole wheel (rim/disc/hub islands) spins,
+                                                                   calipers stay; spin is FORWARD and capped
+                                                                   per frame so spokes never alias backwards
+  * better buildings + signs as we pass (like carstreet)        → ledges, pilasters, cornices, parapets,
+                                                                   roof gear, awnings, tower crown lights,
+                                                                   neon blade signs / channel letters / roof
+                                                                   billboards (3-D text), background city
+  * windows + headlights react to the music                     → per-material Value nodes baked per frame:
+                                                                   lit-window pulse, EQ window columns, kick
+                                                                   flashes; headlight lenses + spots pulse
+  * exit ramp → away from the city onto a bridge                → ramp in the avenue median at the calm
+                                                                   before the last drops, elevated deck over
+                                                                   the city, out over the river on a cable-
+                                                                   stayed bridge (geometry placed FROM the
+                                                                   lead's trajectory, so timing is exact)
+  * on the drop: nitro flames + off a ramp                      → BRIDGE OUT kicker: launch on frame 6200 (the
+                                                                   BIG drop), ballistic flight, landing on the
+                                                                   far deck; police brakes at the gap. Short
+                                                                   nitro bursts on every other drop entry.
 
-  cars       REAL downloaded models (Sketchfab, CC BY 4.0, credits in ASSETS.md): a sports car fleeing,
-             a police SUV chasing. Wheels spin at road speed, bodies pitch on kicks and lean in lane
-             changes. The police lightbar strobes red/blue to the music (alternating 1/8 notes in drops,
-             a white double-flash on every kick in the BIG drop) and throws coloured light on the
-             wet road and facades. A helicopter spotlight pool follows the lead car.
-  street     procedural, from CC0 Poly Haven scans (asphalt_02, concrete_floor_02): 4-lane avenue,
-             wet asphalt (puddle-varying roughness → reflections), painted lane dashes, raised
-             sidewalks, streetlights every 30 m, two cross streets per block.
-  buildings  ~70 per period, one object each: concrete/stone/glass facades with a real window grid in
-             world space, ~25 % of windows lit (warm/cool), lit storefronts + sign bands at street
-             level, aviation beacons on the towers. Pattern keyed on a per-building id (custom prop) so
-             the periodic copies are identical.
-  PERIODIC   the street repeats every L metres (3 copies built). Cars and cameras move in true
-             coordinates; every frame they are shifted back by k*L (k = floor(lead/L)), which is
-             invisible because the street is identical; the key before each wrap is CONSTANT and the
-             shutter opens at the frame start, so motion blur never smears across a wrap or a cut.
-
+PERIODIC street (v1): the avenue repeats every L m; moving things are shifted back by k*L each wrap. From the
+finale cut F_C the shift is FROZEN and the unique finale geometry (ramp/deck/bridge) lives in rendered coords.
 Everything is baked as keyframes (no drivers/handlers). Deterministic from the timeline npz.
 """
 import argparse
@@ -30,14 +33,14 @@ import sys
 
 import bpy
 import numpy as np
-from mathutils import Matrix, Vector
+from mathutils import Euler, Matrix, Vector
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
 sys.path.insert(0, HERE)
 import scene_helpers as H  # noqa: E402
-from scene_helpers import (MB, bake, bake_vec, blackbody, cube_obj, emissive, link, lk, M, nd,  # noqa: E402
-                           new_mat, no_shadow, set_color_keys, show, tex_box, V, value_node)
+from scene_helpers import (MB, bake, bake_vec, blackbody, cube_obj, emissive, lathe, link, lk, M, nd,  # noqa: E402
+                           new_mat, no_shadow, set_color_keys, show, tex_box, value_node, value_path)
 
 SONG = os.path.join(REPO, "state", "tzeke_songs", "police")
 
@@ -49,9 +52,11 @@ def parse_args():
     ap.add_argument("--audio", default=os.path.join(SONG, "police.wav"))
     ap.add_argument("--cars", default="/data/iris_assets/cars")
     ap.add_argument("--polyhaven", default="/data/iris_assets/polyhaven")
+    ap.add_argument("--font", default=os.path.join(REPO, "assets", "fonts", "Anton-Regular.ttf"))
     ap.add_argument("--out", default=os.path.join(REPO, "scratch", "scenes", "police3d", "police.blend"))
-    ap.add_argument("--lead-yaw", type=float, default=0.0, help="deg: rotate the sports car so its nose is +Y")
-    ap.add_argument("--police-yaw", type=float, default=0.0, help="deg: rotate the police SUV so its nose is +Y")
+    ap.add_argument("--lead-yaw", type=float, default=180.0, help="deg: the models' noses point -Y")
+    ap.add_argument("--police-yaw", type=float, default=180.0)
+    ap.add_argument("--wheel-step", type=float, default=0.22, help="max visible wheel turn per frame (rad)")
     return ap.parse_args(argv)
 
 
@@ -81,15 +86,6 @@ def age_env(age, tau):
     return np.where(a < 1e4, np.exp(-a / tau), 0.0)
 
 
-def ramp(i, a, b):
-    return np.clip((np.asarray(i, np.float64) - a) / max(b - a, 1e-9), 0.0, 1.0)
-
-
-def smoothstep(x):
-    x = np.clip(x, 0, 1)
-    return x * x * (3 - 2 * x)
-
-
 def hash01(*k):
     h = 2166136261
     for v in k:
@@ -97,6 +93,11 @@ def hash01(*k):
     h ^= h >> 13
     h = (h * 0x5BD1E995) & 0xFFFFFFFF
     return (h ^ (h >> 15)) / 4294967295.0
+
+
+def norm98(x):
+    x = np.asarray(x, np.float64)
+    return np.clip(x / (np.percentile(x, 98) + 1e-9), 0, 1)
 
 
 KICK = age_env(TL["T_kage"], 3.0)
@@ -111,24 +112,45 @@ STROBE = (TL["T_strobe_age"] == 0).astype(np.float64)
 DOWNBEATS = np.unique(TL["T_bar_start"])
 ENT = sorted(int(e) for e in TL["entries"])
 SEGS = [tuple(int(v) for v in s) for s in TL["segs"]]
+HOT_S = gsmooth(HOT, 4)
 
 
 def snap(f):
     return int(DOWNBEATS[np.argmin(np.abs(DOWNBEATS - f))])
 
 
+# music levels for the city (EQ window columns, pulses, flashes)
+EQ_L = np.clip(gsmooth(norm98(TL["bass"]), 1.2) * (0.25 + 0.75 * HOT_S), 0, 1)
+EQ_M = np.clip(gsmooth(norm98(TL["rms"]), 1.2) * (0.25 + 0.75 * HOT_S), 0, 1)
+EQ_H = np.clip(gsmooth(norm98(TL["high"]), 1.0) * (0.25 + 0.75 * HOT_S), 0, 1)
+PULSE = np.clip(KICK * (0.35 + 0.65 * HOT_S) + 0.25 * BASS / (BASS.max() + 1e-9), 0, 1.5)
+FLASH = np.clip(KICK * (0.35 * HOT_S + 0.9 * BIG), 0, 1.5)
+HEADL = 1.0 + 0.9 * KICK * np.maximum(HOT_S, 0.25) + 0.4 * BIG * STROBE
+
 # =====================================================================================
 # 2. THE CHASE (true coordinates; +Y = down the avenue)
 # =====================================================================================
 L = 480.0                                  # street period (m)
 LANES = np.array([-5.4, -1.8, 1.8, 5.4])
+F_C = 5548                                 # FINALE: calm section before the last drops (a shot cut)
+F_JUMP = 6200                              # BIG drop: take-off frame
 hot_s = gsmooth(HOT, 12)
 big_s = gsmooth(BIG, 12)
-SPEED = 24.0 + 17.0 * hot_s + 12.0 * big_s + 5.0 * gsmooth(KICK * HOT, 2)   # m/s (~86-200 km/h)
+# nitro: a burst on every drop entry, the full burn from the BIG drop on
+NITRO = np.zeros(N)
+for e in ENT:
+    if e < F_JUMP - 5:
+        NITRO[e:e + 40] = np.maximum(NITRO[e:e + 40], np.exp(-np.arange(min(40, N - e)) / 12.0))
+NITRO[F_JUMP:] = 1.0
+NITRO[6656:] = np.linspace(1.0, 0.55, N - 6656)
+NITRO_BIG = gsmooth((IDX >= F_JUMP).astype(float), 3)
+FIN_PUSH = gsmooth(np.clip((IDX - (F_C - 40)) / 100.0, 0, 1), 6)    # the finale runs hotter (room for the bridge)
+SPEED = (24.0 + 17.0 * hot_s + 12.0 * big_s + 5.0 * gsmooth(KICK * HOT, 2) + 14.0 * NITRO_BIG
+         + 13.0 * FIN_PUSH * (1 - NITRO_BIG))                                                 # m/s
 Y_LEAD = 60.0 + np.cumsum(SPEED) / FPS
 GAP = gsmooth(26.0 - 9.0 * hot_s - 5.0 * big_s + 3.0 * np.sin(IDX / FPS * 0.37), 8)
-Y_POL = Y_LEAD - GAP
-# lane changes: a new target lane at drop entries and every 4 bars inside drops (deterministic)
+# lane changes: a new target lane at drop entries and every 4 bars inside drops (deterministic);
+# from just before the finale only the two centre lanes (the ramp sits in the median)
 lane_t = np.zeros(N)
 cur = 2
 marks = sorted(set(ENT) | {snap(s0 + k * 4 * BAR) for s0, s1, h in SEGS if h for k in range(1, 8)
@@ -137,19 +159,100 @@ for j, m in enumerate(marks):
     cur = int((cur + 1 + int(hash01(m, 3) * 3)) % 4)
     lane_t[m:] = LANES[cur]
 lane_t[:marks[0] if marks else N] = LANES[2]
+LANE_LOCK = F_C - 70
+for m in [LANE_LOCK] + [m for m in marks if LANE_LOCK < m < F_JUMP - 60]:
+    lane_t[m:] = 1.8 if hash01(m, 5) > 0.5 else -1.8
+lane_t[F_JUMP - 60:] = lane_t[F_JUMP - 61]
 X_LEAD = gsmooth(lane_t, 9)
 X_POL = gsmooth(np.r_[np.full(14, X_LEAD[0]), X_LEAD[:-14]], 6)       # follows ~0.5 s later
+K_WRAP = np.floor((Y_LEAD - 140.0) / L) * L                          # shift applied to everything moving
+K_WRAP[F_C:] = K_WRAP[F_C]                                           # FROZEN for the finale
+WRAPS = np.nonzero(np.diff(K_WRAP) != 0)[0] + 1                      # first frame after each wrap
+KF = K_WRAP[F_C]
+YR_LEAD = Y_LEAD - K_WRAP                                            # rendered y
+
+# ---- finale geometry, placed from the lead's own trajectory (rendered coords) ----------
+G = 9.81
+DECK_H = 21.0                                   # expressway deck height (m)
+RAMP_Y0 = YR_LEAD[F_C + 50]                     # ramp foot: the lead gets there ~1.7 s after the cut
+RAMP_LEN = 230.0
+RAMP_Y1 = RAMP_Y0 + RAMP_LEN
+CITY_END = math.ceil((YR_LEAD[5990] + 1.0) / L) * L          # last period ends here → river
+KICK_Y1 = YR_LEAD[F_JUMP]                       # kicker lip = take-off point, exactly on the drop
+KICK_LEN, KICK_RISE = 16.0, 1.9
+KICK_Y0 = KICK_Y1 - KICK_LEN
+LAND_DROP = 3.0                                 # far deck is a little lower
+v_off = SPEED[F_JUMP]
+_ang = math.atan2(KICK_RISE, KICK_LEN) * 1.25   # lip curls up a little
+VZ0 = v_off * math.sin(_ang)
+_zt = DECK_H + KICK_RISE
+_t_land = (VZ0 + math.sqrt(VZ0 ** 2 + 2 * G * (_zt - (DECK_H - LAND_DROP)))) / G
+F_LAND = F_JUMP + int(round(_t_land * FPS))
+LAND_Y = YR_LEAD[min(F_LAND, N - 1)]
+LAND_Y0 = LAND_Y - 26.0                         # far deck's broken edge
+END_Y = YR_LEAD[-1] + 400.0
+print(f"[police] finale: ramp {RAMP_Y0:.0f}-{RAMP_Y1:.0f}  city ends {CITY_END:.0f}  kicker {KICK_Y0:.0f}-{KICK_Y1:.0f}"
+      f"  land {LAND_Y0:.0f}/{LAND_Y:.0f} (f{F_LAND}, air {_t_land:.2f}s, v {v_off:.0f} m/s)  end {END_Y:.0f}")
+
+
+def smooth01(x):
+    x = np.clip(x, 0, 1)
+    return x * x * (3 - 2 * x)
+
+
+def zprof(y):
+    """Road surface height along the finale route (rendered y)."""
+    y = np.asarray(y, np.float64)
+    z = DECK_H * smooth01((y - RAMP_Y0) / RAMP_LEN)
+    kick = np.clip((y - KICK_Y0) / KICK_LEN, 0, 1)
+    z = z + KICK_RISE * (kick ** 1.6) * (y <= KICK_Y1)
+    z = np.where(y >= LAND_Y0, DECK_H - LAND_DROP, z)
+    return z
+
+
+# lead height: road profile, ballistic between take-off and landing
+Z_LEAD = np.zeros(N)
+fin = IDX >= F_C
+Z_LEAD[fin] = zprof(YR_LEAD[fin])
+for i in range(F_JUMP, N):
+    t = (i - F_JUMP) / FPS
+    zb = _zt + VZ0 * t - 0.5 * G * t * t
+    zr = zprof(YR_LEAD[i]) if YR_LEAD[i] >= LAND_Y0 else -1e9      # nothing under the gap
+    if i > F_JUMP + 3 and zb <= zr:
+        break
+    Z_LEAD[i] = zb
+AIR = np.zeros(N, bool)
+AIR[F_JUMP:i] = True
+F_LAND = i
+# police: same route, but it brakes hard and stops short of the gap
+Y_POL = Y_LEAD - GAP                              # TRUE coordinates (no wrap jumps)
+y_stop = KICK_Y0 - 22.0 + KF
+vp = np.gradient(Y_POL) * FPS
+A_BRAKE = 8.5
+for i in range(F_C, N):
+    d_left = y_stop - Y_POL[i - 1]
+    v_prev = (Y_POL[i - 1] - Y_POL[i - 2]) * FPS
+    v_need = math.sqrt(2 * A_BRAKE * max(d_left, 0.0))
+    v = max(min(vp[i], v_need, v_prev + 0.5), 0.0)
+    Y_POL[i] = Y_POL[i - 1] + v / FPS
+YR_POL = Y_POL - K_WRAP
+Z_POL = np.zeros(N)
+Z_POL[fin] = zprof(YR_POL[fin])
+POL_STOP = int(np.argmax((IDX > F_C) & (np.gradient(YR_POL) * FPS < 0.3))) or N
+print(f"[police] police stops at y {YR_POL[-1]:.0f} (frame {POL_STOP})")
+
 DX_LEAD = np.gradient(X_LEAD) * FPS
 DX_POL = np.gradient(X_POL) * FPS
-K_WRAP = np.floor((Y_LEAD - 140.0) / L) * L                          # shift applied to everything moving
-WRAPS = np.nonzero(np.diff(K_WRAP) != 0)[0] + 1                      # first frame after each wrap
 
 # =====================================================================================
-# 3. SHOT LIST (cuts on drop entries and bar lines)
+# 3. SHOT LIST (cuts on drop entries and bar lines; scripted finale)
 # =====================================================================================
 SHOTS = []
 _cyc_i = [0]
 for s0, s1, h in SEGS:
+    if s0 >= F_C:
+        break
+    s1 = min(s1, F_C)
     if h == 0:                                                         # calm: long shots
         kinds = ["heli", "chase_high", "side_low"] if s1 - s0 > 6 * BAR else ["chase_high"]
         step = max((s1 - s0) / len(kinds), 1)
@@ -164,6 +267,22 @@ for s0, s1, h in SEGS:
             _cyc_i[0] += 1
             k += 1
             t += per
+# finale (F_C → end): ramp climb, expressway, bridge, the jump, the escape
+F_EXIT = snap(int(np.argmax(YR_LEAD * (IDX >= F_C) > CITY_END - 45)))   # the deck leaves the city
+FIN = [(F_C, "heli_ramp"), (snap(F_C + 2 * BAR), "side_low"), (snap(F_C + 4 * BAR), "chase_high"),
+       (5835, "front_reverse"), (snap(5835 + 1 * BAR), "flyby"), (snap(5835 + 2 * BAR), "bumper"),
+       (F_EXIT, "heli_bridge"), (snap(F_EXIT + 2 * BAR), "side_low"),
+       (6163, "kicker_view"), (F_JUMP, "jump_side"), (F_JUMP + 34, "land_chase"), (F_LAND + 30, "police_edge"),
+       (snap(F_LAND + 30 + 1.5 * BAR), "rear_low")]
+t = FIN[-1][0] + BAR
+cyc2 = ["side_low_lead", "front_reverse", "chase_lead", "rear_low", "heli_lead", "side_low_lead"]
+k = 0
+while t < 6656 - BAR * 0.6:
+    FIN.append((snap(t), cyc2[k % len(cyc2)]))
+    k += 1
+    t += BAR
+FIN.append((6656, "far"))
+SHOTS += FIN
 SHOTS = sorted({s: n for s, n in SHOTS}.items())
 SHOTS = [(s, n) for j, (s, n) in enumerate(SHOTS) if j == 0 or s > SHOTS[j - 1][0]]
 if SHOTS[0][0] != 0:
@@ -183,7 +302,7 @@ SC = bpy.context.scene
 for ob in list(bpy.data.objects):
     bpy.data.objects.remove(ob, do_unlink=True)
 for coll in (bpy.data.meshes, bpy.data.materials, bpy.data.lights, bpy.data.cameras, bpy.data.worlds,
-             bpy.data.node_groups, bpy.data.images):
+             bpy.data.node_groups, bpy.data.images, bpy.data.curves):
     for d in list(coll):
         coll.remove(d)
 H.SC = SC
@@ -229,7 +348,6 @@ def mat_asphalt():
     dark.inputs[0].default_value = 1.0
     lk(nt, col.outputs["Color"], dark.inputs[6])
     dark.inputs[7].default_value = (0.42, 0.42, 0.44, 1)             # wet asphalt is darker (albedo ~0.05)
-    # puddles: low-frequency noise → mirror-wet patches, the rest damp (rough 0.18-0.45)
     tcn = nd(nt, "ShaderNodeTexCoord")
     pn = nd(nt, "ShaderNodeTexNoise", inp={"Scale": 0.09, "Detail": 4.0, "Roughness": 0.6})
     lk(nt, tcn.outputs["Object"], pn.inputs["Vector"])
@@ -251,11 +369,11 @@ def mat_asphalt():
     return m
 
 
-def mat_concrete(name, tint, tile=2.5, rough=(0.5, 0.85)):
+def mat_concrete(name, tint, tile=2.5, rough=(0.5, 0.85), tex="concrete_floor_02"):
     m, nt = new_mat(name)
     b = nd(nt, "ShaderNodeBsdfPrincipled")
-    col = tex_box(nt, ph("concrete_floor_02", "diff"), tile)
-    rgh = tex_box(nt, ph("concrete_floor_02", "rough"), tile, True)
+    col = tex_box(nt, ph(tex, "diff"), tile)
+    rgh = tex_box(nt, ph(tex, "rough"), tile, True)
     bw = nd(nt, "ShaderNodeRGBToBW")
     lk(nt, col.outputs["Color"], bw.inputs[0])
     wear = nd(nt, "ShaderNodeMapRange", inp={"From Min": 0.15, "From Max": 0.7, "To Min": 0.75, "To Max": 1.05})
@@ -273,21 +391,35 @@ def mat_concrete(name, tint, tile=2.5, rough=(0.5, 0.85)):
     return m
 
 
-def mat_facade(name, tint, glassy=False):
+FACADE_NTS = []                                   # node trees whose music Value nodes get baked
+
+
+def mat_facade(name, tint, tex="concrete_floor_02", tile=4.0, glassy=False, colored_tex=False):
     """Building skin: scan-textured wall with a WORLD-SPACE window grid (floor 3.6 m, bay 3.2 m).
-    ~25 % of windows lit (warm or cool), keyed on the per-building id (object prop 'bid') so periodic
-    copies match. Ground floor (z < 5 m): lit storefront glass + a coloured sign band."""
+    ~20 % of windows lit (warm or cool), keyed on the per-building id (object prop 'bid') so periodic
+    copies match. Ground floor: lit storefront glass + a coloured sign band. MUSIC: lit windows pulse
+    (Pulse), a subset of dark windows flash on kicks (Flash), and on EQ buildings some window COLUMNS
+    fill up floor by floor with the bass / mids / highs (EqL / EqM / EqH; uses the 'bh' height prop)."""
     m, nt = new_mat(name)
     b = nd(nt, "ShaderNodeBsdfPrincipled")
-    col = tex_box(nt, ph("concrete_floor_02", "diff"), 4.0, coord=None)
-    bw = nd(nt, "ShaderNodeRGBToBW")
-    lk(nt, col.outputs["Color"], bw.inputs[0])
-    wear = nd(nt, "ShaderNodeMapRange", inp={"From Min": 0.15, "From Max": 0.7, "To Min": 0.7, "To Max": 1.05})
-    lk(nt, bw.outputs[0], wear.inputs["Value"])
-    wall = nd(nt, "ShaderNodeMix", data_type="RGBA", blend_type="MULTIPLY")
-    wall.inputs[0].default_value = 1.0
-    wall.inputs[6].default_value = tuple(tint) + (1,)
-    lk(nt, wear.outputs["Result"], wall.inputs[7])
+    col = tex_box(nt, ph(tex, "diff"), tile, coord=None)
+    if colored_tex:                                  # brick: keep the scan's own colour, tint lightly
+        wall = nd(nt, "ShaderNodeMix", data_type="RGBA", blend_type="MULTIPLY")
+        wall.inputs[0].default_value = 1.0
+        lk(nt, col.outputs["Color"], wall.inputs[6])
+        wall.inputs[7].default_value = tuple(tint) + (1,)
+    else:
+        bw = nd(nt, "ShaderNodeRGBToBW")
+        lk(nt, col.outputs["Color"], bw.inputs[0])
+        wear = nd(nt, "ShaderNodeMapRange", inp={"From Min": 0.15, "From Max": 0.7, "To Min": 0.7, "To Max": 1.05})
+        lk(nt, bw.outputs[0], wear.inputs["Value"])
+        wall = nd(nt, "ShaderNodeMix", data_type="RGBA", blend_type="MULTIPLY")
+        wall.inputs[0].default_value = 1.0
+        wall.inputs[6].default_value = tuple(tint) + (1,)
+        lk(nt, wear.outputs["Result"], wall.inputs[7])
+    pulse = value_node(nt, "Pulse").outputs[0]
+    flash = value_node(nt, "Flash").outputs[0]
+    eqs = [value_node(nt, n).outputs[0] for n in ("EqL", "EqM", "EqH")]
     geo = nd(nt, "ShaderNodeNewGeometry")
     otc = nd(nt, "ShaderNodeTexCoord")                 # OBJECT coords: identical in the periodic copies
     sp = nd(nt, "ShaderNodeSeparateXYZ")
@@ -309,6 +441,7 @@ def mat_facade(name, tint, glassy=False):
     roof_cut = M(nt, "LESS_THAN", M(nt, "ABSOLUTE", sn.outputs[2]), 0.5)       # no windows on roofs
     win = M(nt, "MULTIPLY", M(nt, "MULTIPLY", win, upper), roof_cut)
     bid = nd(nt, "ShaderNodeAttribute", attribute_type="OBJECT", attribute_name="bid")
+    bh = nd(nt, "ShaderNodeAttribute", attribute_type="OBJECT", attribute_name="bh")
     cmb = nd(nt, "ShaderNodeCombineXYZ")
     lk(nt, fl, cmb.inputs[0])
     lk(nt, bay, cmb.inputs[1])
@@ -318,14 +451,60 @@ def mat_facade(name, tint, glassy=False):
     sepw = nd(nt, "ShaderNodeSeparateColor")
     lk(nt, wn_.outputs["Color"], sepw.inputs[0])
     lit = M(nt, "GREATER_THAN", wn_.outputs["Value"], 0.80)
+    flashset = M(nt, "MULTIPLY", M(nt, "GREATER_THAN", wn_.outputs["Value"], 0.66), M(nt, "SUBTRACT", 1.0, lit))
     warm = M(nt, "GREATER_THAN", sepw.outputs[1], 0.35)
     lcol = nd(nt, "ShaderNodeMix", data_type="RGBA")
     lk(nt, warm, lcol.inputs[0])
     lcol.inputs[6].default_value = (0.75, 0.85, 1.0, 1)
     lcol.inputs[7].default_value = (1.0, 0.70, 0.40, 1)
     dim = M(nt, "ADD", 0.25, M(nt, "MULTIPLY", sepw.outputs[2], 0.75))
-    # storefront band (z < 4.6): lit glass in a per-building colour; sign strip 4.0-4.6 m
-    # shop windows: one per 3.2 m bay with 0.35 m mullions, z 0.5-3.3; about half the bays lit
+    # window interiors: a cross mullion (dark frame), venetian blinds on some, curtains half-drawn on
+    # others, and a ceiling-light gradient — so a lit window reads as a ROOM, not a flat white tile
+    a0, a1, b0, b1 = (0.04, 0.96, 0.10, 0.95) if glassy else (0.20, 0.80, 0.33, 0.82)
+    u = M(nt, "DIVIDE", M(nt, "SUBTRACT", fa, a0), a1 - a0)
+    v = M(nt, "DIVIDE", M(nt, "SUBTRACT", fz, b0), b1 - b0)
+    cmb3 = nd(nt, "ShaderNodeCombineXYZ")
+    lk(nt, fl, cmb3.inputs[0])
+    lk(nt, bay, cmb3.inputs[1])
+    lk(nt, M(nt, "ADD", M(nt, "MULTIPLY", bid.outputs["Fac"], 1.37), 3.3), cmb3.inputs[2])
+    wn3 = nd(nt, "ShaderNodeTexWhiteNoise", noise_dimensions="3D")
+    lk(nt, cmb3.outputs[0], wn3.inputs["Vector"])
+    sep3 = nd(nt, "ShaderNodeSeparateColor")
+    lk(nt, wn3.outputs["Color"], sep3.inputs[0])
+    mull = M(nt, "LESS_THAN", M(nt, "ABSOLUTE", M(nt, "SUBTRACT", u, 0.5)), 0.012 if glassy else 0.022)
+    if not glassy:
+        mull = M(nt, "MAXIMUM", mull, M(nt, "LESS_THAN", M(nt, "ABSOLUTE", M(nt, "SUBTRACT", v, 0.70)), 0.025))
+    slat = M(nt, "ADD", 0.45, M(nt, "MULTIPLY", M(nt, "GREATER_THAN", M(nt, "FRACT", M(nt, "MULTIPLY", v, 16.0)), 0.4), 0.55))
+    blinds = M(nt, "GREATER_THAN", sep3.outputs[0], 0.62)
+    slatf = M(nt, "ADD", 1.0, M(nt, "MULTIPLY", blinds, M(nt, "SUBTRACT", slat, 1.0)))
+    cw = M(nt, "MULTIPLY", sep3.outputs[2], 0.45)
+    side_sel = M(nt, "GREATER_THAN", sep3.outputs[1], 0.5)
+    curt = M(nt, "ADD", M(nt, "MULTIPLY", M(nt, "LESS_THAN", u, cw), M(nt, "SUBTRACT", 1.0, side_sel)),
+             M(nt, "MULTIPLY", M(nt, "GREATER_THAN", u, M(nt, "SUBTRACT", 1.0, cw)), side_sel))
+    curtf = M(nt, "SUBTRACT", 1.0, M(nt, "MULTIPLY", curt, 0.7))
+    grad = M(nt, "ADD", 0.7, M(nt, "MULTIPLY", v, 0.4))
+    nomull = M(nt, "SUBTRACT", 1.0, mull)
+    interior = M(nt, "MULTIPLY", M(nt, "MULTIPLY", slatf, curtf), M(nt, "MULTIPLY", grad, nomull))
+    # EQ columns: per (bay, building) — ~22 % of bays on EQ buildings; band picked per column
+    cmb2 = nd(nt, "ShaderNodeCombineXYZ")
+    lk(nt, bay, cmb2.inputs[0])
+    lk(nt, bid.outputs["Fac"], cmb2.inputs[1])
+    cmb2.inputs[2].default_value = 7.0
+    wn2 = nd(nt, "ShaderNodeTexWhiteNoise", noise_dimensions="3D")
+    lk(nt, cmb2.outputs[0], wn2.inputs["Vector"])
+    sep2 = nd(nt, "ShaderNodeSeparateColor")
+    lk(nt, wn2.outputs["Color"], sep2.inputs[0])
+    eq_bldg = M(nt, "GREATER_THAN", M(nt, "FRACT", M(nt, "MULTIPLY", bid.outputs["Fac"], 0.4142)), 0.45)
+    eq_col = M(nt, "MULTIPLY", M(nt, "LESS_THAN", wn2.outputs["Value"], 0.22), eq_bldg)
+    bandsel = sep2.outputs[0]
+    lvl = M(nt, "ADD", M(nt, "MULTIPLY", eqs[0], M(nt, "LESS_THAN", bandsel, 0.34)),
+            M(nt, "ADD", M(nt, "MULTIPLY", eqs[1], M(nt, "MULTIPLY", M(nt, "GREATER_THAN", bandsel, 0.34),
+                                                    M(nt, "LESS_THAN", bandsel, 0.67))),
+              M(nt, "MULTIPLY", eqs[2], M(nt, "GREATER_THAN", bandsel, 0.67))))
+    nfl = M(nt, "SUBTRACT", M(nt, "DIVIDE", bh.outputs["Fac"], 3.6), 1.5)
+    eq_on = M(nt, "LESS_THAN", M(nt, "SUBTRACT", fl, 1.0), M(nt, "MULTIPLY", lvl, nfl))
+    eqwin = M(nt, "MULTIPLY", M(nt, "MULTIPLY", win, eq_col), eq_on)
+    # storefronts: one per 3.2 m bay with mullions, z 0.5-3.3; about half the bays lit
     shop_bay = M(nt, "MULTIPLY", M(nt, "GREATER_THAN", fa, 0.06), M(nt, "LESS_THAN", fa, 0.94))
     store = M(nt, "MULTIPLY", M(nt, "LESS_THAN", sp.outputs[2], 3.3), M(nt, "GREATER_THAN", sp.outputs[2], 0.5))
     store = M(nt, "MULTIPLY", M(nt, "MULTIPLY", store, shop_bay), roof_cut)
@@ -341,19 +520,26 @@ def mat_facade(name, tint, glassy=False):
     lk(nt, M(nt, "GREATER_THAN", M(nt, "FRACT", M(nt, "MULTIPLY", bid.outputs["Fac"], 0.37)), 0.5), storec.inputs[0])
     storec.inputs[6].default_value = (1.0, 0.78, 0.55, 1)
     lk(nt, hue.outputs[0], storec.inputs[7])
-    # emission = windows (dim) + storefront + sign
-    e_win = M(nt, "MULTIPLY", M(nt, "MULTIPLY", win, lit), M(nt, "MULTIPLY", dim, 2.2))
+    # emission = windows (dim, pulsing) + kick flashes + EQ columns + storefront + sign
+    win_pulse = M(nt, "ADD", 0.75, M(nt, "MULTIPLY", pulse, 0.9))
+    e_win = M(nt, "MULTIPLY", M(nt, "MULTIPLY", win, lit), M(nt, "MULTIPLY", dim, M(nt, "MULTIPLY", win_pulse, 2.0)))
+    e_win = M(nt, "MULTIPLY", e_win, interior)
+    e_fl = M(nt, "MULTIPLY", M(nt, "MULTIPLY", win, flashset), M(nt, "MULTIPLY", flash, M(nt, "MULTIPLY", nomull, 2.6)))
+    e_eq = M(nt, "MULTIPLY", eqwin, M(nt, "MULTIPLY", nomull, 3.2))
     ecol = nd(nt, "ShaderNodeMix", data_type="RGBA")
     lk(nt, M(nt, "GREATER_THAN", M(nt, "ADD", store, sign), 0.5), ecol.inputs[0])
     lk(nt, lcol.outputs[2], ecol.inputs[6])
     lk(nt, storec.outputs[2], ecol.inputs[7])
-    estr = M(nt, "ADD", e_win, M(nt, "ADD", M(nt, "MULTIPLY", M(nt, "MULTIPLY", store, shop_lit),
-                                                     M(nt, "MULTIPLY", dim, 1.6)),
-                                   M(nt, "MULTIPLY", sign, 4.0)))
-    lk(nt, ecol.outputs[2], b.inputs["Emission Color"])
+    ecol2 = nd(nt, "ShaderNodeMix", data_type="RGBA")
+    lk(nt, eqwin, ecol2.inputs[0])
+    lk(nt, ecol.outputs[2], ecol2.inputs[6])
+    lk(nt, hue.outputs[0], ecol2.inputs[7])
+    estr = M(nt, "ADD", M(nt, "ADD", e_win, M(nt, "ADD", e_fl, e_eq)),
+             M(nt, "ADD", M(nt, "MULTIPLY", M(nt, "MULTIPLY", store, shop_lit), M(nt, "MULTIPLY", dim, 1.6)),
+               M(nt, "MULTIPLY", sign, 4.0)))
+    lk(nt, ecol2.outputs[2], b.inputs["Emission Color"])
     lk(nt, estr, b.inputs["Emission Strength"])
-    # glass where windows/storefronts are, wall elsewhere
-    glass = M(nt, "MAXIMUM", win, store)
+    glass = M(nt, "MAXIMUM", M(nt, "MULTIPLY", win, nomull), store)
     bc = nd(nt, "ShaderNodeMix", data_type="RGBA")
     lk(nt, glass, bc.inputs[0])
     lk(nt, wall.outputs[2], bc.inputs[6])
@@ -364,31 +550,104 @@ def mat_facade(name, tint, glassy=False):
     rmix.inputs[2].default_value = 0.78
     rmix.inputs[3].default_value = 0.05
     lk(nt, rmix.outputs[0], b.inputs["Roughness"])
-    bmp = nd(nt, "ShaderNodeBump", inp={"Strength": 0.35, "Distance": 0.08})      # window/shop recesses
+    # wall relief from the scan's normal map + window recesses
+    nrm = tex_box(nt, ph(tex, "nor_gl"), tile, True)
+    nmap = nd(nt, "ShaderNodeNormalMap", inp={"Strength": 0.8})
+    lk(nt, nrm.outputs["Color"], nmap.inputs["Color"])
+    bmp = nd(nt, "ShaderNodeBump", inp={"Strength": 0.35, "Distance": 0.08})
     lk(nt, M(nt, "MULTIPLY", glass, -1.0), bmp.inputs["Height"])
+    lk(nt, nmap.outputs["Normal"], bmp.inputs["Normal"])
     lk(nt, bmp.outputs["Normal"], b.inputs["Normal"])
     o = nd(nt, "ShaderNodeOutputMaterial")
     lk(nt, b.outputs[0], o.inputs["Surface"])
+    FACADE_NTS.append(nt)
     return m
 
 
 M_ROAD = mat_asphalt()
 M_WALK = mat_concrete("Sidewalk", (0.42, 0.41, 0.40), tile=2.0)
 M_CURB = mat_concrete("Curb", (0.55, 0.54, 0.52), tile=1.0)
+M_DECK = mat_concrete("DeckConcrete", (0.50, 0.49, 0.47), tile=3.0, tex="concrete_wall_006")
+M_ROOF = mat_concrete("RoofGear", (0.30, 0.30, 0.31), tile=1.5, rough=(0.35, 0.7), tex="concrete_wall_006")
 M_PAINT, _pnt = new_mat("LinePaint")
 _b = nd(_pnt, "ShaderNodeBsdfPrincipled", inp={"Base Color": (0.72, 0.72, 0.70, 1), "Roughness": 0.35})
 lk(_pnt, _b.outputs[0], nd(_pnt, "ShaderNodeOutputMaterial").inputs["Surface"])
 M_POLE, _pt = new_mat("Pole")
 _b = nd(_pt, "ShaderNodeBsdfPrincipled", inp={"Base Color": (0.05, 0.05, 0.055, 1), "Roughness": 0.4, "Metallic": 0.6})
 lk(_pt, _b.outputs[0], nd(_pt, "ShaderNodeOutputMaterial").inputs["Surface"])
+M_STEEL, _st = new_mat("Steel")
+_b = nd(_st, "ShaderNodeBsdfPrincipled", inp={"Base Color": (0.35, 0.36, 0.38, 1), "Roughness": 0.3, "Metallic": 1.0})
+lk(_st, _b.outputs[0], nd(_st, "ShaderNodeOutputMaterial").inputs["Surface"])
+M_PANEL, _pn = new_mat("SignPanel")
+_b = nd(_pn, "ShaderNodeBsdfPrincipled", inp={"Base Color": (0.02, 0.02, 0.025, 1), "Roughness": 0.45, "Metallic": 0.3})
+lk(_pn, _b.outputs[0], nd(_pn, "ShaderNodeOutputMaterial").inputs["Surface"])
 M_LAMP = emissive("StreetLamp", blackbody(3600), 40.0)
 M_BEACON = emissive("Beacon", (1.0, 0.05, 0.02), 30.0, objcolor_gain=True)
-FACADES = [mat_facade("FacadeLight", (0.62, 0.60, 0.56)), mat_facade("FacadeDark", (0.22, 0.22, 0.24)),
-           mat_facade("FacadeSand", (0.58, 0.48, 0.36)), mat_facade("GlassTower", (0.10, 0.12, 0.14), glassy=True),
-           mat_facade("FacadeBrick", (0.30, 0.21, 0.17))]
+M_NEON = emissive("Neon", (1.0, 1.0, 1.0), 7.0, objcolor_gain=True)
+M_CROWN = emissive("Crown", (0.75, 0.88, 1.0), 5.0, objcolor_gain=True)
+M_AMBER = emissive("Amber", (1.0, 0.45, 0.02), 40.0, objcolor_gain=True)
+AWN = [H.principled(f"Awning{k}", c, rough=0.7) for k, c in
+       enumerate([(0.35, 0.03, 0.03), (0.03, 0.18, 0.08), (0.03, 0.05, 0.22), (0.30, 0.20, 0.02)])]
+FACADES = [mat_facade("FacadeLight", (0.62, 0.60, 0.56)),
+           mat_facade("FacadeDark", (0.22, 0.22, 0.24), tex="concrete_wall_006"),
+           mat_facade("FacadeSand", (0.70, 0.60, 0.48), tex="painted_plaster_wall", tile=3.0),
+           mat_facade("GlassTower", (0.10, 0.12, 0.14), glassy=True),
+           mat_facade("FacadeBrick", (0.85, 0.80, 0.78), tex="red_brick_03", tile=2.2, colored_tex=True)]
+FONT = bpy.data.fonts.load(ARGS.font, check_existing=True)
+
+
+def text_obj(name, body, size, mat, loc, rot, parent=None, extrude=0.02, align_y="CENTER", spacing=1.0):
+    cu = bpy.data.curves.new(name, "FONT")
+    cu.body = body
+    cu.font = FONT
+    cu.size = size
+    cu.extrude = extrude
+    cu.align_x = "CENTER"
+    cu.align_y = align_y
+    cu.space_line = spacing
+    cu.materials.append(mat)
+    ob = bpy.data.objects.new(name, cu)
+    ob.location = loc
+    ob.rotation_euler = rot
+    return link(ob, parent)
+
+
+def prism(mb, c, r, h, n=10):
+    """Vertical n-gon prism (tanks, columns) into an MB."""
+    cx, cy, cz = c
+    ring = [(cx + r * math.cos(2 * math.pi * k / n), cy + r * math.sin(2 * math.pi * k / n)) for k in range(n)]
+    pts = [(x, y, cz) for x, y in ring] + [(x, y, cz + h) for x, y in ring]
+    faces = [(k, (k + 1) % n, n + (k + 1) % n, n + k) for k in range(n)]
+    faces += [tuple(range(n - 1, -1, -1)), tuple(range(n, 2 * n))]
+    mb.poly(pts, faces)
+
+
+# neon level patterns (per sign, keyed through object colour)
+def neon_level(mode, seed):
+    if mode == 0:                                                     # steady, faint breathing
+        return 0.9 + 0.1 * np.sin(IDX * 0.05 + seed)
+    if mode == 1:                                                     # kick pulse
+        return 0.55 + 0.9 * KICK * np.maximum(HOT_S, 0.2)
+    if mode == 2:                                                     # old tube: snare flicker
+        fl = (SNARE > 0.6) & (np.array([hash01(i, seed) for i in range(N)]) > 0.4)
+        return np.where(fl, 0.08, 1.0)
+    on = (np.floor(BEAT_PH * (2 if seed % 2 else 1)).astype(int) % 2 == 0)    # beat chaser
+    return np.where(HOT_S > 0.3, np.where(on, 1.3, 0.25), 0.9)
+
+
+def hsv(h, s=0.9, v=1.0):
+    import colorsys
+    return colorsys.hsv_to_rgb(h % 1.0, s, v)
+
+
+NEON_HUES = [0.0, 0.08, 0.13, 0.33, 0.5, 0.55, 0.62, 0.78, 0.86, 0.93]
+SIGN_WORDS = ("BAR", "HOTEL", "NOODLE", "DINER", "MOTEL", "TATTOO", "ARCADE", "PAWN", "KARAOKE", "LIQUOR",
+              "PIZZA", "CLUB", "RAMEN", "CASINO", "LOANS", "GARAGE", "SUSHI", "VIDEO", "TAXI", "OPEN")
+ROOF_WORDS = ("TZEKE000", "HOTEL", "CASINO", "DINER", "MOTEL", "NIGHT OWL", "KARAOKE")
+NEON_KEYS = []                                                        # (object, rgb, level array)
 
 # =====================================================================================
-# 6. THE STREET (one period built procedurally, then copied at -L, 0, +L)
+# 6. THE STREET (one period built procedurally, then copied)
 # =====================================================================================
 ROAD_W, WALK = 16.0, 4.0
 XF = ROAD_W / 2 + WALK                      # building front line (|x|)
@@ -396,6 +655,13 @@ CROSS = [(80.0, 16.0), (320.0, 16.0)]       # cross streets: (start y, width) wi
 rng = np.random.default_rng(2026)
 STREET = bpy.data.collections.new("StreetPeriod")
 SC.collection.children.link(STREET)
+
+
+def to_street(*obs):
+    for o in obs:
+        STREET.objects.link(o)
+        if o.name in SC.collection.objects:
+            SC.collection.objects.unlink(o)
 
 
 def in_cross(y0, y1):
@@ -421,26 +687,166 @@ def building_runs():
     return spans
 
 
-BUILDINGS = []                               # (object, height)
+BUILDINGS = []                               # (object, height, front x, centre y)
+ROOFG = MB()                                 # parapets, AC units, tanks, masts
+CROWN = MB()                                 # tower crown light strips
+AWNMB = [MB() for _ in AWN]
 bid = 0
+n_signs = 0
 for sx in (-1, 1):
     for y0, y1 in building_runs():
         bid += 1
         tall = rng.random() < 0.28
-        h = float(rng.uniform(48, 125) if tall else rng.uniform(13, 42))
+        nfl = int(rng.integers(14, 34) if tall else rng.integers(4, 12))
+        h = 3.6 * nfl + 1.2
         depth = float(rng.uniform(16, 28))
         inset = float(rng.uniform(0.0, 1.2))
         mb = MB()
         xf = sx * (XF + inset)
-        mb.box((xf + sx * depth / 2, (y0 + y1) / 2, h / 2), (depth, (y1 - y0) - 0.3, h))
+        yc, wy = (y0 + y1) / 2, (y1 - y0) - 0.3
+        mb.box((xf + sx * depth / 2, yc, h / 2), (depth, wy, h))
+        glassy = tall and rng.random() < 0.6
+        mat_i = 3 if glassy else (int(rng.integers(0, 5)) if not tall else int(rng.choice([0, 1, 2])))
+        if mat_i == 3 and not glassy:
+            mat_i = 4
+        top = h
         if h > 30 and rng.random() < 0.5:                                  # setback crown
-            mb.box((xf + sx * (depth / 2 + 2.0), (y0 + y1) / 2, h + 5.0), (depth - 4.0, (y1 - y0) - 4.0, 10.0))
-        mat = FACADES[3] if tall and rng.random() < 0.6 else FACADES[int(rng.integers(0, 5)) if not tall else int(rng.integers(0, 3))]
-        ob = mb.obj(f"Bldg{bid:03d}", mat)
+            mb.box((xf + sx * (depth / 2 + 2.0), yc, h + 5.4), (depth - 4.0, wy - 4.0, 10.8))
+            top = h + 10.8
+        if not glassy:
+            # relief: pilasters every 2 bays, floor-line string courses, a canopy band, a cornice
+            px = xf - sx * 0.14
+            for yy in np.arange(math.ceil((y0 + 0.6) / 6.4) * 6.4, y1 - 0.6, 6.4):
+                mb.box((px, yy, (5.2 + h) / 2), (0.28, 0.55, h - 5.2))
+            every = int(rng.integers(3, 6))
+            for f in range(every, nfl, every):
+                mb.box((xf - sx * 0.09, yc, 3.6 * f), (0.18, wy, 0.26))
+            mb.box((xf - sx * 0.3, yc, 4.65), (0.6, wy, 0.3))                       # canopy band
+            mb.box((xf - sx * 0.35, yc, h - 0.4), (0.7, wy + 0.3, 0.8))            # cornice
+            # parapet ring
+            for (cx_, cy_, sx_, sy_) in ((xf + sx * 0.15, yc, 0.3, wy), (xf + sx * (depth - 0.15), yc, 0.3, wy),
+                                         (xf + sx * depth / 2, y0 + 0.3, depth, 0.3),
+                                         (xf + sx * depth / 2, y1 - 0.45, depth, 0.3)):
+                ROOFG.box((cx_, cy_, h + 0.5), (sx_, sy_, 1.0))
+        else:
+            # glass tower: vertical mullion fins every bay + a light strip at the crown
+            for yy in np.arange(math.ceil((y0 + 0.3) / 3.2) * 3.2, y1 - 0.3, 3.2):
+                mb.box((xf - sx * 0.08, yy, (5.2 + h) / 2), (0.16, 0.12, h - 5.2))
+            CROWN.box((xf - sx * 0.06, yc, top - 0.6), (0.1, wy - 0.4, 0.35))
+            CROWN.box((xf - sx * 0.06, yc, top - 1.6), (0.1, wy - 0.4, 0.12))
+        # roof gear: AC units, tanks, masts
+        for _ in range(int(rng.integers(1, 4))):
+            ax = xf + sx * float(rng.uniform(3, depth - 3))
+            ay = float(rng.uniform(y0 + 3, y1 - 3))
+            ROOFG.box((ax, ay, top + 0.7), (float(rng.uniform(1.5, 3.5)), float(rng.uniform(1.5, 3)), 1.4))
+        if not tall and rng.random() < 0.45:
+            tx = xf + sx * float(rng.uniform(4, depth - 4))
+            ty = float(rng.uniform(y0 + 4, y1 - 4))
+            for lx_, ly_ in ((-1.2, -1.2), (1.2, -1.2), (-1.2, 1.2), (1.2, 1.2)):
+                ROOFG.box((tx + lx_, ty + ly_, top + 1.5), (0.2, 0.2, 3.0))
+            prism(ROOFG, (tx, ty, top + 3.0), 2.0, 3.8)
+        if tall and rng.random() < 0.6:
+            ROOFG.box((xf + sx * depth / 2, yc, top + 7.0), (0.35, 0.35, 14.0))
+        # awnings over the shop bays
+        if not glassy and rng.random() < 0.55:
+            am = AWNMB[int(rng.integers(0, len(AWN)))]
+            tilt = Matrix.Rotation(sx * math.radians(-14), 3, "Y")
+            for yy in np.arange(math.ceil(y0 / 3.2) * 3.2 + 1.6, y1 - 1.6, 3.2):
+                if rng.random() < 0.7:
+                    am.box((xf - sx * 0.65, yy, 3.55), (1.3, 2.7, 0.08), rot=tilt)
+        ob = mb.obj(f"Bldg{bid:03d}", FACADES[mat_i])
         ob["bid"] = float(bid)
-        STREET.objects.link(ob)
-        SC.collection.objects.unlink(ob)
-        BUILDINGS.append((ob, h, xf, (y0 + y1) / 2))
+        ob["bh"] = float(h)
+        to_street(ob)
+        BUILDINGS.append((ob, h, xf, yc))
+        # ---- signs ----
+        r = rng.random()
+        hue = NEON_HUES[int(rng.integers(0, len(NEON_HUES)))]
+        rgb = hsv(hue)
+        mode = int(rng.integers(0, 4))
+        if r < 0.55 and wy > 9:                                            # blade sign (faces traffic)
+            word = SIGN_WORDS[int(rng.integers(0, len(SIGN_WORDS)))]
+            n = len(word)
+            Ls = 0.95 * n + 0.7
+            by = float(rng.uniform(y0 + 3.0, y1 - 3.0))
+            bx = xf - sx * 1.25
+            bz = 5.6 + Ls / 2
+            pm = MB()
+            pm.box((xf - sx * 0.15, by, bz), (0.3, 0.12, 0.12))                      # brackets
+            pm.box((bx, by, bz), (1.5, 0.22, Ls))
+            pob = pm.obj(f"BladePanel{bid}", M_PANEL)
+            nb = MB()
+            for dy in (-0.13, 0.13):
+                for (cx_, cz_, sx_, sz_) in ((bx, bz + Ls / 2 - 0.05, 1.5, 0.07), (bx, bz - Ls / 2 + 0.05, 1.5, 0.07),
+                                             (bx - 0.72, bz, 0.07, Ls), (bx + 0.72, bz, 0.07, Ls)):
+                    nb.box((cx_, by + dy, cz_), (sx_, 0.04, sz_))
+            nob = nb.obj(f"BladeNeon{bid}", M_NEON)
+            body = "\n".join(word)
+            t1 = text_obj(f"BladeTxtA{bid}", body, 0.95, M_NEON, (bx, by - 0.125, bz + 0.12),
+                          (math.pi / 2, 0, 0), spacing=0.86)
+            t2 = text_obj(f"BladeTxtB{bid}", body, 0.95, M_NEON, (bx, by + 0.125, bz + 0.12),
+                          (math.pi / 2, 0, math.pi), spacing=0.86)
+            lvl = neon_level(mode, bid)
+            for o_ in (nob, t1, t2):
+                no_shadow(o_)
+                NEON_KEYS.append((o_, rgb, lvl))
+            to_street(pob, nob, t1, t2)
+            n_signs += 1
+        elif r < 0.85 and not glassy:                                      # channel letters over the shop
+            word = SIGN_WORDS[int(rng.integers(0, len(SIGN_WORDS)))]
+            if rng.random() < 0.5:
+                word = word + " " + SIGN_WORDS[int(rng.integers(0, len(SIGN_WORDS)))]
+            size = min(1.1, wy / (0.62 * len(word) + 1))
+            t1 = text_obj(f"Fascia{bid}", word, size, M_NEON, (xf - sx * 0.5, yc, 4.95),
+                          (math.pi / 2, 0, -sx * math.pi / 2), align_y="BOTTOM", extrude=0.05)
+            no_shadow(t1)
+            NEON_KEYS.append((t1, rgb, neon_level(mode, bid)))
+            to_street(t1)
+            n_signs += 1
+        elif not tall and wy > 14:                                         # roof billboard facing traffic
+            word = ROOF_WORDS[int(rng.integers(0, len(ROOF_WORDS)))]
+            bw_ = min(wy - 2, 0.9 * 1.6 * len(word) + 2)
+            bxc = xf + sx * min(depth / 2, 8.0)
+            pm = MB()
+            for lx_ in (-bw_ / 2 + 0.5, bw_ / 2 - 0.5):
+                pm.box((bxc + lx_, yc, h + 1.5), (0.25, 0.25, 3.0))
+            pm.box((bxc, yc, h + 4.6), (bw_, 0.3, 3.4))
+            pob = pm.obj(f"BillPanel{bid}", M_PANEL)
+            t1 = text_obj(f"BillTxtA{bid}", word, 2.2, M_NEON, (bxc, yc - 0.17, h + 4.6),
+                          (math.pi / 2, 0, 0))
+            t2 = text_obj(f"BillTxtB{bid}", word, 2.2, M_NEON, (bxc, yc + 0.17, h + 4.6),
+                          (math.pi / 2, 0, math.pi))
+            lvl = neon_level(1 if word == "TZEKE000" else mode, bid)
+            for o_ in (t1, t2):
+                no_shadow(o_)
+                NEON_KEYS.append((o_, rgb if word != "TZEKE000" else hsv(0.55), lvl))
+            to_street(pob, t1, t2)
+            n_signs += 1
+ro_ = ROOFG.obj("RoofGear", M_ROOF)
+cr_ = CROWN.obj("CrownLights", M_CROWN)
+no_shadow(cr_)
+to_street(ro_, cr_)
+for k, am in enumerate(AWNMB):
+    if am.v:
+        to_street(am.obj(f"Awnings{k}", AWN[k]))
+# background city behind the street rows (periodic too): blocks 40 m with 14 m streets
+for sx in (-1, 1):
+    mbs = [MB() for _ in FACADES]
+    for bx in np.arange(62.0, 430.0, 54.0):
+        for by in np.arange(27.0, L, 54.0):
+            for _ in range(int(rng.integers(1, 3))):
+                h = float(12 + 95 * rng.random() ** 2.4 + (25 if bx < 120 and rng.random() < 0.3 else 0))
+                h = 3.6 * round(h / 3.6) + 1.2
+                w_, d_ = float(rng.uniform(14, 36)), float(rng.uniform(14, 36))
+                ox, oy = float(rng.uniform(-10, 10)), float(rng.uniform(-10, 10))
+                mi = int(rng.choice([0, 1, 2, 3, 3, 4]))
+                mbs[mi].box((sx * (bx + ox), by + oy, h / 2), (w_, d_, h))
+    for k, m_ in enumerate(mbs):
+        if m_.v:
+            ob = m_.obj(f"BgCity{'LR'[sx > 0]}{k}", FACADES[k])
+            ob["bid"] = float(500 + k * 7 + (sx > 0))
+            ob["bh"] = 60.0
+            to_street(ob)
 # road, sidewalks, curbs, lane paint for the period
 road = MB()
 road.box((0, L / 2, -0.05), (ROAD_W, L, 0.1))
@@ -474,10 +880,8 @@ for c0, w in CROSS:                          # zebra crossings at each cross str
     for k in range(9):
         paint.box((-6.4 + k * 1.6, c0 - 2.0, 0.006), (0.8, 3.0, 0.012))
 po = paint.obj("LanePaint", M_PAINT)
-for o in (ro, wo_, co_, po):
-    STREET.objects.link(o)
-    SC.collection.objects.unlink(o)
-# streetlights every 30 m, staggered sides, plus beacons on the towers
+to_street(ro, wo_, co_, po)
+# streetlights every 30 m, both sides
 LAMPS = []
 for k, y in enumerate(np.arange(15.0, L, 30.0)):
     if in_cross(y - 3, y + 3):
@@ -498,9 +902,7 @@ for k, y in enumerate(np.arange(15.0, L, 30.0)):
         ld.use_shadow = False
         lo = bpy.data.objects.new(ld.name, ld)
         lo.location = (px - sx * 2.3, y, 8.6)
-        for o in (pole, head):
-            STREET.objects.link(o)
-            SC.collection.objects.unlink(o)
+        to_street(pole, head)
         STREET.objects.link(lo)
         LAMPS.append(lo)
 BEACONS = []
@@ -508,52 +910,296 @@ for ob, h, xf, yc in BUILDINGS:
     if h > 60:
         bo = cube_obj(f"Beacon{ob.name}", M_BEACON, loc=(xf + np.sign(xf) * 6, yc, h + 0.4), scale=(0.25, 0.25, 0.25))
         no_shadow(bo)
-        STREET.objects.link(bo)
-        SC.collection.objects.unlink(bo)
+        to_street(bo)
         BEACONS.append(bo)
-# the period copies: collection instances at -L and +L (identical by construction)
-for k in (-1, 1):
+# the period copies: collection instances (identical by construction). -1..+1 always; the finale adds
+# copies up to the river (from F_C, when the shift is frozen)
+K_EDGE = int(round(CITY_END / L))
+for k in range(-1, K_EDGE):
+    if k == 0:
+        continue
     inst = bpy.data.objects.new(f"StreetCopy{k:+d}", None)
     inst.instance_type = "COLLECTION"
     inst.instance_collection = STREET
     inst.location = (0, k * L, 0)
     link(inst)
+    if k > 1:
+        show(inst, IDX >= F_C)
 blink = ((IDX / FPS * 0.5) % 1.0 < 0.18).astype(float)          # aviation beacons ~0.5 Hz
 for bo in BEACONS:
     set_color_keys(bo, np.stack([blink, blink * 0.05, blink * 0.02], 1))
-print("[police] street:", len(BUILDINGS), "buildings,", len(LAMPS), "streetlights,", len(BEACONS), "beacons / period")
+crown_lvl = 0.5 + 0.9 * np.clip(gsmooth(EQ_L, 1.0), 0, 1.2)
+set_color_keys(cr_, crown_lvl)
+for o_, rgb, lvl in NEON_KEYS:
+    set_color_keys(o_, np.stack([lvl * rgb[0], lvl * rgb[1], lvl * rgb[2]], 1))
+for nt in FACADE_NTS:
+    for nm, arr in (("Pulse", PULSE), ("Flash", FLASH), ("EqL", EQ_L), ("EqM", EQ_M), ("EqH", EQ_H)):
+        bake(nt, value_path(nm), arr)
+print("[police] street:", len(BUILDINGS), "buildings,", n_signs, "signs,", len(LAMPS), "streetlights,",
+      len(BEACONS), "beacons / period; copies to", K_EDGE)
 
 # =====================================================================================
-# 7. THE CARS (real models; normalised: nose +Y, centred, wheels on z=0)
+# 7. FINALE GEOMETRY: ramp, expressway deck, river, bridge, BRIDGE OUT kicker, far deck
 # =====================================================================================
+FINALE = []                                   # objects shown only from F_C on
+DECK_HW = 5.2                                 # deck half width
+STEP = 2.0
+M_WATER, _wt = new_mat("River")
+_b = nd(_wt, "ShaderNodeBsdfPrincipled", inp={"Base Color": (0.004, 0.006, 0.009, 1), "Roughness": 0.04})
+_tc = nd(_wt, "ShaderNodeTexCoord")
+_nz = nd(_wt, "ShaderNodeTexNoise", inp={"Scale": 0.35, "Detail": 6.0})
+lk(_wt, _tc.outputs["Object"], _nz.inputs["Vector"])
+_bp = nd(_wt, "ShaderNodeBump", inp={"Strength": 0.12})
+lk(_wt, _nz.outputs["Fac"], _bp.inputs["Height"])
+lk(_wt, _bp.outputs["Normal"], _b.inputs["Normal"])
+lk(_wt, _b.outputs[0], nd(_wt, "ShaderNodeOutputMaterial").inputs["Surface"])
+M_HAZ, _hz = new_mat("Hazard")
+_b = nd(_hz, "ShaderNodeBsdfPrincipled", inp={"Roughness": 0.5})
+_tc = nd(_hz, "ShaderNodeTexCoord")
+_sepz = nd(_hz, "ShaderNodeSeparateXYZ")
+lk(_hz, _tc.outputs["Object"], _sepz.inputs[0])
+_st_ = M(_hz, "GREATER_THAN", M(_hz, "FRACT", M(_hz, "MULTIPLY", M(_hz, "ADD", _sepz.outputs[0], _sepz.outputs[1]), 0.8)), 0.5)
+_hc = nd(_hz, "ShaderNodeMix", data_type="RGBA")
+lk(_hz, _st_, _hc.inputs[0])
+_hc.inputs[6].default_value = (0.02, 0.02, 0.02, 1)
+_hc.inputs[7].default_value = (0.75, 0.45, 0.02, 1)
+lk(_hz, _hc.outputs[2], _b.inputs["Base Color"])
+lk(_hz, _b.outputs[0], nd(_hz, "ShaderNodeOutputMaterial").inputs["Surface"])
+M_CONE = H.principled("Cone", (0.9, 0.22, 0.02), rough=0.5, emit=(1.0, 0.3, 0.05), emit_strength=0.3)
+WATER_Z = -14.0
 
 
-def split_by_y(o, y_split, tag):
-    """Split a mesh into its rear (y < y_split) and front halves → two objects (axle groups)."""
-    import bmesh
-    out = []
-    for nm, keep_front in (("R", False), ("F", True)):
-        bm = bmesh.new()
-        try:
-            bm.from_mesh(o.data)
-            kill = [v for v in bm.verts if (v.co.y > y_split) != keep_front]
-            bmesh.ops.delete(bm, geom=kill, context="VERTS")
-            if len(bm.verts) == 0:
+def fin(o):
+    FINALE.append(o)
+    return o
+
+
+def strip(name, y0, y1, prof, mat, zfun, step=STEP):
+    """Extrude a closed 2-D cross-section [(x, dz)] along y, following z = zfun(y)."""
+    ys = np.arange(y0, y1 + 1e-6, step)
+    zs = zfun(ys)
+    n = len(prof)
+    verts, faces = [], []
+    for j, (y, z) in enumerate(zip(ys, zs)):
+        for x, dz in prof:
+            verts.append((x, y, z + dz))
+    for j in range(len(ys) - 1):
+        for k in range(n):
+            a, b_ = j * n + k, j * n + (k + 1) % n
+            faces.append((a, b_, b_ + n, a + n))
+    faces.append(tuple(range(n - 1, -1, -1)))
+    faces.append(tuple((len(ys) - 1) * n + k for k in range(n)))
+    return fin(H.mesh_obj(name, verts, faces, mat))
+
+
+def zroad(y):
+    return zprof(y)
+
+
+SEC_DECK = [(-DECK_HW, 0.0), (DECK_HW, 0.0), (DECK_HW, -0.25), (DECK_HW - 0.6, -1.3), (-DECK_HW + 0.6, -1.3),
+            (-DECK_HW, -0.25)]
+SEC_TOP = [(-DECK_HW + 0.35, 0.02), (DECK_HW - 0.35, 0.02), (DECK_HW - 0.35, 0.0), (-DECK_HW + 0.35, 0.0)]
+SEG1 = (RAMP_Y0 - 4.0, KICK_Y0)                 # ramp + deck up to the kicker
+SEG3 = (LAND_Y0, END_Y)
+for nm, (a, b_) in (("A", SEG1), ("C", SEG3)):
+    strip(f"Deck{nm}", a, b_, SEC_DECK, M_DECK, zroad)
+    strip(f"DeckTop{nm}", a, b_, SEC_TOP, M_ROAD, zroad)
+    for sx in (-1, 1):
+        strip(f"Parapet{nm}{sx}", a, b_, [(sx * DECK_HW - 0.2, 0.0), (sx * DECK_HW + 0.0, 0.0),
+                                          (sx * DECK_HW + 0.0, 1.0), (sx * DECK_HW - 0.28, 1.0),
+                                          (sx * DECK_HW - 0.42, 0.25)][::sx], M_DECK, zroad)
+# the ramp foot: retaining walls down to the street while the deck is low
+for sx in (-1, 1):
+    strip(f"RampWall{sx}", RAMP_Y0 - 4.0, RAMP_Y0 + RAMP_LEN * 0.45,
+          [(sx * (DECK_HW - 0.1), -8.0), (sx * DECK_HW, -8.0), (sx * DECK_HW, -0.2), (sx * (DECK_HW - 0.1), -0.2)][::sx],
+          M_DECK, zroad)
+# kicker: hazard-striped wedge, full width
+kick_prof = [(-DECK_HW + 0.4, 0.0), (DECK_HW - 0.4, 0.0), (DECK_HW - 0.4, -1.2), (-DECK_HW + 0.4, -1.2)]
+strip("Kicker", KICK_Y0, KICK_Y1, kick_prof, M_HAZ, zroad, step=0.5)
+strip("DeckKickBase", KICK_Y0, KICK_Y1, SEC_DECK, M_DECK, lambda y: np.full_like(y, DECK_H))
+# lane paint on the deck
+dp = MB()
+for y in np.arange(SEG1[0] + 6, SEG3[1], 12.0):
+    if SEG1[1] - 2 < y < SEG3[0] + 2:
+        continue
+    z = float(zroad(np.array([y]))[0])
+    dp.box((0.0, y, z + 0.035), (0.15, 4.0, 0.02))
+    for sx in (-1, 1):
+        dp.box((sx * (DECK_HW - 0.8), y, z + 0.035), (0.15, 12.0, 0.02))
+fin(dp.obj("DeckPaint", M_PAINT))
+# piers: in the median on the street, into the river beyond the city
+pm = MB()
+for y in np.arange(RAMP_Y0 + 60, END_Y, 34.0):
+    if KICK_Y1 + 2 < y < LAND_Y0 - 2:
+        continue
+    z = float(zroad(np.array([y]))[0])
+    if z < 5:
+        continue
+    base = 0.0 if y < CITY_END else WATER_Z
+    pm.box((0, y, (base + z - 1.3) / 2), (2.2, 2.2, z - 1.3 - base))
+    pm.box((0, y, z - 1.6), (7.0, 2.6, 0.7))
+fin(pm.obj("Piers", M_DECK))
+# deck lamps: poles on both parapets, emissive heads; a real light every other pole
+lp = MB()
+heads = MB()
+for k, y in enumerate(np.arange(RAMP_Y0 + 40, END_Y, 36.0)):
+    if KICK_Y0 - 6 < y < LAND_Y0 + 4:
+        continue
+    z = float(zroad(np.array([y]))[0])
+    sx = 1 if k % 2 else -1
+    lp.box((sx * (DECK_HW + 0.2), y, z + 4.5), (0.2, 0.2, 9.0))
+    lp.box((sx * (DECK_HW - 0.8), y, z + 8.95), (2.2, 0.14, 0.12))
+    heads.box((sx * (DECK_HW - 1.7), y, z + 8.82), (0.7, 0.36, 0.1))
+    if k % 2 == 0:
+        ld = bpy.data.lights.new(f"DeckLamp{k}", "SPOT")
+        ld.energy = 1900.0
+        ld.color = blackbody(4200)
+        ld.spot_size = math.radians(120)
+        ld.spot_blend = 0.6
+        ld.use_shadow = False
+        lo = link(bpy.data.objects.new(ld.name, ld))
+        lo.location = (sx * (DECK_HW - 1.7), y, z + 8.6)
+        fin(lo)
+fin(lp.obj("DeckPoles", M_POLE))
+hh = fin(heads.obj("DeckLampHeads", M_LAMP))
+no_shadow(hh)
+# river + embankment + far shore skyline
+wm = MB()
+wm.box((0, (CITY_END + END_Y + 3000) / 2, WATER_Z), (6000, END_Y + 3000 - CITY_END, 0.2))
+fin(wm.obj("River", M_WATER))
+em = MB()
+em.box((0, CITY_END + 1.0, (WATER_Z + 0.2) / 2), (900, 2.0, 0.2 - WATER_Z))
+em.box((0, CITY_END + 0.5, 0.6), (900, 0.25, 1.0))
+fin(em.obj("Embankment", M_CURB))
+far = [MB() for _ in FACADES]
+far_y = YR_LEAD[-1] + 900
+for k in range(260):
+    x = float(rng.uniform(-1600, 1600))
+    y = far_y + float(rng.uniform(0, 500))
+    h = float(15 + 150 * rng.random() ** 2.6)
+    h = 3.6 * round(h / 3.6) + 1.2
+    far[int(rng.choice([0, 1, 2, 3, 3, 4]))].box((x, y, WATER_Z + h / 2 + 8), (rng.uniform(16, 40), rng.uniform(16, 40), h))
+for sx in (-1, 1):                                   # river banks left and right: skyline in every direction
+    for k in range(320):
+        x = sx * float(rng.uniform(420, 1700))
+        y = float(rng.uniform(CITY_END - 300, far_y + 200))
+        h = float(12 + 120 * rng.random() ** 2.8)
+        h = 3.6 * round(h / 3.6) + 1.2
+        far[int(rng.choice([0, 1, 2, 3, 3, 4]))].box((x, y, WATER_Z + h / 2 + 6), (rng.uniform(16, 40), rng.uniform(16, 40), h))
+for k, m_ in enumerate(far):
+    if m_.v:
+        ob = fin(m_.obj(f"FarShore{k}", FACADES[k]))
+        ob["bid"] = float(900 + k)
+        ob["bh"] = 80.0
+# cable-stayed pylon over the river (between the city and the kicker)
+PYL_Y = CITY_END + 0.55 * (KICK_Y0 - CITY_END)
+if KICK_Y0 - CITY_END > 150:
+    pyl = MB()
+    ptop = DECK_H + 72.0
+    for sx in (-1, 1):
+        pyl.beam((sx * 9.0, PYL_Y, WATER_Z), (sx * 6.6, PYL_Y, ptop), 2.6)
+    pyl.box((0, PYL_Y, DECK_H - 2.0), (19.0, 3.0, 2.0))
+    pyl.box((0, PYL_Y, ptop - 6.0), (14.0, 2.6, 2.0))
+    fin(pyl.obj("Pylon", M_DECK))
+    cab = MB()
+    for sx in (-1, 1):
+        for d in np.arange(-150, 151, 15):
+            if abs(d) < 10:
                 continue
-            me = bpy.data.meshes.new(f"{o.name}_{nm}")
-            bm.to_mesh(me)
-        finally:
-            bm.free()
-        for m in o.data.materials:
-            me.materials.append(m)
-        ob = bpy.data.objects.new(me.name, me)
-        link(ob)
-        out.append(ob)
-    bpy.data.objects.remove(o, do_unlink=True)
-    return out
+            ya = PYL_Y + d
+            if not (CITY_END + 5 < ya < KICK_Y0 - 2):
+                continue
+            zt = ptop - 8 - 40 * (1 - abs(d) / 150)
+            cab.beam((sx * 6.9, PYL_Y + np.sign(d) * 1.0, zt), (sx * (DECK_HW - 0.1), ya, DECK_H + 0.6), 0.09)
+    fin(cab.obj("Cables", M_STEEL))
+    pb = cube_obj("PylonBeacon", M_BEACON, loc=(0, PYL_Y, ptop + 0.6), scale=(0.4, 0.4, 0.4))
+    no_shadow(fin(pb))
+    set_color_keys(pb, np.stack([blink, blink * 0.05, blink * 0.02], 1))
+# BRIDGE OUT: cones, amber flashers, signs, barriers on both broken edges
+cm = MB()
+for y in np.arange(KICK_Y0 - 140, KICK_Y0 - 4, 6.0):
+    for sx in (-1, 1):
+        prism(cm, (sx * (DECK_HW - 0.9), y, DECK_H), 0.22, 0.7, n=8)
+fin(cm.obj("Cones", M_CONE))
+AMBERS = []
+for k, y in enumerate(np.arange(KICK_Y0 - 120, KICK_Y0 + 1, 10.0)):
+    for sx in (-1, 1):
+        a = cube_obj(f"Amber{k}{sx}", M_AMBER, loc=(sx * (DECK_HW - 0.25), y, DECK_H + 1.25), scale=(0.14, 0.14, 0.14))
+        no_shadow(fin(a))
+        AMBERS.append((a, k))
+for sx in (-1, 1):
+    sb = MB()
+    sb.box((sx * (DECK_HW - 0.2), KICK_Y0 - 60, DECK_H + 1.4), (0.12, 0.12, 2.8))
+    sb.box((sx * (DECK_HW - 1.6), KICK_Y0 - 60, DECK_H + 3.2), (3.2, 0.12, 1.4))
+    fin(sb.obj(f"OutSignPanel{sx}", M_PANEL))
+    t = text_obj(f"OutSign{sx}", "BRIDGE OUT", 0.62, M_AMBER, (sx * (DECK_HW - 1.6), KICK_Y0 - 60.08, DECK_H + 3.0),
+                 (math.pi / 2, 0, 0))
+    no_shadow(fin(t))
+    AMBERS.append((t, 99))
+    bar = MB()
+    bar.box((sx * (DECK_HW - 1.4), KICK_Y0 - 3, DECK_H + 0.9), (2.4, 0.15, 0.3))
+    bar.box((sx * (DECK_HW - 1.4), LAND_Y0 + 1.0, DECK_H - LAND_DROP + 0.9), (2.4, 0.15, 0.3))
+    for yb, zb in ((KICK_Y0 - 3, DECK_H), (LAND_Y0 + 1.0, DECK_H - LAND_DROP)):
+        for dx in (-0.9, 0.9):
+            bar.box((sx * (DECK_HW - 1.4) + dx, yb, zb + 0.45), (0.1, 0.1, 0.9))
+    fin(bar.obj(f"Barrier{sx}", M_HAZ))
+amb_blink = lambda k: np.where(((BEAT_PH * 2 + k * 0.5) % 1.0) < 0.5, 1.0, 0.08)   # noqa: E731
+for a, k in AMBERS:
+    lv = np.full(N, 0.9) if k == 99 else amb_blink(k)
+    set_color_keys(a, lv)
+for o in FINALE:
+    show(o, IDX >= F_C)
+print(f"[police] finale objects: {len(FINALE)}")
+
+# =====================================================================================
+# 8. THE CARS (real models; normalised: nose +Y, centred, wheels on z=0)
+# =====================================================================================
 
 
-def import_car(slug, tag, yaw_deg, wheel_mats=None, axle_split=None):
+def islands(me):
+    """Vertex island labels (connected components over edges), numpy union-find by label propagation."""
+    nv = len(me.vertices)
+    ed = np.empty(len(me.edges) * 2, np.int64)
+    me.edges.foreach_get("vertices", ed)
+    ed = ed.reshape(-1, 2)
+    lab = np.arange(nv)
+    while True:
+        a, b_ = lab[ed[:, 0]], lab[ed[:, 1]]
+        mn = np.minimum(a, b_)
+        new = lab.copy()
+        np.minimum.at(new, ed[:, 0], mn)
+        np.minimum.at(new, ed[:, 1], mn)
+        new = new[new]
+        if np.array_equal(new, lab):
+            return lab
+        lab = new
+
+
+def sub_mesh(o, keep_mask, name):
+    """New object from the faces of o whose vertices are all in keep_mask."""
+    import bmesh
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(o.data)
+        bm.verts.ensure_lookup_table()
+        kill = [v for v in bm.verts if not keep_mask[v.index]]
+        bmesh.ops.delete(bm, geom=kill, context="VERTS")
+        if len(bm.verts) == 0:
+            return None
+        me = bpy.data.meshes.new(name)
+        bm.to_mesh(me)
+    finally:
+        bm.free()
+    for m in o.data.materials:
+        me.materials.append(m)
+    return link(bpy.data.objects.new(name, me))
+
+
+def import_car(slug, tag, yaw_deg, axles, wz, wr, keep_mats=(), lamp_objs=None):
+    """Import a car, normalise it (nose +Y), and rig it: rig empty (yaw/position) → body empty (pitch/roll),
+    plus one spinning object per AXLE holding every part that lies inside that axle's wheel cylinders
+    (tyre, rim, disc, hub, nuts — found per connected island, so meshes spanning both axles are split).
+    keep_mats: materials that stay on the body even inside a wheel (brake calipers don't spin)."""
     before = set(bpy.data.objects.keys())
     bpy.ops.import_scene.gltf(filepath=os.path.join(ARGS.cars, slug, "model.glb"))
     new = [bpy.data.objects[n] for n in set(bpy.data.objects.keys()) - before]
@@ -567,7 +1213,7 @@ def import_car(slug, tag, yaw_deg, wheel_mats=None, axle_split=None):
     link(rig)
     body = bpy.data.objects.new(f"Body{tag}", None)       # pitch/roll pivot
     link(body, rig)
-    wheels = []
+    lamp_names = {}
     for o in meshes:
         mw = R @ centre @ o.matrix_world
         me = o.data.copy()
@@ -575,51 +1221,117 @@ def import_car(slug, tag, yaw_deg, wheel_mats=None, axle_split=None):
         o.data = me
         o.parent = None
         o.matrix_world = Matrix.Identity(4)
+        if lamp_objs and o.name in lamp_objs:
+            lamp_names[o.name] = lamp_objs[o.name]
     bpy.context.view_layer.update()
-    # cars whose wheel meshes span both axles: split them per axle first (rotate about each axle)
-    if wheel_mats:
-        for o in list(meshes):
-            if any(m is not None and m.name.split(".")[0] in wheel_mats for m in o.data.materials):
-                meshes.remove(o)
-                meshes += split_by_y(o, axle_split, tag)
-    # wheels: meshes whose bbox sits low at a corner and is about a wheel's size (or a whole axle pair)
+    pad = 0.05
+
+    def corner_of(mn, mx):
+        for ai, ay in enumerate(axles):
+            if (mn[1] > ay - wr - pad and mx[1] < ay + wr + pad and mn[2] > wz - wr - pad and mx[2] < wz + wr + pad
+                    and min(abs(mn[0]), abs(mx[0])) > 0.35 and np.sign(mn[0]) == np.sign(mx[0])):
+                return ai
+        return -1
+
+    parts = {ai: [] for ai in range(len(axles))}
+    body_parts = []
     for o in meshes:
         nv = len(o.data.vertices)
-        bb = np.empty(nv * 3, np.float32)
-        o.data.vertices.foreach_get("co", bb)
-        bb = bb.reshape(-1, 3)
         if nv == 0:
-            o.parent = body
+            body_parts.append(o)
             continue
-        mn, mx = bb.min(0), bb.max(0)
-        sz, c = mx - mn, (mn + mx) / 2
-        is_corner = 0.45 < sz[2] < 0.9 and 0.45 < sz[1] < 0.9 and sz[0] < 0.5 and abs(c[0]) > 0.55 and c[2] < 0.55
-        is_axle = bool(wheel_mats) and any(m is not None and m.name.split(".")[0] in wheel_mats
-                                          for m in o.data.materials) and sz[1] < 0.9 and c[2] < 0.55
-        if is_corner or is_axle:
-            o.data.transform(Matrix.Translation(Vector(-c)))
-            o.location = Vector(c)
-            o.parent = rig
-            wheels.append(o)
-        else:
-            o.parent = body
+        co = np.empty(nv * 3, np.float64)
+        o.data.vertices.foreach_get("co", co)
+        co = co.reshape(-1, 3)
+        mn, mx = co.min(0), co.max(0)
+        kept = any(m is not None and m.name.split(".")[0] in keep_mats for m in o.data.materials)
+        if kept:
+            body_parts.append(o)
+            continue
+        c = corner_of(mn, mx)
+        if c >= 0:
+            parts[c].append(o)
+            continue
+        touches = any(mn[1] < ay + wr and mx[1] > ay - wr for ay in axles) and mn[2] < wz + wr
+        if not touches or mx[2] - mn[2] > 1.2:
+            body_parts.append(o)
+            continue
+        lab = islands(o.data)
+        cls = np.full(nv, -1)
+        for u in np.unique(lab):
+            sel = lab == u
+            cls[sel] = corner_of(co[sel].min(0), co[sel].max(0))
+        if (cls < 0).all():
+            body_parts.append(o)
+            continue
+        for ai in range(len(axles)):
+            if (cls == ai).any():
+                sub = sub_mesh(o, cls == ai, f"{o.name}_ax{ai}")
+                if sub:
+                    parts[ai].append(sub)
+        if (cls < 0).any():
+            sub = sub_mesh(o, cls < 0, f"{o.name}_body")
+            if sub:
+                body_parts.append(sub)
+        bpy.data.objects.remove(o, do_unlink=True)
+    for o in body_parts:
+        o.parent = body
+    wheels = []
+    for ai, ay in enumerate(axles):
+        ax = link(bpy.data.objects.new(f"Axle{tag}{ai}", None), rig)
+        ax.location = (0, ay, wz)
+        for o in parts[ai]:
+            o.data.transform(Matrix.Translation(Vector((0, -ay, -wz))))
+            o.parent = ax
+        wheels.append(ax)
+        print(f"[police] car {tag} axle {ai} @ y {ay:+.2f}: {len(parts[ai])} parts "
+              f"({', '.join(sorted(p.name for p in parts[ai])[:8])})")
     for o in new:
         try:
             if o.type != "MESH":
                 bpy.data.objects.remove(o, do_unlink=True)
-        except ReferenceError:                       # split meshes were already removed
+        except ReferenceError:
             pass
-    print(f"[police] car {tag}: {len(meshes)} meshes, {len(wheels)} wheel parts, size {np.round(hi - lo, 2)}")
-    return rig, body, wheels
+    print(f"[police] car {tag}: size {np.round(hi - lo, 2)}")
+    return rig, body, wheels, lamp_names
 
 
-LEAD, LEAD_BODY, LEAD_WHEELS = import_car("sf_sports_car", "Lead", ARGS.lead_yaw,
-                                          wheel_mats={"Material_350", "disk", "Material_369", "Material_353"},
-                                          axle_split=0.13)
-POL, POL_BODY, POL_WHEELS = import_car("sf_police_suv", "Police", ARGS.police_yaw)
+HL_NTS = []
+
+
+def lamp_material(o, color, strength, keyed):
+    m, nt = new_mat(f"Lamp_{o.name}")
+    e = nd(nt, "ShaderNodeEmission", inp={"Color": tuple(color) + (1,)})
+    if keyed:
+        v = value_node(nt, "HL", 1.0)
+        lk(nt, M(nt, "MULTIPLY", v.outputs[0], strength), e.inputs["Strength"])
+        HL_NTS.append(nt)
+    else:
+        e.inputs["Strength"].default_value = strength
+    lk(nt, e.outputs[0], nd(nt, "ShaderNodeOutputMaterial").inputs["Surface"])
+    o.data.materials.clear()
+    o.data.materials.append(m)
+
+
+# Corvette: axles at model y -1.18 (front) / +1.45 (rear) → after the 180° yaw +1.18 / -1.45
+LEAD, LEAD_BODY, LEAD_WHEELS, _ = import_car("sf_sports_car", "Lead", ARGS.lead_yaw, axles=(1.18, -1.45),
+                                             wz=0.32, wr=0.335, keep_mats={"Material_369"})
+POL, POL_BODY, POL_WHEELS, _ = import_car("sf_police_suv", "Police", ARGS.police_yaw, axles=(1.245, -1.325),
+                                          wz=0.36, wr=0.385)
+for o in bpy.data.objects:
+    base = o.name.split("_ax")[0].split("_body")[0]
+    if o.type != "MESH" or o.parent not in (LEAD_BODY, POL_BODY):
+        continue
+    if o.parent == LEAD_BODY and base == "Object_25":
+        lamp_material(o, (0.9, 0.95, 1.0), 40.0, True)                # Corvette DRL / headlight strips
+    elif o.parent == LEAD_BODY and base in ("Object_21", "Object_23"):
+        lamp_material(o, (1.0, 0.02, 0.01), 25.0, False)              # Corvette tail lights
+    elif o.parent == POL_BODY and base == "Object_10":
+        lamp_material(o, (0.9, 0.95, 1.0), 35.0, True)                # police headlight lenses
 
 
 def car_lights(rig, tag, nose_y, tail_y, width, head_z, tail_z, head_energy):
+    heads = []
     for sx in (-1, 1):
         ld = bpy.data.lights.new(f"Head{tag}{sx}", "SPOT")
         ld.energy = head_energy
@@ -630,6 +1342,7 @@ def car_lights(rig, tag, nose_y, tail_y, width, head_z, tail_z, head_energy):
         lo = link(bpy.data.objects.new(ld.name, ld), rig)
         lo.location = (sx * width, nose_y, head_z)
         lo.rotation_euler = (math.radians(86), 0, 0)               # -Z → +Y: aim down the road, slightly down
+        heads.append(ld)
         lt = bpy.data.lights.new(f"Tail{tag}{sx}", "POINT")
         lt.energy = 25.0
         lt.color = (1.0, 0.02, 0.01)
@@ -637,10 +1350,15 @@ def car_lights(rig, tag, nose_y, tail_y, width, head_z, tail_z, head_energy):
         lt.use_shadow = False
         lo2 = link(bpy.data.objects.new(lt.name, lt), rig)
         lo2.location = (sx * width, tail_y - 0.15, tail_z)
+    return heads
 
 
-car_lights(LEAD, "Lead", 2.25, -2.3, 0.68, 0.62, 0.78, 900.0)
-car_lights(POL, "Police", 2.2, -2.2, 0.72, 0.82, 0.95, 1100.0)
+HEADS = car_lights(LEAD, "Lead", 2.25, -2.3, 0.68, 0.62, 0.78, 900.0) + \
+    car_lights(POL, "Police", 2.2, -2.2, 0.72, 0.82, 0.95, 1100.0)
+for ld in HEADS:
+    bake(ld, "energy", ld.energy * HEADL)
+for nt in HL_NTS:
+    bake(nt, value_path("HL"), HEADL)
 # police lightbar: my own emitters + coloured lights (the model's bar is unlit plastic)
 M_RED = emissive("BarRed", (1.0, 0.02, 0.02), 60.0, objcolor_gain=True)
 M_BLUE = emissive("BarBlue", (0.02, 0.15, 1.0), 60.0, objcolor_gain=True)
@@ -656,6 +1374,60 @@ for nm, mat, x in (("red", M_RED, -0.38), ("blue", M_BLUE, 0.38)):
     lo = link(bpy.data.objects.new(ld.name, ld), POL_BODY)
     lo.location = (x * 1.2, 0.05, 2.05)
     BAR_OBJ[nm] = (bo, ld)
+# NITRO flames from the Corvette's quad exhaust (two cones, one per tailpipe pair) + their light
+M_FLAME, _fl = new_mat("NitroFlame")
+_tc = nd(_fl, "ShaderNodeTexCoord")
+_sp = nd(_fl, "ShaderNodeSeparateXYZ")
+lk(_fl, _tc.outputs["Object"], _sp.inputs[0])
+_t = _sp.outputs[2]                                       # 0 at the nozzle → 1 at the tip
+_nz = nd(_fl, "ShaderNodeTexNoise", inp={"Scale": 3.0, "Detail": 3.0})
+_w = nd(_fl, "ShaderNodeTexCoord")
+_oi = nd(_fl, "ShaderNodeObjectInfo")
+_nv = nd(_fl, "ShaderNodeCombineXYZ")
+lk(_fl, M(_fl, "MULTIPLY", _sp.outputs[0], 6.0), _nv.inputs[0])
+lk(_fl, M(_fl, "SUBTRACT", M(_fl, "MULTIPLY", _t, 3.0), M(_fl, "MULTIPLY", _oi.outputs["Random"], 40.0)), _nv.inputs[1])
+lk(_fl, M(_fl, "MULTIPLY", _sp.outputs[1], 6.0), _nv.inputs[2])
+lk(_fl, _nv.outputs[0], _nz.inputs["Vector"])
+_ramp = nd(_fl, "ShaderNodeValToRGB")
+_ramp.color_ramp.elements[0].position = 0.0
+_ramp.color_ramp.elements[0].color = (0.45, 0.6, 1.0, 1)
+_e2 = _ramp.color_ramp.elements.new(0.22)
+_e2.color = (0.9, 0.85, 1.0, 1)
+_e3 = _ramp.color_ramp.elements.new(0.45)
+_e3.color = (1.0, 0.45, 0.08, 1)
+_ramp.color_ramp.elements[-1].position = 1.0
+_ramp.color_ramp.elements[-1].color = (0.6, 0.06, 0.01, 1)
+lk(_fl, _t, _ramp.inputs["Fac"])
+_em = nd(_fl, "ShaderNodeEmission")
+lk(_fl, _ramp.outputs["Color"], _em.inputs["Color"])
+_str = M(_fl, "MULTIPLY", M(_fl, "POWER", M(_fl, "SUBTRACT", 1.0, _t, clamp=True), 1.3), 13.0)
+lk(_fl, _str, _em.inputs["Strength"])
+_al = M(_fl, "MULTIPLY", M(_fl, "POWER", M(_fl, "SUBTRACT", 1.0, _t, clamp=True), 0.8),
+        M(_fl, "ADD", 0.35, M(_fl, "MULTIPLY", _nz.outputs["Fac"], 1.0)), clamp=True)
+_tr = nd(_fl, "ShaderNodeBsdfTransparent")
+_mx = nd(_fl, "ShaderNodeMixShader")
+lk(_fl, _al, _mx.inputs[0])
+lk(_fl, _tr.outputs[0], _mx.inputs[1])
+lk(_fl, _em.outputs[0], _mx.inputs[2])
+lk(_fl, _mx.outputs[0], nd(_fl, "ShaderNodeOutputMaterial").inputs["Surface"])
+try:
+    M_FLAME.surface_render_method = "BLENDED"
+except Exception:
+    pass
+FLAMES = []
+prof = [(0.0, 0.0)] + [(0.125 * (1 - s) ** 0.55 * (1 + 0.35 * math.sin(math.pi * s * 0.9)), s) for s in np.linspace(0.02, 1.0, 14)]
+for k, x in enumerate((-0.13, 0.13)):
+    fo = lathe(f"Flame{k}", prof, segs=16, mat=M_FLAME, parent=LEAD_BODY, loc=(x, -2.36, 0.31))
+    fo.rotation_euler = (math.radians(90), 0, 0)              # +Z (lathe axis) → -Y (out the back)
+    no_shadow(fo)
+    fo.visible_shadow = False
+    FLAMES.append(fo)
+FL_LIGHT = bpy.data.lights.new("NitroLight", "POINT")
+FL_LIGHT.color = (1.0, 0.45, 0.15)
+FL_LIGHT.shadow_soft_size = 0.9
+FL_LIGHT.use_shadow = False
+FL_LO = link(bpy.data.objects.new("NitroLight", FL_LIGHT), LEAD_BODY)
+FL_LO.location = (0, -3.2, 0.75)
 # helicopter spotlight following the lead car
 HELI = bpy.data.lights.new("HeliSpot", "SPOT")
 HELI.energy = 2.4e6
@@ -666,29 +1438,54 @@ HELI.use_shadow = True
 HELI_OB = link(bpy.data.objects.new("HeliSpot", HELI))
 
 # =====================================================================================
-# 8. MOTION (true → rendered: minus K_WRAP)
+# 9. MOTION (true → rendered: minus K_WRAP; finale heights from the route profile)
 # =====================================================================================
-WHEEL_R = 0.34
 
 
-def place_car(rig, body, wheels, X, Y, DX, speed, tag):
+def place_car(rig, body, wheels, X, Y, Z, DX, speed, tag, wheel_r):
     yaw = -np.arctan2(DX, np.maximum(speed, 1.0))                     # heading change in lane changes
-    loc = np.stack([X, Y - K_WRAP, np.zeros(N)], 1)
+    loc = np.stack([X, Y - K_WRAP, Z], 1)
     bake_vec(rig, "location", loc)
-    bake_vec(rig, "rotation_euler", np.stack([np.zeros(N), np.zeros(N), yaw], 1))
+    vz = np.gradient(Z) * FPS
+    climb = np.arctan2(vz, np.maximum(speed, 1.0))
+    if tag == "Lead":                                                  # nose follows the arc in the air,
+        climb = np.where(AIR, climb * 0.8, climb)                     # a touch less than the full angle
+    climb = gsmooth(climb, 1.5)
+    bake_vec(rig, "rotation_euler", np.stack([climb, np.zeros(N), yaw], 1))
     acc = np.gradient(gsmooth(speed, 3)) * FPS
-    pitch = np.radians(np.clip(-acc * 0.12, -2.5, 2.5) + 0.6 * KICK * np.maximum(HOT, 0.4))   # squat/dive + kick bounce
+    pitch = np.radians(np.clip(-acc * 0.12, -3.5, 3.5) + 0.6 * KICK * np.maximum(HOT, 0.4))   # squat/dive + kick bounce
     roll = np.radians(np.clip(np.gradient(DX) * FPS * 0.8, -4, 4))
     bob = 0.012 * np.sin(IDX * 1.9 + (0 if tag == "Lead" else 1.3)) + 0.025 * KICK * np.maximum(HOT, 0.4)
+    if tag == "Lead":                                                  # landing: compress + rebound
+        land = np.zeros(N)
+        k = np.arange(N - F_LAND)
+        land[F_LAND:] = np.exp(-k / 6.0) * np.cos(k * 0.55)
+        bob = np.where(AIR, 0.0, bob) - 0.16 * land
+        pitch = pitch - np.radians(3.0) * land
     bake_vec(body, "rotation_euler", np.stack([pitch, roll, np.zeros(N)], 1))
     bake_vec(body, "location", np.stack([np.zeros(N), np.zeros(N), bob], 1))
-    ang = np.cumsum(speed) / FPS / WHEEL_R                            # rolling, radians
+    # wheels roll FORWARD (−X rotation for +Y travel); the visible step is capped per frame so spokes
+    # never alias into a backwards strobe at 200 km/h (the real 5 rad/frame would freeze or reverse them)
+    step = np.minimum(speed / FPS / wheel_r, ARGS.wheel_step)
+    if tag == "Lead":
+        step = np.where(AIR, step * 1.0, step)
+    ang = -np.cumsum(step)
     for w in wheels:
-        bake(w, "rotation_euler", ang, index=0)                      # unwrapped: no backward snap
+        bake(w, "rotation_euler", ang, index=0)
 
 
-place_car(LEAD, LEAD_BODY, LEAD_WHEELS, X_LEAD, Y_LEAD, DX_LEAD, SPEED, "Lead")
-place_car(POL, POL_BODY, POL_WHEELS, X_POL, Y_POL, DX_POL, SPEED, "Police")
+SPEED_POL = np.gradient(Y_POL) * FPS
+place_car(LEAD, LEAD_BODY, LEAD_WHEELS, X_LEAD, Y_LEAD, Z_LEAD, DX_LEAD, SPEED, "Lead", 0.33)
+place_car(POL, POL_BODY, POL_WHEELS, X_POL, Y_POL, Z_POL, DX_POL, np.maximum(SPEED_POL, 0.0), "Police", 0.375)
+# flames: length/width flicker per frame, hidden when the nitro is off
+fl_on = NITRO > 0.04
+for k, fo in enumerate(FLAMES):
+    fk = np.array([hash01(i, 31 + k) for i in range(N)])
+    ln = NITRO * (0.7 + 0.35 * fk + 0.25 * HAT + 0.3 * KICK * BIG) * 1.1
+    wd = np.sqrt(np.maximum(NITRO, 0)) * (0.85 + 0.3 * fk)
+    bake_vec(fo, "scale", np.stack([wd, wd, np.maximum(ln, 0.001)], 1))
+    show(fo, fl_on)
+bake(FL_LIGHT, "energy", 160.0 * NITRO * (0.8 + 0.4 * HAT))
 # lightbar strobe: calm = alternate per half beat; drops = alternate per 1/8 + quad bursts; BIG = white kick flashes
 ph8 = (BEAT_PH * 4) % 1.0
 alt_fast = np.floor(BEAT_PH * 4).astype(int) % 2
@@ -701,10 +1498,10 @@ for nm, on in (("red", red_on), ("blue", blue_on)):
     bo, ld = BAR_OBJ[nm]
     lvl = np.clip(on * (0.8 + 0.6 * HAT) + white * 1.5, 0, 3)
     set_color_keys(bo, np.stack([lvl, lvl, lvl], 1), const=True)
-    bake(ld, "energy", lvl * 2600.0, const=True)                 # 9000 flooded the whole street red
-hp = np.stack([X_LEAD + 14.0 + 3 * np.sin(IDX * 0.011), Y_LEAD - 26.0 - K_WRAP, np.full(N, 62.0)], 1)
+    bake(ld, "energy", lvl * 2000.0, const=True)                 # 9000 flooded the whole street red
+hp = np.stack([X_LEAD + 14.0 + 3 * np.sin(IDX * 0.011), YR_LEAD - 26.0, Z_LEAD + 62.0], 1)
 bake_vec(HELI_OB, "location", hp)
-tgt = np.stack([X_LEAD, Y_LEAD - K_WRAP + 2.0, np.zeros(N)], 1) + np.stack(
+tgt = np.stack([X_LEAD, YR_LEAD + 2.0, Z_LEAD], 1) + np.stack(
     [1.2 * np.sin(IDX * 0.07), 1.5 * np.sin(IDX * 0.053 + 1), np.zeros(N)], 1)
 d = tgt - hp
 rot = []
@@ -715,12 +1512,12 @@ bake_vec(HELI_OB, "rotation_euler", np.array(rot))
 bake(HELI, "energy", 2.4e6 * (0.85 + 0.15 * KICK * HOT))
 
 # =====================================================================================
-# 9. CAMERA
+# 10. CAMERA (shot functions work in TRUE y; the K_WRAP shift is subtracted at the end)
 # =====================================================================================
 CAM_D = bpy.data.cameras.new("Cam")
 CAM_D.sensor_width = 36.0
 CAM_D.clip_start = 0.2
-CAM_D.clip_end = 3000.0
+CAM_D.clip_end = 4000.0
 CAM_D.dof.use_dof = True
 CAM_D.dof.aperture_blades = 7
 CAM = link(bpy.data.objects.new("Cam", CAM_D))
@@ -728,35 +1525,76 @@ SC.camera = CAM
 
 
 def lead(i, dy=0.0, dx=0.0, z=0.0):
-    return Vector((X_LEAD[i] + dx, Y_LEAD[i] + dy, z))
+    return Vector((X_LEAD[i] + dx, Y_LEAD[i] + dy, Z_LEAD[i] + z))
 
 
 def pol(i, dy=0.0, dx=0.0, z=0.0):
-    return Vector((X_POL[i] + dx, Y_POL[i] + dy, z))
+    return Vector((X_POL[i] + dx, Y_POL[i] + dy, Z_POL[i] + z))
+
+
+def true_y(yr, i):
+    return yr + K_WRAP[i]
 
 
 def shot(kind, i, s0, s1):
     t = (i - s0) / max(s1 - s0 - 1, 1)
     side = 1 if hash01(s0, 7) > 0.5 else -1
+    elevated = s0 >= F_C                     # finale: cameras stay on the deck (ramp walls, parapets)
     if kind == "chase_high":                                   # behind the cruiser, lights in the foreground
         cam = pol(i, -14.0 - 4 * t, 1.5 * side, 4.2)
         return cam, lead(i, 0, 0, 0.8) * 0.65 + pol(i, 0, 0, 1.0) * 0.35, 32, 11
+    if kind == "chase_lead":                                   # behind the Corvette alone (flames)
+        cam = lead(i, -12.0 - 3 * t, 1.2 * side, 3.2)
+        return cam, lead(i, 2.0, 0, 0.6), 35, 8
+    if kind == "rear_low":                                     # low on the road right behind the exhaust
+        cam = lead(i, -6.5 + 1.0 * t, 1.5 * side, 0.85)
+        return cam, lead(i, -0.5, 0, 0.45), 26, 8
     if kind == "front_reverse":                                # ahead of the fleeing car, looking back
         cam = lead(i, 11.0 + 2 * t, -1.2 * side, 1.15)
         return cam, lead(i, -6.0, 0, 0.7), 45, 5.6
-    if kind == "side_low":                                     # tracking alongside, low
+    if kind in ("side_low", "side_low_lead"):                  # tracking alongside, low
+        if elevated:                                           # on the deck: from the other lane (parapets)
+            cam = lead(i, 1.5 - 3 * t, -3.4 * (1 if X_LEAD[s0] >= 0 else -1), 0.9)
+            return cam, lead(i, -0.6, 0, 0.6), 22, 5.6
         cam = lead(i, 1.5 - 3 * t, 4.6 * side, 0.55)
-        return cam, lead(i, -3.0, 0, 0.6), 24, 5.6
+        return cam, lead(i, -3.0 if kind == "side_low" else 0.5, 0, 0.6), 24, 5.6
     if kind == "bumper":                                       # on the sports car's rear, looking back at the cruiser
         cam = lead(i, -2.55, 0.35 * side, 0.62)
         return cam, pol(i, 0, 0, 0.9), 18, 8
-    if kind == "flyby":                                        # static on the corner; they blast past
+    if kind == "flyby":                                        # static on the roadside; they blast past
         mid = (s0 + s1) // 2
-        anchor = Vector((XF - 1.5 * 0 + 0.0, Y_LEAD[mid], 0)) if side > 0 else Vector((-XF, Y_LEAD[mid], 0))
-        cam = Vector((side * (ROAD_W / 2 + 2.2), Y_LEAD[mid] + 2.0, 1.1))
+        if elevated:
+            cam = Vector((side * (DECK_HW - 0.7), Y_LEAD[mid] + 2.0, Z_LEAD[mid] + 1.1))
+        else:
+            cam = Vector((side * (ROAD_W / 2 + 2.2), Y_LEAD[mid] + 2.0, 1.1))
         return cam, lead(i, 0, 0, 0.7) * 0.7 + pol(i, 0, 0, 0.9) * 0.3, 24, 8
+    if kind == "heli_ramp":                                    # high and ahead: the ramp rising out of the avenue
+        cam = Vector((-6.0, true_y(RAMP_Y0 + 150.0, i), 44.0 - 6 * t)) + Vector((0, 40.0 * t, 0))
+        return cam, lead(i, 25.0, 0, 0) * 0.6 + Vector((0, true_y(RAMP_Y0 + 60, i), 8.0)) * 0.4, 30, 11
+    if kind == "heli_bridge":                                  # wide: city behind, river and pylon ahead
+        cam = lead(i, -34.0 + 8 * t, 7.0, 13.0)
+        return cam, lead(i, 30.0, 0, -2.0), 24, 11
+    if kind == "kicker_view":                                  # hovering over the gap, the lip in front
+        cam = Vector((-2.2, true_y(KICK_Y1 + 9.0, i), DECK_H + 3.0))
+        return cam, lead(i, 0, 0, 0.6), 50 - 14 * t, 8
+    if kind == "jump_side":                                    # a tracking drone beside the gap, at deck height:
+        cam = Vector((X_LEAD[i] + 15.0, Y_LEAD[i] - 7.0, DECK_H + 1.2))   # the arc reads against the skyline
+        return cam, lead(i, 2.0, 0, 0.4), 30, 11
+    if kind == "land_chase":                                   # drone behind + above: the touchdown
+        cam = lead(i, -13.0, 2.5, 4.5)
+        return cam, lead(i, 12.0, 0, -0.5), 28, 11
+    if kind == "police_edge":                                  # behind the stopped cruiser at the gap
+        cam = pol(i, -7.5, 1.6, 3.0)
+        return cam, lead(i, 0, 0, 0) * 0.5 + pol(i, 30.0, 0, 0) * 0.5, 30, 11
+    if kind == "heli_lead":
+        cam = lead(i, -50.0 + 10 * t, 12.0 * side, 36.0)
+        return cam, lead(i, 10.0, 0, 0), 40, 11
+    if kind == "far":                                          # locked off on the deck: it leaves us
+        mid = s0
+        cam = Vector((1.5, Y_LEAD[mid] - 5.0, Z_LEAD[mid] + 1.6))
+        return cam, lead(i, 0, 0, 0.6), 70, 11
     # heli: 60 m up, trailing and off to the side, slow drift
-    cam = lead(i, -60.0 + 10 * t, 3.0 * side, 64.0)          # above the avenue (never inside a tower)
+    cam = lead(i, -60.0 + 10 * t, 3.0 * side, 64.0)
     return cam, lead(i, 6.0, 0, 0), 55, 11
 
 
@@ -767,6 +1605,9 @@ def shake(i, amp):
     return (j + 0.15 * r) * amp
 
 
+AMP = {"bumper": 0.06, "side_low": 0.05, "side_low_lead": 0.05, "front_reverse": 0.05, "chase_high": 0.08,
+       "chase_lead": 0.08, "rear_low": 0.07, "flyby": 0.03, "heli": 0.25, "heli_ramp": 0.15, "heli_bridge": 0.15,
+       "kicker_view": 0.04, "jump_side": 0.05, "land_chase": 0.1, "police_edge": 0.06, "heli_lead": 0.2, "far": 0.02}
 cam_loc = np.zeros((N, 3))
 cam_rot = np.zeros((N, 3))
 cam_lens = np.zeros(N)
@@ -774,14 +1615,19 @@ cam_focus = np.zeros(N)
 cam_fstop = np.zeros(N)
 bounds = [s for s, _ in SHOTS] + [N]
 prev = None
+QA = []
+land_shake = np.zeros(N)
+land_shake[F_LAND:F_LAND + 20] = np.exp(-np.arange(min(20, N - F_LAND)) / 5.0) * 4.0
 for k, (s0, kind) in enumerate(SHOTS):
     s1 = bounds[k + 1]
-    amp = {"bumper": 0.06, "side_low": 0.05, "front_reverse": 0.05, "chase_high": 0.08, "flyby": 0.03, "heli": 0.25}[kind]
+    amp = AMP[kind]
+    seen = 0
     for i in range(s0, s1):
         cam, tgt, lens, fs = shot(kind, i, s0, s1)
-        a = amp * (0.4 + 1.2 * HOT[i] + 1.0 * BIG[i])
+        a = amp * (0.4 + 1.2 * HOT[i] + 1.0 * BIG[i] + land_shake[i])
         cam = cam + shake(i, a)
         tgt = tgt + shake(i, a * 1.6)
+        lens = lens * (1.0 - 0.12 * (NITRO[i] if kind in ("chase_lead", "rear_low") else 0.0))
         off = Vector((0, K_WRAP[i], 0))
         cam, tgt = cam - off, tgt - off
         q = (tgt - cam).to_track_quat("-Z", "Y")
@@ -792,14 +1638,28 @@ for k, (s0, kind) in enumerate(SHOTS):
         cam_lens[i] = lens
         cam_focus[i] = (tgt - cam).length
         cam_fstop[i] = fs
+        # QA: is the lead car on screen?
+        Rm = e.to_matrix()
+        v = Rm.transposed() @ (lead(i, 0, 0, 0.6) - off - cam)
+        if v.z < -0.5:
+            hx = 18.0 / lens
+            if abs(v.x / -v.z) < hx and abs(v.y / -v.z) < hx * 9 / 16:
+                seen += 1
+    QA.append((s0, s1, kind, seen / max(s1 - s0, 1)))
 bake_vec(CAM, "location", cam_loc)
 bake_vec(CAM, "rotation_euler", cam_rot)
 bake(CAM_D, "lens", cam_lens)
 bake(CAM_D, "dof.focus_distance", cam_focus)
 bake(CAM_D, "dof.aperture_fstop", cam_fstop)
+for s0, s1, kind, frac in QA:
+    if frac < 0.6 and kind not in ("police_edge", "bumper"):
+        print(f"[police][QA] shot {s0}-{s1} {kind}: lead on screen only {frac:.0%}")
+inside = [i for i in range(F_C) if abs(cam_loc[i][0]) > XF - 0.2 and cam_loc[i][2] < 30]
+if inside:
+    print(f"[police][QA] {len(inside)} frames with the camera inside the building line, e.g. {inside[:5]}")
 
 # =====================================================================================
-# 10. RENDER SETTINGS + COMPOSITOR
+# 11. RENDER SETTINGS + COMPOSITOR
 # =====================================================================================
 SC.render.engine = "BLENDER_EEVEE"
 ee = SC.eevee
@@ -828,7 +1688,7 @@ bake(SC, "view_settings.exposure", np.full(N, 0.0) + 0.35 * STROBE * BIG)
 vl = SC.view_layers[0]
 vl.use_pass_mist = True
 WORLD.mist_settings.start = 30.0
-WORLD.mist_settings.depth = 900.0
+WORLD.mist_settings.depth = 1100.0
 WORLD.mist_settings.falloff = "QUADRATIC"
 cg = bpy.data.node_groups.new("Post", "CompositorNodeTree")
 cg.interface.new_socket(name="Image", in_out="OUTPUT", socket_type="NodeSocketColor")
@@ -842,7 +1702,7 @@ mm.inputs[1].default_value = 0.55
 cg.links.new(rl.outputs["Mist"], mm.inputs[0])
 cg.links.new(mm.outputs[0], fog.inputs[0])
 cg.links.new(rl.outputs["Image"], fog.inputs[6])
-fog.inputs[7].default_value = (0.035, 0.03, 0.03, 1)
+fog.inputs[7].default_value = (0.022, 0.024, 0.032, 1)
 gl = cg.nodes.new("CompositorNodeGlare")
 gl.inputs["Type"].default_value = "Fog Glow"
 gl.inputs["Quality"].default_value = "Medium"
@@ -873,6 +1733,7 @@ if os.path.exists(ARGS.audio):
     se.strips.new_sound("Music", ARGS.audio, channel=1, frame_start=1)
 SC.render.use_sequencer = False
 SC["shots"] = ";".join(f"{s}:{n}" for s, n in SHOTS)
+SC["finale"] = f"F_C={F_C};F_JUMP={F_JUMP};F_LAND={F_LAND};POL_STOP={POL_STOP}"
 os.makedirs(os.path.dirname(os.path.abspath(ARGS.out)), exist_ok=True)
 bpy.ops.wm.save_as_mainfile(filepath=os.path.abspath(ARGS.out), compress=True)
 print(f"[police] saved {ARGS.out}  frames 1..{N}  shots {len(SHOTS)}")
