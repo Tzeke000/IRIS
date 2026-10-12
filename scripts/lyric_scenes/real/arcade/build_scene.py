@@ -218,7 +218,9 @@ def principled(nt, **kw):
 
 
 def img_node(nt, path, cs="sRGB", interp="Linear", ext="REPEAT", seq_len=None):
-    im = bpy.data.images.load(path, check_existing=True)
+    # ABSOLUTE path (10-12 fix): a CWD-relative path got saved as a bogus '//../../../..' path relative
+    # to the .blend, so every render from the saved file showed Blender's missing-image pink on the CRTs
+    im = bpy.data.images.load(os.path.abspath(path), check_existing=True)
     im.colorspace_settings.name = cs
     t = nt.nodes.new("ShaderNodeTexImage")
     t.image = im
