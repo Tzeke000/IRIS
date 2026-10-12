@@ -494,6 +494,33 @@ def push_tower_heartbeat(st: dict, now: float) -> dict:
 
 # ── the supervisor ──────────────────────────────────────────────────────────
 
+def _install_orb_file_log() -> str:
+    """Idempotent WARNING+ file handler on uvicorn.error / uvicorn / asyncio → state/orb_http.log.
+
+    Same marker as tools/system/orb_http_bounce_tool.py, so the two never double up. Until 10-12 this was only
+    installed when orb_http_bounce ran, so after every restart the goal-#2 falsifier ('Accept failed on a
+    socket') was blind until a self-check happened to call that tool (found 10-12: the log was 0 B since 09-17).
+    """
+    import logging
+    marker = "iris-orb-http-filelog"
+    try:
+        ORB_LOG.parent.mkdir(parents=True, exist_ok=True)
+        for name in ("uvicorn.error", "uvicorn", "asyncio"):
+            lg = logging.getLogger(name)
+            if any(getattr(h, "_iris_marker", "") == marker for h in lg.handlers):
+                continue
+            h = logging.FileHandler(str(ORB_LOG), encoding="utf-8")
+            h.setLevel(logging.WARNING)
+            h.setFormatter(logging.Formatter("[%(asctime)s] %(name)s %(levelname)s: %(message)s"))
+            h._iris_marker = marker  # type: ignore[attr-defined]
+            lg.addHandler(h)
+            if lg.level == logging.NOTSET or lg.level > logging.WARNING:
+                lg.setLevel(logging.WARNING)
+        return str(ORB_LOG)
+    except Exception as e:  # noqa: BLE001
+        return f"install failed: {e!r}"
+
+
 class Supervisor:
     def __init__(self, g: dict | None = None):
         self.g = g if g is not None else {}
@@ -521,6 +548,7 @@ class Supervisor:
         _log("stop")
 
     def _loop(self, delay_s: float) -> None:
+        _install_orb_file_log()               # BEFORE the start delay: a :5876 loss right after a boot is caught
         if delay_s and self.stop_evt.wait(delay_s):
             return
         while not self.stop_evt.is_set():
