@@ -19,28 +19,29 @@ from mathutils.bvhtree import BVHTree
 
 CARS = "/data/iris_assets/cars"
 
-# name: (slug, group-node name or None, flip(bool), role). Flips checked by eye from a side lineup 10-12.
+# name: (slug, group-node name or None, flip(bool), role). Flips verified 10-12 with a MARKER CUBE at +Y in the
+# lineup render (camera on +X looking -X shows +Y on the RIGHT — the first lineup read it backwards).
 # Real lengths for models authored at the wrong scale:
 TRUE_LENGTH = {"charger": 5.10, "crownvic": 5.39, "hwy": 5.20}
 SPECS = {
-    "compact":   ("sf_passenger_pack", "Compact Body", False, "traffic"),
-    "coupe":     ("sf_passenger_pack", "Coupe Body", False, "traffic"),
-    "hatchback": ("sf_passenger_pack", "Hatchback Body", False, "traffic"),
-    "minivan":   ("sf_passenger_pack", "minivan body", False, "traffic"),
-    "offroad":   ("sf_passenger_pack", "Offroad Body", False, "traffic"),
-    "pickup":    ("sf_passenger_pack", "Pickup Body", False, "traffic"),
-    "sedan":     ("sf_passenger_pack", "Sedan Body", False, "traffic"),
-    "sport":     ("sf_passenger_pack", "Sport body", False, "traffic"),
-    "suv":       ("sf_passenger_pack", "SUV Body", False, "traffic"),
-    "wagon":     ("sf_passenger_pack", "Wagon Body", False, "traffic"),
-    "taxi":      ("sf_civil_pack", "taxi", True, "traffic"),
-    "postvan":   ("sf_civil_pack", "postvan", True, "traffic"),
-    "citybus":   ("sf_civil_pack", "citybus", True, "traffic"),
-    "boxtruck":  ("sf_box_truck", None, True, "traffic"),
-    "pol_sedan": ("sf_civil_pack", "police_sedan", True, "police"),
-    "charger":   ("sf_police_charger", None, False, "police"),
-    "crownvic":  ("sf_police_crownvic", None, False, "police"),
-    "hwy":       ("sf_police_hwy", None, False, "police"),
+    "compact":   ("sf_passenger_pack", "Compact Body", True, "traffic"),
+    "coupe":     ("sf_passenger_pack", "Coupe Body", True, "traffic"),
+    "hatchback": ("sf_passenger_pack", "Hatchback Body", True, "traffic"),
+    "minivan":   ("sf_passenger_pack", "minivan body", True, "traffic"),
+    "offroad":   ("sf_passenger_pack", "Offroad Body", True, "traffic"),
+    "pickup":    ("sf_passenger_pack", "Pickup Body", True, "traffic"),
+    "sedan":     ("sf_passenger_pack", "Sedan Body", True, "traffic"),
+    "sport":     ("sf_passenger_pack", "Sport body", True, "traffic"),
+    "suv":       ("sf_passenger_pack", "SUV Body", True, "traffic"),
+    "wagon":     ("sf_passenger_pack", "Wagon Body", True, "traffic"),
+    "taxi":      ("sf_civil_pack", "taxi", False, "traffic"),
+    "postvan":   ("sf_civil_pack", "postvan", False, "traffic"),
+    "citybus":   ("sf_civil_pack", "citybus", False, "traffic"),
+    "boxtruck":  ("sf_box_truck", None, False, "traffic"),
+    "pol_sedan": ("sf_civil_pack", "police_sedan", False, "police"),
+    "charger":   ("sf_police_charger", None, True, "police"),
+    "crownvic":  ("sf_police_crownvic", None, True, "police"),
+    "hwy":       ("sf_police_hwy", None, True, "police"),
 }
 
 
