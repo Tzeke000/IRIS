@@ -130,41 +130,82 @@ HEADL = 1.0 + 0.9 * KICK * np.maximum(HOT_S, 0.25) + 0.4 * BIG * STROBE
 # =====================================================================================
 # 2. THE CHASE (true coordinates; +Y = down the avenue)
 # =====================================================================================
+# ---- scene reset FIRST: the vehicle prototypes must exist before the traffic plan needs their sizes
+SC = bpy.context.scene
+for ob in list(bpy.data.objects):
+    bpy.data.objects.remove(ob, do_unlink=True)
+for coll in (bpy.data.meshes, bpy.data.materials, bpy.data.lights, bpy.data.cameras, bpy.data.worlds,
+             bpy.data.node_groups, bpy.data.images, bpy.data.curves):
+    for d in list(coll):
+        coll.remove(d)
+H.SC = SC
+import vehicles as VEH  # noqa: E402
+PROTOS = {n: VEH.build(n) for n in VEH.SPECS}
+VEH.cleanup_imports()
+TRAFFIC_KINDS = [n for n, p in PROTOS.items() if p.role == "traffic"]
+_tw = np.array([2.5 if n == "taxi" else 0.35 if n in ("citybus", "boxtruck", "postvan") else 1.0 for n in TRAFFIC_KINDS])
+TRAFFIC_P = _tw / _tw.sum()
+SMALL_KINDS = [n for n in TRAFFIC_KINDS if PROTOS[n].length < 5.3]
+
 L = 480.0                                  # street period (m)
 LANES = np.array([-5.4, -1.8, 1.8, 5.4])
 F_C = 5548                                 # FINALE: calm section before the last drops (a shot cut)
 F_JUMP = 6200                              # BIG drop: take-off frame
+F_X = 4194                                 # red-light intersection: the Corvette crosses it on this drop entry
 hot_s = gsmooth(HOT, 12)
 big_s = gsmooth(BIG, 12)
-# nitro: a burst on every drop entry, the full burn from the BIG drop on
-NITRO = np.zeros(N)
+# nitro: a spit of flame on EVERY KICK inside the drops (Zeke 10-12), a burst on each drop entry, the full
+# burn from the BIG drop on (pumping on the kicks)
+SPIT = age_env(TL["T_kage"], 3.2) * (HOT > 0.5)
+NITRO = 0.85 * SPIT
 for e in ENT:
     if e < F_JUMP - 5:
         NITRO[e:e + 40] = np.maximum(NITRO[e:e + 40], np.exp(-np.arange(min(40, N - e)) / 12.0))
-NITRO[F_JUMP:] = 1.0
-NITRO[6656:] = np.linspace(1.0, 0.55, N - 6656)
+NITRO[F_JUMP:] = 0.72 + 0.4 * KICK[F_JUMP:]
+NITRO[6656:] *= np.linspace(1.0, 0.6, N - 6656)
 NITRO_BIG = gsmooth((IDX >= F_JUMP).astype(float), 3)
 FIN_PUSH = gsmooth(np.clip((IDX - (F_C - 40)) / 100.0, 0, 1), 6)    # the finale runs hotter (room for the bridge)
 SPEED = (24.0 + 17.0 * hot_s + 12.0 * big_s + 5.0 * gsmooth(KICK * HOT, 2) + 14.0 * NITRO_BIG
          + 13.0 * FIN_PUSH * (1 - NITRO_BIG))                                                 # m/s
-Y_LEAD = 60.0 + np.cumsum(SPEED) / FPS
+_cum = np.cumsum(SPEED) / FPS
+# start offset chosen so the Corvette is in the middle of a cross street exactly on frame F_X
+_y = 60.0 + _cum
+Y_XING = min((k * L + c for k in range(-1, int(_y[-1] / L) + 2) for c in (88.0, 328.0)), key=lambda c: abs(c - _y[F_X]))
+Y_LEAD = (Y_XING - _cum[F_X]) + _cum
 GAP = gsmooth(26.0 - 9.0 * hot_s - 5.0 * big_s + 3.0 * np.sin(IDX / FPS * 0.37), 8)
-# lane changes: a new target lane at drop entries and every 4 bars inside drops (deterministic);
-# from just before the finale only the two centre lanes (the ramp sits in the median)
-lane_t = np.zeros(N)
-cur = 2
-marks = sorted(set(ENT) | {snap(s0 + k * 4 * BAR) for s0, s1, h in SEGS if h for k in range(1, 8)
-                           if s0 + k * 4 * BAR < s1})
-for j, m in enumerate(marks):
-    cur = int((cur + 1 + int(hash01(m, 3) * 3)) % 4)
-    lane_t[m:] = LANES[cur]
-lane_t[:marks[0] if marks else N] = LANES[2]
+# lane changes: OFTEN in the calm parts (every 1-2 bars, around traffic), every 2 bars in the drops; none
+# just before the red light; from just before the finale only the two centre lanes (ramp in the median)
 LANE_LOCK = F_C - 70
-for m in [LANE_LOCK] + [m for m in marks if LANE_LOCK < m < F_JUMP - 60]:
-    lane_t[m:] = 1.8 if hash01(m, 5) > 0.5 else -1.8
+CHANGES = []                                                         # (frame, x_from, x_to)
+mk = []
+for s0, s1, h in SEGS:
+    if s0 >= LANE_LOCK:
+        break
+    s1 = min(s1, LANE_LOCK)
+    t = float(s0) if h else s0 + BAR
+    while t < s1 - 0.5 * BAR:
+        mk.append(s0 if t == s0 else snap(t))
+        t += 2 * BAR if h else BAR * (1 if hash01(int(t), 9) < 0.55 else 2)
+mk = sorted(set(m for m in mk if 20 < m < LANE_LOCK and not (F_X - 75 < m < F_X + 25)))
+lane_i = np.full(N, 2)
+cur = 2
+for m in mk:
+    d = 1 if hash01(m, 3) > 0.5 else -1
+    nxt = cur + d if 0 <= cur + d <= 3 else cur - d
+    CHANGES.append((m, float(LANES[cur]), float(LANES[nxt])))
+    cur = nxt
+    lane_i[m:] = cur
+lane_t = LANES[lane_i].astype(float)
+xcur = 1.8 if lane_t[LANE_LOCK - 1] > 0 else -1.8
+lane_t[LANE_LOCK:] = xcur
+fm = [snap(F_C + 60 + k * 1.5 * BAR) for k in range(6) if F_C + 60 + k * 1.5 * BAR < 5835 - 30]
+fm += [snap(5835 + k * 2 * BAR) for k in range(1, 8) if 5835 + k * 2 * BAR < F_JUMP - 60]
+for m in sorted(set(fm)):
+    CHANGES.append((m, xcur, -xcur))
+    xcur = -xcur
+    lane_t[m:] = xcur
 lane_t[F_JUMP - 60:] = lane_t[F_JUMP - 61]
-X_LEAD = gsmooth(lane_t, 9)
-X_POL = gsmooth(np.r_[np.full(14, X_LEAD[0]), X_LEAD[:-14]], 6)       # follows ~0.5 s later
+X_LEAD = gsmooth(lane_t, 7)
 K_WRAP = np.floor((Y_LEAD - 140.0) / L) * L                          # shift applied to everything moving
 K_WRAP[F_C:] = K_WRAP[F_C]                                           # FROZEN for the finale
 WRAPS = np.nonzero(np.diff(K_WRAP) != 0)[0] + 1                      # first frame after each wrap
@@ -192,7 +233,8 @@ LAND_Y = YR_LEAD[min(F_LAND, N - 1)]
 LAND_Y0 = LAND_Y - 26.0                         # far deck's broken edge
 END_Y = YR_LEAD[-1] + 400.0
 print(f"[police] finale: ramp {RAMP_Y0:.0f}-{RAMP_Y1:.0f}  city ends {CITY_END:.0f}  kicker {KICK_Y0:.0f}-{KICK_Y1:.0f}"
-      f"  land {LAND_Y0:.0f}/{LAND_Y:.0f} (f{F_LAND}, air {_t_land:.2f}s, v {v_off:.0f} m/s)  end {END_Y:.0f}")
+      f"  land {LAND_Y0:.0f}/{LAND_Y:.0f} (f{F_LAND}, air {_t_land:.2f}s, v {v_off:.0f} m/s)  end {END_Y:.0f}"
+      f"  red light at y {Y_XING:.0f} (f{F_X})")
 
 
 def smooth01(x):
@@ -224,25 +266,195 @@ for i in range(F_JUMP, N):
 AIR = np.zeros(N, bool)
 AIR[F_JUMP:i] = True
 F_LAND = i
-# police: same route, but it brakes hard and stops short of the gap
-Y_POL = Y_LEAD - GAP                              # TRUE coordinates (no wrap jumps)
-y_stop = KICK_Y0 - 22.0 + KF
-vp = np.gradient(Y_POL) * FPS
+
+
+# ---- POLICE: they drive the Corvette's own TRACK (x as a function of y along its path), so wherever it
+# squeezed past traffic they squeeze past too; more cars join as the song builds; all brake at the gap
+def x_path(y):
+    return np.interp(y, Y_LEAD, X_LEAD)
+
+
 A_BRAKE = 8.5
-for i in range(F_C, N):
-    d_left = y_stop - Y_POL[i - 1]
-    v_prev = (Y_POL[i - 1] - Y_POL[i - 2]) * FPS
-    v_need = math.sqrt(2 * A_BRAKE * max(d_left, 0.0))
-    v = max(min(vp[i], v_need, v_prev + 0.5), 0.0)
-    Y_POL[i] = Y_POL[i - 1] + v / FPS
+y_stop = KICK_Y0 - 22.0 + KF                      # TRUE y where the first cruiser stops
+
+
+def brake_to(Y, ystop):
+    Y = Y.copy()
+    vp = np.gradient(Y) * FPS
+    for i in range(F_C, N):
+        d_left = ystop - Y[i - 1]
+        v_prev = (Y[i - 1] - Y[i - 2]) * FPS
+        v_need = math.sqrt(2 * A_BRAKE * max(d_left, 0.0))
+        v = max(min(vp[i], v_need, v_prev + 0.5), 0.0)
+        Y[i] = Y[i - 1] + v / FPS
+    return Y
+
+
+Y_POL = brake_to(Y_LEAD - GAP, y_stop)
+X_POL = gsmooth(x_path(Y_POL), 3)
 YR_POL = Y_POL - K_WRAP
 Z_POL = np.zeros(N)
 Z_POL[fin] = zprof(YR_POL[fin])
 POL_STOP = int(np.argmax((IDX > F_C) & (np.gradient(YR_POL) * FPS < 0.3))) or N
 print(f"[police] police stops at y {YR_POL[-1]:.0f} (frame {POL_STOP})")
+POLICE_X = [("charger", 1096, 13.0), ("crownvic", 2554, 26.0), ("hwy", 3465, 39.0), ("pol_sedan", 4559, 52.0)]
+COPS = []
+for k, (nm, J, extra) in enumerate(POLICE_X):
+    arrive = smooth01((IDX - J) / 150.0)
+    g = GAP + extra + 2.0 * np.sin(IDX / FPS * 0.29 + 1.7 * k) + 170.0 * (1 - arrive)
+    Yk = brake_to(Y_LEAD - g, y_stop - 11.0 * (k + 1))
+    Xk = gsmooth(x_path(Yk), 3) + 0.25 * np.sin(IDX / FPS * 0.8 + k)
+    Zk = np.zeros(N)
+    Zk[fin] = zprof(Yk[fin] - KF)
+    COPS.append(dict(name=nm, J=J, X=Xk, Y=Yk, Z=Zk, vis=IDX >= J, L=PROTOS[nm].length, W=PROTOS[nm].width))
 
 DX_LEAD = np.gradient(X_LEAD) * FPS
 DX_POL = np.gradient(X_POL) * FPS
+
+# ---- TRAFFIC PLAN (true coordinates). Light traffic, more in the calm parts. Every lane change of the
+# Corvette gets a BLOCKER in the lane it is leaving (overtaken a moment after the swerve), plus ambient cars
+# in the other lanes; then everything that would touch a chase car is removed (no collisions, ever).
+V_LANE = {-5.4: 10.5, -1.8: 13.0, 1.8: 14.5, 5.4: 12.0}
+rngT = np.random.default_rng(77)
+TRAF = []
+
+
+def avenue_car(kind, x, v, f_o, tag, deck=False):
+    Y = Y_LEAD[f_o] + v * (IDX - f_o) / FPS
+    rel = Y - Y_LEAD
+    win = (rel > -230) & (rel < 650)
+    if deck:
+        vis = (IDX >= F_C) & win & (Y - KF > RAMP_Y0 + 8) & (Y - KF < KICK_Y0 - 170)
+    else:
+        vis = (IDX < F_C) & win
+    p = PROTOS[kind]
+    return dict(kind=kind, X=np.full(N, float(x)), Y=Y, v=v, vis=vis, L=p.length, W=p.width, tag=tag,
+                axis="y", deck=deck, lane=float(x))
+
+
+def half(c):
+    return (c["W"] / 2, c["L"] / 2) if c.get("axis", "y") == "y" else (c["L"] / 2, c["W"] / 2)
+
+
+def separation(a, b):
+    """Smallest rectangle separation (m, <0 = overlap) over the frames both are visible; +inf if never."""
+    m = a["vis"] & b["vis"]
+    if not m.any():
+        return np.inf
+    ax, ay = half(a)
+    bx, by = half(b)
+    gx = np.abs(a["X"][m] - b["X"][m]) - ax - bx
+    gy = np.abs(a["Y"][m] - b["Y"][m]) - ay - by
+    return float(np.max(np.stack([gx, gy]), axis=0).min())
+
+
+CHASE = [dict(name="lead", X=X_LEAD, Y=Y_LEAD, vis=np.ones(N, bool), L=4.75, W=2.05),
+         dict(name="p1", X=X_POL, Y=Y_POL, vis=np.ones(N, bool), L=4.6, W=2.1)] + COPS
+MARGIN = 0.45                                      # minimum bumper/side clearance anyone gets
+
+
+def pick(small=False):
+    ks = SMALL_KINDS if small else TRAFFIC_KINDS
+    if small:
+        return ks[int(rngT.integers(len(ks)))]
+    return TRAFFIC_KINDS[int(rngT.choice(len(TRAFFIC_KINDS), p=TRAFFIC_P))]
+
+
+n_block = 0
+for (m, xa, xb) in CHANGES:
+    deck = m >= F_C
+    if m > F_JUMP - 150 or (not deck and m > F_C - 100):
+        continue
+    if hash01(m, 11) > (0.92 if HOT_S[m] < 0.5 else 0.6):
+        continue
+    kind = pick(small=deck)
+    v = 13.0 if deck else V_LANE[xa]
+    for fo in range(m + 16, m + 46, 2):
+        c = avenue_car(kind, xa, v, fo, "blocker", deck)
+        if separation(c, CHASE[0]) > MARGIN:
+            TRAF.append(c)
+            n_block += 1
+            break
+f = 30
+while True:                                        # ambient cars in the other lanes
+    rate = 0.65 if HOT_S[f] < 0.5 else 0.22
+    f += int(rngT.exponential(FPS / rate)) + 8
+    if f >= F_C - 90:
+        break
+    others = [x for x in LANES if abs(x - X_LEAD[f]) > 2.6]
+    x = float(others[int(rngT.integers(len(others)))])
+    TRAF.append(avenue_car(pick(), x, V_LANE[x], f, "amb"))
+f = F_C + 40
+while True:                                        # a few on the expressway during the calm climb
+    f += int(rngT.exponential(FPS / 0.45)) + 10
+    if f >= 5835:
+        break
+    x = -1.8 if X_LEAD[f] > 0 else 1.8
+    TRAF.append(avenue_car(pick(small=True), x, 13.0, f, "amb", deck=True))
+# the red light: nobody in the avenue approach/box while it is red for them; a couple of cars QUEUED at the
+# stop line in the lanes the Corvette isn't using; a stream of CROSS traffic it threads through
+XING_RED = (F_X - 150, F_X + 95)
+_w = slice(F_X - 210, F_X + 130)
+TRAF = [c for c in TRAF if not np.any(c["vis"][_w] & (c["Y"][_w] > Y_XING - 85) & (c["Y"][_w] < Y_XING + 14))]
+qvis = (IDX >= F_X - 330) & (IDX <= F_X + 160) & (IDX < F_C)
+for x in LANES:
+    if abs(x - X_LEAD[F_X]) < 2.6:
+        continue
+    yq = Y_XING - 12.5
+    for j in range(2 if abs(x) > 3 else 1):
+        kind = pick(small=True)
+        p = PROTOS[kind]
+        yq -= p.length / 2 + 0.6
+        TRAF.append(dict(kind=kind, X=np.full(N, float(x)), Y=np.full(N, yq), v=0.0, vis=qvis.copy(), L=p.length,
+                         W=p.width, tag="queue", axis="y", deck=False, lane=float(x)))
+        yq -= p.length / 2 + 1.2
+V_CROSS, SP_CROSS = 12.5, 15.0
+for yl, dirn in ((Y_XING - 3.6, 1), (Y_XING + 3.6, -1)):
+    best = None
+    for ph in np.arange(0.0, SP_CROSS, 0.5):
+        cars = []
+        for j in range(-10, 11):
+            f0 = F_X + (ph + SP_CROSS * j) / V_CROSS * FPS
+            X = dirn * V_CROSS * (IDX - f0) / FPS
+            vis = (np.abs(X) < 80) & (IDX >= F_X - 210) & (IDX <= F_X + 130)
+            if not vis.any():
+                continue
+            inbox = vis & (np.abs(X) < 11)
+            if np.any(inbox & ((IDX < XING_RED[0] + 12) | (IDX > XING_RED[1] - 6))):
+                continue
+            kind = pick(small=True)
+            p = PROTOS[kind]
+            cars.append(dict(kind=kind, X=X, Y=np.full(N, yl), v=V_CROSS, vis=vis, L=p.length, W=p.width,
+                             tag="cross", axis="x", deck=False, dirn=dirn, f0=f0))
+        sep = min((separation(c, CHASE[0]) for c in cars), default=np.inf)
+        score = abs(sep - 1.0) if sep >= 0.7 else 99 + (0.7 - sep)
+        if best is None or score < best[0]:
+            best = (score, sep, cars)
+    TRAF += best[2]
+    print(f"[police] cross lane {dirn:+d}: {len(best[2])} cars, nearest miss to the Corvette {best[1]:.2f} m")
+# cull: anything touching a chase car; same-lane bunching
+removed = {}
+keep = []
+for c in TRAF:
+    if any(separation(c, ch) < MARGIN for ch in CHASE):
+        removed[c["tag"]] = removed.get(c["tag"], 0) + 1
+        continue
+    keep.append(c)
+TRAF = keep
+keep = []
+for c in TRAF:
+    clash = False
+    if c["axis"] == "y" and c["tag"] != "queue":
+        for d in keep:
+            if d["axis"] == "y" and d["tag"] != "queue" and d["lane"] == c["lane"] and d["deck"] == c["deck"]:
+                if separation(c, d) < 3.0:
+                    clash = True
+                    break
+    if not clash:
+        keep.append(c)
+TRAF = keep
+print(f"[police] traffic: {len(TRAF)} cars ({n_block} blockers planned; culled {removed}); "
+      f"police: P1 + {', '.join(c['name'] for c in COPS)}")
 
 # =====================================================================================
 # 3. SHOT LIST (cuts on drop entries and bar lines; scripted finale)
@@ -267,6 +479,10 @@ for s0, s1, h in SEGS:
             _cyc_i[0] += 1
             k += 1
             t += per
+# the red light: a high corner camera sees the queue, the cross traffic and the Corvette blowing through on
+# the drop; then low on the cross street as the cruisers squeeze through after it
+X0, X1, X2 = snap(F_X - 3 * BAR), F_X + 12, snap(F_X + 2 * BAR)
+SHOTS = [(s_, n) for s_, n in SHOTS if not (X0 <= s_ <= X2)] + [(X0, "xing"), (X1, "xing_low"), (X2, "chase_high")]
 # finale (F_C → end): ramp climb, expressway, bridge, the jump, the escape
 F_EXIT = snap(int(np.argmax(YR_LEAD * (IDX >= F_C) > CITY_END - 45)))   # the deck leaves the city
 FIN = [(F_C, "heli_ramp"), (snap(F_C + 2 * BAR), "side_low"), (snap(F_C + 4 * BAR), "chase_high"),
@@ -296,16 +512,8 @@ H.init(N, cut_set)
 print("[police] frames", N, "bpm", round(BPM, 1), "shots", len(SHOTS), "wraps", len(WRAPS))
 
 # =====================================================================================
-# 4. SCENE RESET + WORLD
+# 4. WORLD
 # =====================================================================================
-SC = bpy.context.scene
-for ob in list(bpy.data.objects):
-    bpy.data.objects.remove(ob, do_unlink=True)
-for coll in (bpy.data.meshes, bpy.data.materials, bpy.data.lights, bpy.data.cameras, bpy.data.worlds,
-             bpy.data.node_groups, bpy.data.images, bpy.data.curves):
-    for d in list(coll):
-        coll.remove(d)
-H.SC = SC
 SC.render.fps = FPS
 SC.frame_start, SC.frame_end = 1, N
 SC.render.resolution_x, SC.render.resolution_y = 1920, 1080
@@ -905,6 +1113,68 @@ for k, y in enumerate(np.arange(15.0, L, 30.0)):
         to_street(pole, head)
         STREET.objects.link(lo)
         LAMPS.append(lo)
+# traffic signals at every cross street (periodic): avenue heads on a mast arm before the crossing + one on
+# the far side, cross-street heads on the corners. One object per lamp colour per direction, keyed through
+# object colour: the avenue goes amber → RED around F_X while the cross street goes green.
+M_SIG = {c: emissive(f"Sig{c}", rgb, 26.0, objcolor_gain=True)
+         for c, rgb in (("R", (1.0, 0.03, 0.01)), ("A", (1.0, 0.42, 0.0)), ("G", (0.12, 1.0, 0.4)))}
+M_HOUS = H.principled("SignalHousing", (0.03, 0.03, 0.03), rough=0.5)
+hous = MB()
+sig_lamp = {(d, c): MB() for d in ("av", "cr") for c in "RAG"}
+
+
+def sig_head(d, x, y, z, fx, fy):
+    hous.box((x, y, z), (0.36, 0.3, 1.05) if fy else (0.3, 0.36, 1.05))
+    for j, c in enumerate("RAG"):
+        zc = z + 0.33 - j * 0.33
+        if fy:
+            sig_lamp[(d, c)].box((x, y + fy * 0.16, zc), (0.22, 0.03, 0.22))
+        else:
+            sig_lamp[(d, c)].box((x + fx * 0.16, y, zc), (0.03, 0.22, 0.22))
+
+
+spm = MB()
+for c0, w in CROSS:
+    ys = c0 - 4.5
+    spm.box((9.0, ys, 3.5), (0.28, 0.28, 7.0))
+    spm.box((4.6, ys, 6.95), (8.8, 0.18, 0.18))
+    for hx in (5.4, 1.8):
+        sig_head("av", hx, ys, 6.25, 0, -1)
+    spm.box((-9.0, c0 + w + 1.0, 2.2), (0.2, 0.2, 4.4))
+    sig_head("av", -9.0, c0 + w + 1.0, 3.9, 0, -1)
+    for sx in (-1, 1):
+        for yy in (c0 - 1.0, c0 + w + 1.0):
+            spm.box((sx * 9.6, yy, 2.2), (0.2, 0.2, 4.4))
+            sig_head("cr", sx * 9.6, yy, 3.9, -sx, 0)
+to_street(spm.obj("SignalPoles", M_POLE), hous.obj("SignalHeads", M_HOUS))
+for c0, w in CROSS:                                   # the crossings were unlit (lamps skip cross streets)
+    for k_, (lx, ly) in enumerate(((7.5, c0 + 3.0), (-7.5, c0 + w - 3.0))):
+        ld = bpy.data.lights.new(f"XingLamp{int(c0)}{k_}", "SPOT")
+        ld.energy = 5200.0
+        ld.color = blackbody(3900)
+        ld.spot_size = math.radians(130)
+        ld.spot_blend = 0.5
+        ld.use_shadow = False
+        lo = bpy.data.objects.new(ld.name, ld)
+        lo.location = (lx, ly, 9.5)
+        STREET.objects.link(lo)
+    hm = MB()
+    for lx, ly in ((7.5, c0 + 3.0), (-7.5, c0 + w - 3.0)):
+        hm.box((lx, ly, 9.7), (0.6, 0.6, 0.12))
+    ho = hm.obj(f"XingHeads{int(c0)}", M_LAMP)
+    no_shadow(ho)
+    to_street(ho)
+_on = lambda a, b: ((IDX >= a) & (IDX < b)).astype(float)          # noqa: E731
+av_A, av_R = _on(F_X - 185, F_X - 150), _on(F_X - 150, F_X + 95)
+av_G = 1.0 - av_A - av_R
+cr_G, cr_A = _on(F_X - 140, F_X + 85), _on(F_X + 85, F_X + 95)
+cr_R = 1.0 - cr_G - cr_A
+for (d, c), mb_ in sig_lamp.items():
+    o = mb_.obj(f"Sig_{d}_{c}", M_SIG[c])
+    no_shadow(o)
+    to_street(o)
+    lv = {"avR": av_R, "avA": av_A, "avG": av_G, "crR": cr_R, "crA": cr_A, "crG": cr_G}[d + c]
+    set_color_keys(o, 0.05 + 0.95 * lv)
 BEACONS = []
 for ob, h, xf, yc in BUILDINGS:
     if h > 60:
@@ -1400,7 +1670,7 @@ _ramp.color_ramp.elements[-1].color = (0.6, 0.06, 0.01, 1)
 lk(_fl, _t, _ramp.inputs["Fac"])
 _em = nd(_fl, "ShaderNodeEmission")
 lk(_fl, _ramp.outputs["Color"], _em.inputs["Color"])
-_str = M(_fl, "MULTIPLY", M(_fl, "POWER", M(_fl, "SUBTRACT", 1.0, _t, clamp=True), 1.3), 13.0)
+_str = M(_fl, "MULTIPLY", M(_fl, "POWER", M(_fl, "SUBTRACT", 1.0, _t, clamp=True), 1.3), 24.0)
 lk(_fl, _str, _em.inputs["Strength"])
 _al = M(_fl, "MULTIPLY", M(_fl, "POWER", M(_fl, "SUBTRACT", 1.0, _t, clamp=True), 0.8),
         M(_fl, "ADD", 0.35, M(_fl, "MULTIPLY", _nz.outputs["Fac"], 1.0)), clamp=True)
@@ -1415,7 +1685,7 @@ try:
 except Exception:
     pass
 FLAMES = []
-prof = [(0.0, 0.0)] + [(0.125 * (1 - s) ** 0.55 * (1 + 0.35 * math.sin(math.pi * s * 0.9)), s) for s in np.linspace(0.02, 1.0, 14)]
+prof = [(0.0, 0.0)] + [(0.16 * (1 - s) ** 0.55 * (1 + 0.35 * math.sin(math.pi * s * 0.9)), s) for s in np.linspace(0.02, 1.0, 14)]
 for k, x in enumerate((-0.13, 0.13)):
     fo = lathe(f"Flame{k}", prof, segs=16, mat=M_FLAME, parent=LEAD_BODY, loc=(x, -2.36, 0.31))
     fo.rotation_euler = (math.radians(90), 0, 0)              # +Z (lathe axis) → -Y (out the back)
@@ -1481,7 +1751,7 @@ place_car(POL, POL_BODY, POL_WHEELS, X_POL, Y_POL, Z_POL, DX_POL, np.maximum(SPE
 fl_on = NITRO > 0.04
 for k, fo in enumerate(FLAMES):
     fk = np.array([hash01(i, 31 + k) for i in range(N)])
-    ln = NITRO * (0.7 + 0.35 * fk + 0.25 * HAT + 0.3 * KICK * BIG) * 1.1
+    ln = np.minimum(NITRO * (1.0 + 0.4 * fk + 0.3 * HAT + 0.3 * KICK * BIG) * 1.45, 2.2)
     wd = np.sqrt(np.maximum(NITRO, 0)) * (0.85 + 0.3 * fk)
     bake_vec(fo, "scale", np.stack([wd, wd, np.maximum(ln, 0.001)], 1))
     show(fo, fl_on)
@@ -1499,6 +1769,60 @@ for nm, on in (("red", red_on), ("blue", blue_on)):
     lvl = np.clip(on * (0.8 + 0.6 * HAT) + white * 1.5, 0, 3)
     set_color_keys(bo, np.stack([lvl, lvl, lvl], 1), const=True)
     bake(ld, "energy", lvl * 2000.0, const=True)                 # 9000 flooded the whole street red
+
+
+def proto_instance(name, tag, coll):
+    p = PROTOS[name]
+    rig = bpy.data.objects.new(tag, None)
+    coll.objects.link(rig)
+    body = bpy.data.objects.new(tag + "_body", None)
+    body.instance_type = "COLLECTION"
+    body.instance_collection = p.body
+    coll.objects.link(body)
+    body.parent = rig
+    axles = []
+    for ai, (y, z, r, col) in enumerate(p.axles):
+        a = bpy.data.objects.new(f"{tag}_ax{ai}", None)
+        a.instance_type = "COLLECTION"
+        a.instance_collection = col
+        coll.objects.link(a)
+        a.parent = rig
+        a.location = (0, y, z)
+        axles.append(a)
+    return rig, body, axles, p
+
+
+# the rest of the police: their own models, lightbars strobing out of phase with each other
+for k, c in enumerate(COPS):
+    rig, body, axles, p = proto_instance(c["name"], f"Cop{k}", SC.collection)
+    sp_k = np.maximum(np.gradient(c["Y"]) * FPS, 0.0)
+    wr = float(np.mean([a[2] for a in p.axles])) if p.axles else 0.35
+    place_car(rig, body, axles, c["X"], c["Y"], c["Z"], np.gradient(c["X"]) * FPS, sp_k, f"Cop{k}", wr)
+    ph_k = BEAT_PH + 0.25 * (k + 1)
+    af = np.floor(ph_k * 4).astype(int) % 2
+    asl = np.floor(ph_k * 2).astype(int) % 2
+    bu = (((ph_k * 4) % 1.0) < 0.45).astype(float)
+    r_on = np.where(HOT > 0.5, (af == 0) * bu, (asl == 0) * 1.0)
+    b_on = np.where(HOT > 0.5, (af == 1) * bu, (asl == 1) * 1.0)
+    vis = c["vis"]
+    for nm_, mat, x, on in (("r", M_RED, -0.3, r_on), ("b", M_BLUE, 0.3, b_on)):
+        bo = cube_obj(f"Cop{k}Bar{nm_}", mat, loc=(x, 0.0, p.roof_z + 0.08), scale=(0.2, 0.08, 0.05))
+        bo.parent = body
+        no_shadow(bo)
+        lv = np.clip(on * (0.8 + 0.6 * HAT) + BIG * KICK * 1.5, 0, 3)
+        set_color_keys(bo, np.stack([lv, lv, lv], 1), const=True)
+        show(bo, vis)
+    ld = bpy.data.lights.new(f"Cop{k}Light", "POINT")
+    ld.shadow_soft_size = 0.3
+    ld.use_shadow = False
+    lo = link(bpy.data.objects.new(ld.name, ld), body)
+    lo.location = (0, 0, p.roof_z + 0.45)
+    red = r_on >= b_on
+    bake_vec(ld, "color", np.stack([np.where(red, 1.0, 0.08), np.where(red, 0.05, 0.25), np.where(red, 0.03, 1.0)], 1),
+             const=True)
+    bake(ld, "energy", 1400.0 * np.maximum(r_on, b_on) * vis, const=True)
+    for o in [body] + axles:
+        show(o, vis)
 hp = np.stack([X_LEAD + 14.0 + 3 * np.sin(IDX * 0.011), YR_LEAD - 26.0, Z_LEAD + 62.0], 1)
 bake_vec(HELI_OB, "location", hp)
 tgt = np.stack([X_LEAD, YR_LEAD + 2.0, Z_LEAD], 1) + np.stack(
@@ -1586,6 +1910,13 @@ def shot(kind, i, s0, s1):
     if kind == "police_edge":                                  # behind the stopped cruiser at the gap
         cam = pol(i, -7.5, 1.6, 3.0)
         return cam, lead(i, 0, 0, 0) * 0.5 + pol(i, 30.0, 0, 0) * 0.5, 30, 11
+    if kind == "xing":                                         # high on the corner of the red-light crossing
+        cam = Vector((9.5, Y_XING + 5.0, 9.0))               # over the corner, inside the cross street
+        tg = Vector((-2.0, Y_XING - 6.0, 0.5)) * 0.55 + lead(i, 0, 0, 0.5) * 0.45
+        return cam, tg, 18, 11
+    if kind == "xing_low":                                     # low on the cross street: the cruisers follow
+        cam = Vector((-10.4, Y_XING - 9.5, 1.9))             # on the far corner's kerb, clear of both lanes
+        return cam, Vector((0.0, Y_XING, 1.0)) * 0.5 + pol(i, 0, 0, 0.8) * 0.5, 22, 8
     if kind == "heli_lead":
         cam = lead(i, -50.0 + 10 * t, 12.0 * side, 36.0)
         return cam, lead(i, 10.0, 0, 0), 40, 11
@@ -1607,7 +1938,7 @@ def shake(i, amp):
 
 AMP = {"bumper": 0.06, "side_low": 0.05, "side_low_lead": 0.05, "front_reverse": 0.05, "chase_high": 0.08,
        "chase_lead": 0.08, "rear_low": 0.07, "flyby": 0.03, "heli": 0.25, "heli_ramp": 0.15, "heli_bridge": 0.15,
-       "kicker_view": 0.04, "jump_side": 0.05, "land_chase": 0.1, "police_edge": 0.06, "heli_lead": 0.2, "far": 0.02}
+       "kicker_view": 0.04, "xing": 0.03, "xing_low": 0.04, "jump_side": 0.05, "land_chase": 0.1, "police_edge": 0.06, "heli_lead": 0.2, "far": 0.02}
 cam_loc = np.zeros((N, 3))
 cam_rot = np.zeros((N, 3))
 cam_lens = np.zeros(N)
@@ -1651,6 +1982,70 @@ bake_vec(CAM, "rotation_euler", cam_rot)
 bake(CAM_D, "lens", cam_lens)
 bake(CAM_D, "dof.focus_distance", cam_focus)
 bake(CAM_D, "dof.aperture_fstop", cam_fstop)
+
+
+def sparse_bake(idb, path, index, vals, a, b):
+    """Keys only where the motion bends (linear runs collapse to their ends) + held keys at wraps."""
+    v = np.asarray(vals, np.float64)[a:b + 1]
+    n = len(v)
+    keep = np.zeros(n, bool)
+    keep[0] = keep[-1] = True
+    if n > 2:
+        keep[1:-1] = np.abs(v[2:] - 2 * v[1:-1] + v[:-2]) > 1e-6
+    const = np.zeros(n, bool)
+    for c_ in WRAPS:
+        if a < c_ <= b:
+            keep[c_ - 1 - a] = keep[c_ - a] = True
+            const[c_ - 1 - a] = True
+    ix = np.nonzero(keep)[0]
+    fc = H._fcurve(idb, path, index)
+    kp = fc.keyframe_points
+    kp.clear()
+    kp.add(len(ix))
+    co = np.empty(2 * len(ix), np.float32)
+    co[0::2] = a + ix + 1
+    co[1::2] = v[ix]
+    kp.foreach_set("co", co)
+    kp.foreach_set("interpolation", np.where(const[ix], H.CONST, H.LIN).astype(np.int32))
+    fc.update()
+
+
+# the lens never sits inside a traffic car: drop any car the camera would pass through
+cam_true_y = cam_loc[:, 1] + K_WRAP
+keep, n_cam = [], 0
+for c in TRAF:
+    hx, hy = half(c)
+    zc = zprof(c["Y"] - KF) if c["deck"] else np.zeros(N)
+    hit = c["vis"] & (np.abs(cam_loc[:, 0] - c["X"]) < hx + 1.0) & (np.abs(cam_true_y - c["Y"]) < hy + 1.0) & \
+        (cam_loc[:, 2] < zc + 3.5)
+    if hit.any():
+        n_cam += 1
+        continue
+    keep.append(c)
+TRAF = keep
+TRAF_COLL = bpy.data.collections.new("Traffic")
+SC.collection.children.link(TRAF_COLL)
+for t_i, c in enumerate(TRAF):
+    rig, body, axles, p = proto_instance(c["kind"], f"Traf{t_i:03d}", TRAF_COLL)
+    vis = c["vis"]
+    a = int(np.argmax(vis))
+    b = int(N - 1 - np.argmax(vis[::-1]))
+    Yr = c["Y"] - K_WRAP
+    Z = zprof(Yr) if c["deck"] else np.zeros(N)
+    for k_, arr in enumerate((c["X"], Yr, Z)):
+        sparse_bake(rig, "location", k_, arr, a, b)
+    if c["axis"] == "x":
+        rig.rotation_euler = (0.0, 0.0, -c["dirn"] * math.pi / 2)        # nose +Y → ±X
+    if c["v"] > 0:
+        ang = -ARGS.wheel_step * (IDX - a).astype(np.float64)
+        for ax in axles:
+            sparse_bake(ax, "rotation_euler", 0, ang, a, b)
+    for o in [body] + axles:
+        show(o, vis)
+kinds = {}
+for c in TRAF:
+    kinds[c["tag"]] = kinds.get(c["tag"], 0) + 1
+print(f"[police] traffic placed: {len(TRAF)} ({kinds}); {n_cam} dropped for the camera")
 for s0, s1, kind, frac in QA:
     if frac < 0.6 and kind not in ("police_edge", "bumper"):
         print(f"[police][QA] shot {s0}-{s1} {kind}: lead on screen only {frac:.0%}")
