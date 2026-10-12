@@ -6,10 +6,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../../../.." && pwd)"
 BLENDER="${BLENDER:-$HOME/.local/bin/blender}"
-OUT_DIR="${OUT_DIR:-$REPO/scratch/scenes/police3d}"
+OUT_DIR="${OUT_DIR:-$REPO/scratch/scenes/police3d_v2}"
 BLEND="${BLEND:-$OUT_DIR/police.blend}"
 AUDIO="$REPO/state/tzeke_songs/police/police.wav"
-MP4="${MP4:-$REPO/state/tzeke_songs/police/police_chase.mp4}"
+MP4="${MP4:-$REPO/state/tzeke_songs/police/police_chase_v2.mp4}"
 CHUNK="${CHUNK:-60}"; PCT="${PCT:-100}"; LOCK="${LOCK:-/tmp/iris_gpu_render.lock}"
 NF=6690
 case "${1:-}" in
