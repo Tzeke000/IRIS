@@ -28,11 +28,19 @@ closest 0.23 m) and ≥ 4 measured speaker contacts.
 (~6 h solo). Three capped workers ran the 0:40–1:15 timing clip at ~1.75x one worker's throughput → full render
 ≈ 3.5 h (est. 3–4.5 h) + the HUD pass (328 frames, ~20 s at 25 %, ~1–2 min at 100 %) + mux. Bullet bake 23 s, build ~45 s.
 
-**Known weak spots:** the booster-3 fireball reads as white Al2O3 smoke + flash (correct for an SRB, but little orange
-fire); the 1:07 rainbow reboot sweep is subtle at chase distance; the TVC moment arm is 1.75x SLS's so the recovery fits
-the music (flight_model.py docstring); the post-blast HUD wording "⚠ BOOSTER 3 LOST — ATTITUDE ERROR" is a placeholder
-(only the pre-blast warning was approved) — edit `post_hud.py` WARN3, re-run `render.sh hud` + `mux` only; drop-2 laser
-fans are dense in the over-the-shoulder shot (M8_tunnel); debris rocks (3–6 m) read small next to the 38 m speaker.
+**v4.1 (Iris's review, 10-13):** (1) booster-3 fireball rebuilt: EmberGen grids are normalised (measured with Blender's
+bundled `openvdb`: temperature 0–2.2, flames 0–1.1), so temperature maps 0.25–2.2 → 1900–3300 K through a Blackbody node
+(1500–2500 K read salmon-pink under AgX), emission = flames² × a keyed glow, dark grey-brown denser smoke, playback starts
+5 sim frames in (the first frames are near-empty), an orange 1900 K point flash that lights the stack's flank (irradiance
+~100 W/m² peak, ~0.3 s); (2) the 1:07 reboot: a keyed `SweepZ` wavefront in the LED shader (rainbow below, red above, a
+±7 m white-hot band + each ring flares as it's reached, one bar), no white strobe and a capped level during that bar,
+and a new shot `R0_reboot` cut on the 66.97 s entry: 11 mm, 30 m off the stack near its base looking up the full
+height; (3) speaker-bound debris ~2× (radius 6–11.5 m), re-baked at 60 substeps / 1.0 m pad: 0 inside, closest 0.14 m.
+
+**Known weak spots:** the first ~0.1 s of the blast is a near-white fireball + flash (then orange-brown); the TVC moment arm
+is 1.75x SLS's so the recovery fits the music (flight_model.py docstring); the post-blast HUD wording "⚠ BOOSTER 3 LOST —
+ATTITUDE ERROR" is a placeholder (edit `post_hud.py` WARN3, re-run `render.sh hud` + `mux` only); drop-2 laser fans are
+dense in the over-the-shoulder shot (M8_tunnel).
 
 **Files (v4):** `flight_model.py` (numpy flight model, self-test: `python3 flight_model.py`), `post_hud.py` (HUD
 compositor pass), `par_frames.sh` (N capped workers), `render.sh hud` / `mux` (HUD frames replace their beauty frames).

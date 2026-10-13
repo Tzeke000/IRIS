@@ -351,7 +351,8 @@ if RAVE:
     SHOTS += [(BUILD0, "V1_rings"), (_sc(38.33), "V2_panel"), (B3ALARM, "V3_feed"), (_sc(47.87), "V4_red"),
               (_sc(50.6), "V5_onb"), (B3SEP, "V6_sep"), (B3BOOM, "V7_boom"), (_sc(57.43), "V7b_lost"),
               (_sc(58.8), "V8_tumble"), (_sc(61.53), "V9_fish"), (_sc(64.27), "V10_track"),
-              (REBOOT, "R1_neon"), (snap(REBOOT + 2 * BAR), "D3_wide"), (_sc(72.8), "R2_nose"),
+              (REBOOT, "R0_reboot"), (snap(REBOOT + 2 * BAR), "R1_neon"), (snap(REBOOT + 3 * BAR), "D3_wide"),
+              (_sc(72.8), "R2_nose"),
               (BRIDGE, "E_calm"),
               (ENT[3], "R3_orbit"), (_sc(108.4), "R4_count"),
               (H_CUTS[1], "S1_rise"), (_sc(120.0), "S2_hero"), (GLIMPSE, "L0_glimpse"), (_sc(126.5), "S3_wide"),
@@ -1390,6 +1391,13 @@ def led_pixel_material(name, strength=14.0, dots_per_m=4.0, coord="ring", hue_pe
     oc = nd(nt, "ShaderNodeSeparateColor")
     lk(nt, oi.outputs["Color"], oc.inputs[0])
     gain, alarm, phase = oc.outputs[0], oc.outputs[1], oc.outputs[2]
+    # v4.1 reboot wavefront: a keyed height 'SweepZ' climbs the stack; below it the alarm is OFF (rainbow), and a
+    # thick white-hot band (+/- ~5 m) rides the front so the bottom -> top sweep is unmistakable
+    sweep = value_node(nt, "SweepZ", -1000.0)
+    above = M(nt, "GREATER_THAN", sp.outputs[2], sweep.outputs[0])
+    alarm = M(nt, "MULTIPLY", alarm, above)
+    dzs = M(nt, "DIVIDE", M(nt, "SUBTRACT", sp.outputs[2], sweep.outputs[0]), 7.0)
+    band = M(nt, "EXPONENT", M(nt, "MULTIPLY", M(nt, "MULTIPLY", dzs, dzs), -1.0))
     hue = M(nt, "FRACT", M(nt, "ADD", M(nt, "ADD", M(nt, "MULTIPLY", posm, hue_per_m),
                                            M(nt, "MULTIPLY", beats.outputs[0], 0.25)),
                            M(nt, "ADD", phase, hueo.outputs[0])))
@@ -1397,8 +1405,8 @@ def led_pixel_material(name, strength=14.0, dots_per_m=4.0, coord="ring", hue_pe
     lk(nt, hue, hsv.inputs[0])
     hsv.inputs[1].default_value = 1.0
     hsv.inputs[2].default_value = 1.0
-    col = mix_col(nt, alarm, hsv.outputs[0], (1.0, 0.0, 0.035))
-    col = mix_col(nt, strobe.outputs[0], col, (1.0, 1.0, 1.0))
+    col = mix_col(nt, alarm, hsv.outputs[0], (1.0, 0.0, 0.0))
+    col = mix_col(nt, M(nt, "MAXIMUM", strobe.outputs[0], M(nt, "MULTIPLY", band, 0.85)), col, (1.0, 1.0, 1.0))
     # diodes: d = |fract(pos * N) - 0.5| -> dots; far away they alias, so fade to the mean (0.45) by distance
     d = M(nt, "ABSOLUTE", M(nt, "SUBTRACT", M(nt, "FRACT", M(nt, "MULTIPLY", posm, dots_per_m)), 0.5))
     dot = nd(nt, "ShaderNodeMapRange", interpolation_type="SMOOTHSTEP",
@@ -1417,7 +1425,8 @@ def led_pixel_material(name, strength=14.0, dots_per_m=4.0, coord="ring", hue_pe
     st = M(nt, "MULTIPLY", M(nt, "MULTIPLY", M(nt, "MULTIPLY", mask, gain), level.outputs[0]),
            M(nt, "MULTIPLY", pat, strength))
     # the red alarm runs ~40 % dimmer: AgX rolls a hot saturated red toward orange/white (research #1 §2)
-    st = M(nt, "MULTIPLY", st, M(nt, "SUBTRACT", 1.0, M(nt, "MULTIPLY", alarm, 0.4)))
+    st = M(nt, "MULTIPLY", st, M(nt, "SUBTRACT", 1.0, M(nt, "MULTIPLY", alarm, 0.6)))   # v4.1: 0.4 -> 0.6 (close-up red went pink)
+    st = M(nt, "ADD", st, M(nt, "MULTIPLY", M(nt, "MULTIPLY", band, gain), strength * 3.0))   # solid band, no dot gaps
     em = nd(nt, "ShaderNodeEmission")
     lk(nt, col, em.inputs["Color"])
     lk(nt, st, em.inputs["Strength"])
@@ -3338,6 +3347,14 @@ if RAVE:
     def _ast(i):
         return Vector(ast_pos[i])
 
+    @shot("R0_reboot")           # v4.1: the 1:07 drop — a wide remote 30 m off the stack sees all 98 m of it,
+    def _(i, u, n):              # so the rainbow wavefront climbing bottom -> top is the whole picture
+        t = u / n
+        a = math.radians(-118 + 10 * t)                  # 11 mm, 30 m out, near the base looking UP the stack:
+        cam = wl(i, (30.0 * math.cos(a), 30.0 * math.sin(a), 5.0))   # vertical 85 deg covers the nozzles -> the nose
+        return dict(cam=cam, tgt=wl(i, (0, 0, 23.5)), lens=11, fstop=11, shake=0.35,
+                    up=wl(i, (0, 0, 1)) - wl(i, (0, 0, 0)))
+
     @shot("R1_neon")             # close chase sweeping round the neon stack
     def _(i, u, n):
         t = u / n
@@ -4041,10 +4058,17 @@ if RAVE:
     STRB = np.clip(0.7 * STROBE * HOT * (1 - _alarm_on * (IDX < REBOOT)) + 0.8 * IMPACT, 0, 1)
     bar_i = np.floor((IDX - DOWNBEATS[0]) / BAR).astype(int)
     HUEOFF = 0.07 * bar_i + 0.15 * (BEATS * 0.0)
+    # the wavefront: from below the nozzles to above the nose in ONE BAR from the 1:07 drop entry
+    SWEEPZ = np.where(IDX < REBOOT, -1000.0, np.where(IDX <= REBOOT + BAR, -8.0 + 112.0 * ramp(IDX, REBOOT, REBOOT + BAR),
+                                                       1000.0))
+    # during the sweep bar: no white strobe (the drop-entry impact would wash every LED white) and a capped level,
+    # so red-above / rainbow-below stay saturated under AgX and the white-hot front is the brightest thing
+    _swin = (IDX >= REBOOT - 2) & (IDX <= REBOOT + BAR + 4)
     for nt_ in (M_LEDPIX.node_tree,):
+        bake(nt_, value_path("SweepZ"), SWEEPZ)
         bake(nt_, value_path("Beats"), BEATS)
-        bake(nt_, value_path("Level"), LVL)
-        bake(nt_, value_path("Strobe"), STRB)
+        bake(nt_, value_path("Level"), np.where(_swin, np.minimum(LVL, 0.75), LVL))
+        bake(nt_, value_path("Strobe"), np.where(_swin, 0.0, STRB))
         bake(nt_, value_path("Hue"), HUEOFF, const=True)
 
     def _zof(o):
@@ -4063,17 +4087,18 @@ if RAVE:
         boot = snap(BUILD0 + BAR * min(int(rank * _nb / len(_rings)), _nb - 1))
         g = np.where(IDX < boot, np.where(IDX >= LIFT, 0.10, 0.05), 1.0)
         g = g + 2.5 * np.exp(-np.maximum(IDX - boot, 0) / 4.0) * (IDX >= boot)          # boot flash
-        t_sw = REBOOT + int(round(REBOOT_LEN * np.clip(z / 80.0, 0, 1)))
-        g = g + 3.0 * np.exp(-np.maximum(IDX - t_sw, 0) / 5.0) * (IDX >= t_sw)          # reboot flash
+        t_sw = REBOOT + int(REBOOT_LEN) + 3              # the shader's SweepZ front does the switch per pixel
+        t_hit = REBOOT + int(round(REBOOT_LEN * (z + 8.0) / 112.0))   # when the front reaches this ring: it FLARES
+        g = g + 2.5 * np.exp(-np.maximum(IDX - t_hit, 0) / 6.0) * (IDX >= t_hit) * (IDX < REBOOT + 3 * BAR)
         al = _alarm_on * (IDX < t_sw)
         set_color_keys(o, np.stack([g, al, np.full(N, (z / 64.0) * 0.5)], 1), const=False)
     for o, kind, ph_ in LED_OBS:
         if kind == "strip":
-            t_sw = REBOOT + int(round(REBOOT_LEN * 0.5))
-            g = np.where(IDX >= LIFT, 1.0, 0.05) + 3.0 * np.exp(-np.maximum(IDX - t_sw, 0) / 5.0) * (IDX >= t_sw)
+            t_sw = REBOOT + int(REBOOT_LEN) + 3
+            g = np.where(IDX >= LIFT, 1.0, 0.05)
             set_color_keys(o, np.stack([g, _alarm_on * (IDX < t_sw), np.zeros(N)], 1), const=False)
         elif kind == "nose":
-            t_sw = REBOOT + REBOOT_LEN
+            t_sw = REBOOT + int(REBOOT_LEN)
             redn = (_alarm_on * (IDX < t_sw))[:, None]
             lv = 0.06 * (1 - flying) + flying * (1.0 + 3.0 * KICK4 + 4.0 * STRB + 1.2 * HAT4) * (LVL / np.maximum(LVL.mean(), 1e-3)) ** 0.5
             col = (0.45 + 0.55 * HUE) * (1 - redn) + np.array([1.0, 0.03, 0.03])[None, :] * redn
@@ -4620,8 +4645,36 @@ if V4:
     _out = Vector((BOOM_P.x, BOOM_P.y, 0.0)).normalized()
     _dexp = (_out * 0.75 + Vector((0, 0, -0.66))).normalized()  # it carries the booster's momentum out + falls back
     _rot = _dexp.to_track_quat("Y", "Z").to_euler()
-    M_B3FIRE = smoke_material("B3Fireball", (0.88, 0.87, 0.85), dens=1.6, aniso=0.35, glow_grid="flames",
-                              glow_col=blackbody(3000), plume_lit=False)   # aluminised APCP: white Al2O3 smoke
+    def fireball_material(name):
+        """v4.1 (Iris: 'it reads as a white puff'): a real fireball — fire-smoke-realism §5. The EmberGen grids are
+        normalised, not kelvin (measured with Blender's bundled openvdb: temperature 0..2.2, flames 0..1.1,
+        density 0..1.1), so temperature is MAPPED 0.25..2.2 -> 1500..2500 K through a Blackbody node (deep orange
+        at the edges -> yellow-white core), emission = flames^1.4 x keyed Glow (+ a temperature term so the hot
+        core glows through the smoke); the smoke is dark grey-brown and denser (burning propellant + case debris)."""
+        m, nt = new_mat(name)
+        dn = value_node(nt, "Density", 3.0)
+        glow = value_node(nt, "Glow", 0.0)
+        value_node(nt, "Evolve", 0.0)
+        ad = nd(nt, "ShaderNodeAttribute", attribute_type="GEOMETRY", attribute_name="density")
+        af = nd(nt, "ShaderNodeAttribute", attribute_type="GEOMETRY", attribute_name="flames")
+        at = nd(nt, "ShaderNodeAttribute", attribute_type="GEOMETRY", attribute_name="temperature")
+        kmap = nd(nt, "ShaderNodeMapRange", inp={"From Min": 0.25, "From Max": 2.2, "To Min": 1900.0, "To Max": 3300.0})
+        lk(nt, at.outputs["Fac"], kmap.inputs["Value"])
+        bb = nd(nt, "ShaderNodeBlackbody")
+        lk(nt, kmap.outputs["Result"], bb.inputs["Temperature"])
+        pv = nd(nt, "ShaderNodeVolumePrincipled", inp={"Color": (0.105, 0.085, 0.068, 1), "Anisotropy": 0.3})
+        pv.inputs["Density Attribute"].default_value = ""
+        lk(nt, M(nt, "MULTIPLY", ad.outputs["Fac"], dn.outputs[0]), pv.inputs["Density"])
+        gam = nd(nt, "ShaderNodeGamma", inp={"Gamma": 1.25})                  # a little more saturation under AgX
+        lk(nt, bb.outputs["Color"], gam.inputs["Color"])
+        lk(nt, gam.outputs["Color"], pv.inputs["Emission Color"])
+        hot = M(nt, "POWER", M(nt, "MAXIMUM", af.outputs["Fac"], 0.0), 2.0)   # pockets of fire, dark smoke between
+        lk(nt, M(nt, "MULTIPLY", hot, glow.outputs[0]), pv.inputs["Emission Strength"])
+        o = nd(nt, "ShaderNodeOutputMaterial")
+        lk(nt, pv.outputs[0], o.inputs["Volume"])
+        return m
+
+    M_B3FIRE = fireball_material("B3Fireball")
     _vb = Vector(B3_MID[B3BOOM] - B3_MID[B3BOOM - 1]) * FPS
     _vb = _vb * min(1.0, 40.0 / max(_vb.length, 1e-3))
     B3X = []
@@ -4629,22 +4682,24 @@ if V4:
         rot_ = (_rot.x, _rot.y, _rot.z + tw_)
         fo, nfi = vdb_seq(f"B3Explosion{k}", MIDAIR, sc_, loc=(0, 0, 0), rot=rot_, mat=M_B3FIRE, parent=RIG)
         fo.data.render.precision = "HALF"
-        vdb_play(fo, nfi, B3BOOM - 1, speed=sp_, first=1)
+        vdb_play(fo, nfi, B3BOOM - 1, speed=sp_, first=5)  # the sim's first frames are near-empty: start developed
         off = anchored((0, 0, 0), rot_, sc_, MIDAIR_ANCHOR)
         pos = np.array(BOOM_P + off)[None, :] + np.array(_vb)[None, :] * (1.2 * (1 - np.exp(-tb3 / 1.2)))[:, None] \
             + np.array([0, 0, -1.0])[None, :] * (14.0 * tb3)[:, None]
         bake_vec(fo, "location", pos)
         show(fo, (IDX >= B3BOOM - 1) & (IDX < B3BOOM + 12 * FPS))
         B3X.append(fo)
-    vkeys(M_B3FIRE, np.full(N, 1.6) * (1 - 0.5 * ramp(IDX, B3BOOM + 4 * FPS, B3BOOM + 12 * FPS)), evo,
-          (IDX >= B3BOOM) * (0.3 + 12.0 * np.exp(-tb3 / 0.7)))
+    vkeys(M_B3FIRE, np.full(N, 5.0) * (1 - 0.5 * ramp(IDX, B3BOOM + 4 * FPS, B3BOOM + 12 * FPS)), evo,
+          (IDX >= B3BOOM) * (0.4 + 20.0 * np.exp(-tb3 / 0.5) + 2.0 * np.exp(-tb3 / 1.6)))
     B3FLASH = bpy.data.lights.new("B3Flash", "POINT")
     B3FLASH.shadow_soft_size = 25.0
-    B3FLASH.color = blackbody(3000)
+    B3FLASH.color = blackbody(1900)                      # orange: it lights the rocket's flank, then the fire glows on
+    B3FLASH.use_shadow = True
     B3FLO = link(bpy.data.objects.new("B3Flash", B3FLASH), RIG)
-    B3FLO.location = BOOM_P
-    bake(B3FLASH, "energy", (IDX >= B3BOOM) * 3.0e8 * np.exp(-tb3 / 0.2))
-    show(B3FLO, (IDX >= B3BOOM) & (IDX < B3BOOM + 3 * FPS))
+    B3FLO.location = BOOM_P + Vector((0, 0, 6.0))
+    # (irradiance on the rocket ~55 m away: ~100 W/m^2 at the peak = many times the sun lamp, decaying in ~0.3 s)
+    bake(B3FLASH, "energy", (IDX >= B3BOOM) * (4.0e6 * np.exp(-tb3 / 0.3) + 6.0e5 * np.exp(-tb3 / 1.5)))
+    show(B3FLO, (IDX >= B3BOOM) & (IDX < B3BOOM + 6 * FPS))
     # the condensation shock shell: what makes an explosion read as CLOSE (a Wilson cloud, ~300 m/s, 6 frames)
     m_sh, nt_sh = new_mat("ShockShell")
     m_sh.surface_render_method = "BLENDED"
@@ -4689,7 +4744,7 @@ if V4:
             set_color_keys(ob, np.stack([hot, hot, hot], 1), const=False)
         show(ob, (IDX >= B3BOOM) & (IDX < B3BOOM + 7 * FPS))
     # exposure pop on the blast
-    expo = expo + 0.5 * (IDX >= B3BOOM) * np.exp(-tb3 / 0.15)
+    expo = expo + 0.25 * (IDX >= B3BOOM) * np.exp(-tb3 / 0.15)
     # --- RCS roll jets: white puffs near the top of the core when the flight model fires them
     M_RCS = plume_shell("RCSPuff", [(0.0, (1.0, 1.0, 1.0)), (1.0, (0.7, 0.75, 0.8))], nscale=2.0, along_pow=1.2,
                         edge_pow=1.5, base_alpha=0.8)
@@ -4708,7 +4763,7 @@ if V4:
     # --- the rocket's spectrum panel keys (alarm red until the reboot sweep reaches it)
     nts = M_SPEC_ROCKET.node_tree
     bake(nts, value_path("Frame"), IDX.astype(np.float64), const=True)
-    bake(nts, value_path("Alarm"), _alarm_on * (IDX < REBOOT + int(round(REBOOT_LEN * 0.42))))
+    bake(nts, value_path("Alarm"), _alarm_on * (IDX < REBOOT + int(round(REBOOT_LEN * (34.0 + 8.0) / 112.0))))
     bake(nts, value_path("Gain"), np.where(IDX >= LIFT, 1.0, 0.12) * (LVL / np.maximum(LVL, 1e-3)) *
          np.where((_tbm >= 0) & (_tbm < 1.2), np.where(_flk < 0.45, 0.05, 1.0), 1.0))
     # --- space glow: the night side's city lights + an aurora on the limb breathe with the bass
@@ -4965,7 +5020,7 @@ if V4:
     rbw.constraints = _glue_coll
     _start_c = Vector(ast_pos[BOOM])
     for k, da in enumerate(_arr):
-        r = float(_drng.uniform(3.0, 6.0))
+        r = float(_drng.uniform(6.0, 11.5))                 # v4.1: ~2x (they read tiny next to the 38 m speaker)
         t_hit = AFTER + da                                   # index
         # aim point on the speaker at that frame: the front face or the lid, in its local frame -> world
         Mh = (Matrix.Translation(Vector(spk_loc[t_hit])) @ Euler_(tuple(spk_rot[t_hit])).to_matrix().to_4x4())
