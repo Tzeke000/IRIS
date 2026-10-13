@@ -552,6 +552,11 @@ class Supervisor:
         if delay_s and self.stop_evt.wait(delay_s):
             return
         while not self.stop_evt.is_set():
+            # 10-13: re-assert every tick. uvicorn.Config() runs logging.config.dictConfig, which CLOSES every
+            # handler and strips uvicorn/uvicorn.error of ours - so an orb_http start/bounce AFTER the boot
+            # install silently de-arms those two (asyncio's survives, closed, and lazily reopens on emit).
+            # Reproduced 10-13: 3 fds -> 0 after Config(). Idempotent via the marker, so this is ~free.
+            _install_orb_file_log()
             try:
                 self.tick()
             except Exception as e:  # noqa: BLE001
