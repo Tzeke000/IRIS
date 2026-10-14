@@ -37,10 +37,20 @@ def poly_area(p):
     return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
 
 
-def load(path, rng):
-    j = json.load(open(path))
+def load(paths, rng):
+    """one or several Overpass JSON files (tiles overlap → de-duplicated by way id)"""
+    if isinstance(paths, str):
+        paths = [paths]
+    seen = set()
+    els = []
+    for path in paths:
+        for e in json.load(open(path))["elements"]:
+            if e.get("id") in seen:
+                continue
+            seen.add(e.get("id"))
+            els.append(e)
     buildings, roads = [], []
-    for e in j["elements"]:
+    for e in els:
         t = e.get("tags", {})
         g = e.get("geometry")
         if not g or e.get("type") != "way":
@@ -71,11 +81,11 @@ def load(path, rng):
                 else:   # untagged Kowloon tenement / tower: area-dependent, plausible for Mong Kok
                     A = abs(a)
                     h = rng.uniform(18, 42) if A < 150 else (rng.uniform(26, 68) if A < 700 else rng.uniform(32, 95))
-            buildings.append(dict(poly=pts, h=float(min(h, 260.0)), area=abs(a), kind=t.get("building")))
+            buildings.append(dict(poly=pts, h=float(min(h, 260.0)), area=abs(a), kind=t.get("building"), id=e.get("id")))
         elif "highway" in t:
             cls = t["highway"]
             if len(pts) >= 2:
-                roads.append(dict(pts=pts, cls=cls, oneway=t.get("oneway") == "yes",
+                roads.append(dict(pts=pts, cls=cls, oneway=t.get("oneway") == "yes", id=e.get("id"),
                                   lanes=_num(t.get("lanes")) or (3 if cls in MAIN_ROADS else 1)))
     return buildings, roads
 
@@ -99,14 +109,14 @@ def prism_mesh(buildings, attrs):
         nv += 2 * n
 
     for b, a in zip(buildings, attrs):
-        p, h = b["poly"], b["h"]
+        p, h, z0 = b["poly"], b["h"], b.get("z0", 0.0)
         if b.get("crown"):
             z1 = h * b["crown"]
-            add_prism(p, 0.0, z1, a)
+            add_prism(p, z0, z0 + z1, a)
             c = p.mean(0)
-            add_prism(c + (p - c) * 0.78, z1, h, a)
+            add_prism(c + (p - c) * 0.78, z0 + z1, z0 + h, a)
         else:
-            add_prism(p, 0.0, h, a)
+            add_prism(p, z0, z0 + h, a)
     return V, F, FA
 
 
@@ -127,3 +137,19 @@ def resample(pts, step):
 
 def length(pts):
     return float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum())
+
+
+def rot_boxes(cx, cy, w, d, yaw, z0, h):
+    """N rotated boxes (closed top, open bottom) → verts, faces (numpy)"""
+    n = len(cx)
+    c, s_ = np.cos(yaw), np.sin(yaw)
+    lx = np.array([-1, 1, 1, -1]) * 0.5
+    ly = np.array([-1, -1, 1, 1]) * 0.5
+    X = cx[:, None] + (lx[None, :] * w[:, None]) * c[:, None] - (ly[None, :] * d[:, None]) * s_[:, None]
+    Y = cy[:, None] + (lx[None, :] * w[:, None]) * s_[:, None] + (ly[None, :] * d[:, None]) * c[:, None]
+    Zb = np.repeat(z0[:, None], 4, 1)
+    Zt = Zb + h[:, None]
+    V = np.concatenate([np.stack([X, Y, Zb], -1), np.stack([X, Y, Zt], -1)], 1).reshape(-1, 3)
+    base = (np.arange(n) * 8)[:, None, None]
+    F = np.array([[0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7], [4, 5, 6, 7]])[None] + base
+    return V, F.reshape(-1, 4)

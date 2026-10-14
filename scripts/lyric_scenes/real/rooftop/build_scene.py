@@ -160,8 +160,8 @@ drone_lv = np.where(seg(tD2, tFL + 1.6), 1.0, 0.0) * (1.0 - smoothstep((T - tFL)
 sky = 0.45 + 0.55 * city * (1.0 - shut)
 blink = (np.floor(T / 1.0) % 2 == 0).astype(float) * (1.0 - shut)
 # drop-2 window strobe v2: a clean RADIAL ripple — on every beat a lit ring expands from under the drone show
-RIPPLE_V = 950.0                                       # m/s: crosses the visible city in ~0.7 s
-last_beat_t = T0 + np.floor(BEAT) * P
+RIPPLE_V = 2600.0                                      # m/s: every 2 beats a ring sweeps both waterfronts (~2 km)
+last_beat_t = T0 + np.floor(BEAT / 2.0) * 2.0 * P
 wr = np.where((strobe > 0) & (BEAT >= 0), (T - last_beat_t) * RIPPLE_V, 0.0)
 ctrl_curves = dict(wr=wr, city=city, cityB=cityB, strobe=strobe, wphase=wphase, wpulse=PULSE, shut=shut, bb=bb,
                    bbpulse=bbpulse, bbhue=bbhue, holo=holo, laser=laser, spire_h=spire_h, spire_glow=spire_glow,
@@ -292,8 +292,9 @@ def facade_material(name="Facade", wstr=2.4):
     # ---- radial strobe ripple (drop 2): ring expands from under the drone show on every beat ----
     dxy = nb.v("LENGTH", nb.v("SUBTRACT", nb.xyz(px, py, 0.0), (DS_C.x, DS_C.y, 0.0)))
     behind = nb.m("SUBTRACT", cg["wr"], dxy)
-    ring = nb.m("MULTIPLY", nb.m("GREATER_THAN", behind, 0.0), nb.m("EXPONENT", nb.m("DIVIDE", behind, -95.0)))
-    strb = nb.m("MULTIPLY", ring, nb.m("MULTIPLY", cg["strobe"], 4.0))
+    # clamp BEFORE exp: (behind<0)·exp(+huge) overflowed to 0·inf = NaN 3–6 km out → glare whited every frame (10-13)
+    ring = nb.m("MULTIPLY", nb.m("GREATER_THAN", behind, 0.0), nb.m("EXPONENT", nb.m("DIVIDE", nb.m("MAXIMUM", behind, 0.0), -60.0)))
+    strb = nb.m("MULTIPLY", ring, nb.m("MULTIPLY", cg["strobe"], 1.8))
     e_win = nb.mix(nb.m("DIVIDE", strb, nb.m("ADD", strb, nb.m("ADD", wi, 0.001))), room, (0.6, 0.88, 1.0))
     wtot = nb.m("MULTIPLY", nb.m("MULTIPLY", nb.m("ADD", wi, strb), win), on)
     # LED floor bands (cyberpunk trim) on some buildings
@@ -418,6 +419,34 @@ def beacon_material(name="Beacon", color=(1.0, 0.04, 0.02), strength=30.0):
 
 M_BEACON = beacon_material()
 
+
+def lamps_tree(name, radius, mat):
+    ng, nb, gi, go = gn_tree(name)
+    ico = nb.n("GeometryNodeMeshIcoSphere")
+    nb.set(ico.inputs["Radius"], radius)
+    nb.set(ico.inputs["Subdivisions"], 1)
+    inst = nb.n("GeometryNodeInstanceOnPoints")
+    nb.link(gi.outputs[0], inst.inputs["Points"])
+    nb.link(ico.outputs["Mesh"], inst.inputs["Instance"])
+    sm = nb.n("GeometryNodeSetMaterial")
+    nb.link(inst.outputs[0], sm.inputs["Geometry"])
+    sm.inputs["Material"].default_value = mat
+    nb.link(sm.outputs[0], go.inputs[0])
+    return ng
+
+
+def keyed_emit(name, color, strength, key="city", offset=0.25):
+    m, nb, out = new_mat(name)
+    cg = ctrl(nb)
+    e = nb.n("ShaderNodeEmission")
+    nb.set(e.inputs["Color"], color)
+    lv = nb.m("MULTIPLY", nb.m("SUBTRACT", 1.0, cg["shut"]), nb.m("ADD", offset, nb.m("MULTIPLY", cg[key], 1 - offset)))
+    nb.link(nb.m("MULTIPLY", lv, strength), e.inputs["Strength"])
+    nb.link(e.outputs[0], out.inputs["Surface"])
+    return m
+
+
+
 # ---------------------------------------------------------------------------------------------------------
 # 3. layout constants
 # ---------------------------------------------------------------------------------------------------------
@@ -429,7 +458,7 @@ HAND = [HOME, W1, N1, (-24, -64, 20, -28, 52), (30, -44, 60, -2, 66), (-62, -46,
         (-26, 30, 22, 58, 44)]
 TCEN = Vector((80.0, 520.0, 0.0))                              # tallest tower
 TDECK = 300.0
-DS_C = Vector((30.0, 440.0, 262.0))                            # drone show centre
+DS_C = Vector((-150.0, -2700.0, 112.0))                        # drone show centre — over Victoria Harbour (v2.1)
 HOLO_C = Vector((40.0, 212.0, 0.0))                            # holo billboard building (roof 80)
 FLY = [Vector(p) for p in [(-205, 196, 96), (-122, 266, 104), (-55, 330, 118), (-12, 378, 148), (18, 428, 212),
                             (44, 474, 284), (63, 503, 321)]]
@@ -592,14 +621,31 @@ def build_city():
     return ob, tops
 
 
-CITY, TOPS = build_city()          # far procedural filler only (outside the OSM coverage)
+TOPS = []          # v2.1: the square procedural grid is gone — real OSM city → irregular suburbs → terrain + lights
+import terrain  # noqa: E402
+TER = terrain.load(os.path.join(BMO, "dem_cop30", "window.npz"))
 
 # ---------------------------------------------------------------------------------------------------------
 # 4b. REAL city layout: OpenStreetMap footprints + roads (Mong Kok, Kowloon; © OpenStreetMap contributors, ODbL)
 # ---------------------------------------------------------------------------------------------------------
 import city_osm  # noqa: E402
 
-OSM_B, OSM_R = city_osm.load(os.path.join(BMO, "osm_hk_mongkok", "osm.json"), rng)
+_osm_files = [os.path.join(BMO, d_, "osm.json") for d_ in ("osm_hk_mongkok", "osm_kln_t1", "osm_kln_t2", "osm_kln_t3", "osm_kln_t4")
+              if os.path.exists(os.path.join(BMO, d_, "osm.json"))]
+OSM_B, OSM_R = city_osm.load(_osm_files, rng)
+_cent = np.array([b_["poly"].mean(0) for b_ in OSM_B])
+OSM_BB = (_cent[:, 0].min(), _cent[:, 1].min(), _cent[:, 0].max(), _cent[:, 1].max())
+print(f"[osm] loaded {len(OSM_B)} footprints from {len(_osm_files)} file(s); coverage x {OSM_BB[0]:.0f}..{OSM_BB[2]:.0f} y {OSM_BB[1]:.0f}..{OSM_BB[3]:.0f}")
+
+
+def edge_noise(x, y):
+    """low-frequency 0..1 field → irregular erosion of the data's artificial edge"""
+    v = (np.sin(x / 310.0 + 1.3) + np.sin(y / 270.0 + 0.4) + np.sin((x + y) / 190.0 + 2.1) + np.sin((x - 2 * y) / 530.0)) / 8.0 + 0.5
+    return np.clip(v, 0.0, 1.0)
+
+
+def edge_dist(x, y):
+    return np.minimum.reduce([x - OSM_BB[0], OSM_BB[2] - x, y - OSM_BB[1], OSM_BB[3] - y])
 
 
 def lane_pts(ln, n=160):
@@ -642,10 +688,15 @@ keep, attrs = [], []
 for bld in OSM_B:
     c = bld["poly"].mean(0)
     rad = float(np.linalg.norm(bld["poly"] - c, axis=1).max())
+    if edge_dist(c[0], c[1]) < 520.0 * (0.2 + 0.8 * edge_noise(c[0], c[1])):
+        continue                                            # eroded, irregular edge (no straight data border)
+    if terrain.mask_at(TER, "water", c[0], c[1]):
+        continue                                            # piers / pontoons on the harbour
     h = osm_cap(float(c[0]), float(c[1]), rad, bld["h"])
     if h is None:
         continue
     bld["h"] = h
+    bld["z0"] = float(np.min(terrain.height_at(TER, bld["poly"][:, 0], bld["poly"][:, 1]))) - 1.5   # sits ON the ground
     bld["crown"] = rng.uniform(0.72, 0.86) if (h > 70 and rng.random() < 0.45) else None
     keep.append(bld)
     hue_ = float(rng.choice([0.0, 0.5, 0.83, 0.55, 0.9, 0.62]))
@@ -668,14 +719,166 @@ C_CITY.objects.link(CITY_OSM)
 me.materials.append(M_FACADE)
 for bld in OSM_B:                                            # tops for beacons / lasers / billboards
     p = bld["poly"]
+    if bld["z0"] > 3.0:
+        continue                                            # hillside blocks don't host beacons / lasers / billboards
     TOPS.append((float(p[:, 0].min()), float(p[:, 1].min()), float(p[:, 0].max()), float(p[:, 1].max()), bld["h"],
                  bld["h"] * (bld["crown"] or 0.0), 0, 0, 0, 0, p))
 print(f"[osm] {len(OSM_B)} real buildings kept (of {len(keep)}), {len(OSM_R)} road ways; max h {max(b['h'] for b in OSM_B):.0f} m")
 
+# ---------------------------------------------------------------------------------------------------------
+# 4c. the world beyond the data: irregular suburbs that thin out → scattered lights → real terrain + sea to the horizon
+# ---------------------------------------------------------------------------------------------------------
+def build_suburbs():
+    sp_ = 46.0
+    g = np.arange(-9200.0, 9200.0, sp_)
+    GX, GY = np.meshgrid(g, g + 500.0)
+    cx = (GX + rng.uniform(-14, 14, GX.shape)).ravel()
+    cy = (GY + rng.uniform(-14, 14, GY.shape)).ravel()
+    d = np.hypot(cx - 0.0, cy - 500.0)
+    ok = terrain.mask_at(TER, "urban", cx, cy) & (terrain.height_at(TER, cx, cy) < 6.0) & (d < 9000.0)
+    inside = (cx > OSM_BB[0]) & (cx < OSM_BB[2]) & (cy > OSM_BB[1]) & (cy < OSM_BB[3])
+    ed = edge_dist(cx, cy)
+    real_here = inside & (ed >= 520.0 * (0.2 + 0.8 * edge_noise(cx, cy)))
+    ok &= ~real_here
+    p_keep = np.clip(1.05 - d / 9000.0, 0.12, 0.88) * (0.75 + 0.25 * edge_noise(cx * 0.7, cy * 0.7))
+    ok &= rng.random(len(cx)) < p_keep
+    # occupancy of the real footprints we kept (10 m raster) — suburbs only fill the eroded band, never overlap
+    occ = set()
+    for b_ in OSM_B:
+        mn, mx = b_["poly"].min(0), b_["poly"].max(0)
+        for ix in range(int(mn[0] // 10), int(mx[0] // 10) + 1):
+            for iy in range(int(mn[1] // 10), int(mx[1] // 10) + 1):
+                occ.add((ix, iy))
+    idx = np.nonzero(ok)[0]
+    keep_ = []
+    for i in idx:
+        x, y = cx[i], cy[i]
+        if any(((int((x + ox) // 10), int((y + oy) // 10)) in occ) for ox in (-14, 0, 14) for oy in (-14, 0, 14)):
+            continue
+        if d[i] < 1700 and osm_cap(float(x), float(y), 18.0, 50.0) is None:
+            continue
+        keep_.append(i)
+    idx = np.array(keep_, int)
+    n = len(idx)
+    cx, cy, d = cx[idx], cy[idx], d[idx]
+    near_w = np.zeros(n, bool)
+    for ang in np.linspace(0, 2 * np.pi, 8, endpoint=False):
+        near_w |= terrain.mask_at(TER, "water", cx + 380 * np.cos(ang), cy + 380 * np.sin(ang))
+    u = rng.random(n)
+    h = 10.0 + 52.0 * u ** 1.8
+    tall = near_w & (rng.random(n) < 0.28)                     # Hong Kong's waterfront towers
+    h = np.where(tall, rng.uniform(70, 190, n), h)
+    h *= 1.0 - 0.45 * np.clip((d - 4500.0) / 4500.0, 0, 1)
+    yaw = 0.6 * np.sin(cx / 1700.0 + 1.3) + 0.5 * np.cos(cy / 1300.0) + rng.normal(0, 0.05, n)
+    w = rng.uniform(12, 34, n)
+    dd = rng.uniform(12, 34, n)
+    zc_ = [terrain.height_at(TER, cx + sx_ * w / 2 * np.cos(yaw) - sy_ * dd / 2 * np.sin(yaw),
+                             cy + sx_ * w / 2 * np.sin(yaw) + sy_ * dd / 2 * np.cos(yaw))
+           for sx_ in (-1, 1) for sy_ in (-1, 1)]
+    z0 = np.minimum.reduce(zc_ + [terrain.height_at(TER, cx, cy)]) - 1.5     # lowest corner: never floats on a slope
+    V, F = city_osm.rot_boxes(cx, cy, w, dd, yaw, z0, h)
+    me = bpy.data.meshes.new("Suburbs")
+    me.vertices.add(len(V)); me.vertices.foreach_set("co", V.astype(np.float32).ravel())
+    me.loops.add(F.size); me.loops.foreach_set("vertex_index", F.ravel().astype(np.int32))
+    me.polygons.add(len(F)); me.polygons.foreach_set("loop_start", (np.arange(len(F)) * 4).astype(np.int32))
+    me.update(calc_edges=True)
+    rk = np.argsort(np.argsort(-d))
+    attrs_ = dict(bid=rng.random(n), soff=0.02 + 0.5 * rk / max(1, n - 1), kind=np.zeros(n),
+                  led=(rng.random(n) < 0.06).astype(float), hue=rng.choice([0.0, 0.5, 0.83, 0.55], n))
+    for k, v in attrs_.items():
+        a_ = me.attributes.new(k, "FLOAT", "FACE")
+        a_.data.foreach_set("value", np.repeat(np.asarray(v, np.float32), 5))
+    me.validate()
+    ob = bpy.data.objects.new("Suburbs", me)
+    C_CITY.objects.link(ob)
+    me.materials.append(M_FACADE)
+    print(f"[suburbs] {n} irregular blocks (thin out to 9 km; {int(tall.sum())} waterfront towers)")
+    return ob
+
+
+SUBURBS = build_suburbs()
+
+
+def scatter_lights(name, mask_key, n, r_lo, r_hi, z_lo, z_hi, color, strength, radius, falloff):
+    H, W = TER["z"].shape
+    ii = rng.integers(0, H, n * 30)
+    jj = rng.integers(0, W, n * 30)
+    x = TER["X"][jj] + rng.uniform(-TER["sx"] / 2, TER["sx"] / 2, len(jj))
+    y = TER["Y"][ii] + rng.uniform(-TER["sy"] / 2, TER["sy"] / 2, len(ii))
+    d = np.hypot(x, y - 500.0)
+    if mask_key == "hill":
+        ok = (~TER["water"][ii, jj]) & (TER["hill"][ii, jj] > 25) & (d > r_lo) & (d < r_hi) & (rng.random(len(x)) < 0.5)
+    else:
+        ok = TER[mask_key][ii, jj] & (d > r_lo) & (d < r_hi) & (rng.random(len(x)) < np.exp(-(d - r_lo) / falloff))
+    x, y = x[ok][:n], y[ok][:n]
+    z = terrain.height_at(TER, x, y) + rng.uniform(z_lo, z_hi, len(x))
+    ob = points_obj(name, np.stack([x, y, z], 1), coll=C_CITY)
+    add_gn(ob, lamps_tree(f"{name}Pts", radius, keyed_emit(f"{name}Mat", color, strength, offset=0.5)))
+    print(f"[lights] {name}: {len(x)}")
+    return ob
+
+
+FAR_W = scatter_lights("FarLightsWarm", "urban", 42000, 4200, 15500, 2, 55, (1.0, 0.68, 0.38), 22.0, 2.2, 6000.0)
+FAR_C = scatter_lights("FarLightsCool", "urban", 26000, 4200, 15500, 2, 70, (0.75, 0.85, 1.0), 22.0, 2.2, 6000.0)
+HILL_L = scatter_lights("HillLights", "hill", 1800, 1500, 15500, 1, 4, (1.0, 0.75, 0.45), 18.0, 1.8, 6000.0)
+
+# terrain mesh (Copernicus GLO-30, ~60 m) + Victoria Harbour / the sea to the horizon
+_tv, _tf = terrain.grid_mesh(TER, step=2)
+_tm = bpy.data.meshes.new("Terrain")
+_tm.vertices.add(len(_tv)); _tm.vertices.foreach_set("co", _tv.ravel())
+_tm.loops.add(_tf.size); _tm.loops.foreach_set("vertex_index", _tf.ravel().astype(np.int32))
+_tm.polygons.add(len(_tf)); _tm.polygons.foreach_set("loop_start", (np.arange(len(_tf)) * 4).astype(np.int32))
+_tm.update(calc_edges=True)
+_tm.polygons.foreach_set("use_smooth", [True] * len(_tf))
+
+
+def terrain_material():
+    m, nb, out = new_mat("TerrainMat")
+    g = nb.geo()
+    _, _, pz = nb.sep(g.outputs["Position"])
+    hillf = nb.mr(pz, 2.0, 22.0)
+    ns = nb.n("ShaderNodeTexNoise")
+    nb.set(ns.inputs["Scale"], 0.004)
+    nb.set(ns.inputs["Detail"], 6.0)
+    flat = principled(nb, nb.mix(nb.mr(ns.outputs["Fac"], 0.45, 0.6), (0.016, 0.016, 0.018), (0.01, 0.01, 0.011)),
+                      nb.mix(nb.mr(ns.outputs["Fac"], 0.45, 0.6), 0.3, 0.05, dtype="FLOAT"), 0.0)          # wet urban ground
+    hill = principled(nb, nb.mix(ns.outputs["Fac"], (0.010, 0.014, 0.010), (0.016, 0.018, 0.013)), 0.85, 0.0)  # wooded hills
+    mx = nb.n("ShaderNodeMixShader")
+    nb.link(hillf, mx.inputs[0])
+    nb.link(flat.outputs[0], mx.inputs[1])
+    nb.link(hill.outputs[0], mx.inputs[2])
+    nb.link(mx.outputs[0], out.inputs["Surface"])
+    return m
+
+
+_tm.materials.append(terrain_material())
+TERRAIN = bpy.data.objects.new("Terrain", _tm)
+C_CITY.objects.link(TERRAIN)
+
+
+def water_material():
+    m, nb, out = new_mat("Harbour")
+    tc = nb.n("ShaderNodeTexCoord")
+    wv = nb.n("ShaderNodeTexNoise")
+    nb.link(tc.outputs["Object"], wv.inputs["Vector"])
+    nb.set(wv.inputs["Scale"], 0.35)
+    nb.set(wv.inputs["Detail"], 4.0)
+    bump = nb.n("ShaderNodeBump")
+    nb.set(bump.inputs["Strength"], 0.12)
+    nb.link(wv.outputs["Fac"], bump.inputs["Height"])
+    b = principled(nb, (0.004, 0.006, 0.01), 0.05, 0.0)
+    nb.link(bump.outputs[0], b.inputs["Normal"])
+    nb.link(b.outputs[0], out.inputs["Surface"])
+    return m
+
+
+WATER = mesh_obj("Water", [(-70000, -70000, -0.5), (70000, -70000, -0.5), (70000, 70000, -0.5), (-70000, 70000, -0.5)],
+                 [(0, 1, 2, 3)], coll=C_CITY)
+WATER.data.materials.append(water_material())
+print(f"[terrain] {len(_tv)} verts, hills to {float(TER['z'].max()):.0f} m; sea plane to the horizon")
+
 # rooftop clutter (HVAC boxes, water tanks, vents, masts, stair houses) scattered on every flat roof
-C_KIT = coll("_clutter_kit")
-C_KIT.hide_render = True
-C_KIT.hide_viewport = True
+C_KIT = coll("_clutter_kit")        # not hidden (hidden → instances empty); parked underground, Reset Children re-centres
 M_CLUT = simple_mat("RoofKit", (0.07, 0.07, 0.072), 0.35, 0.4)
 kit = []
 for nm_, bx in (("AC", (2.2, 1.3, 1.1)), ("Vent", (1.0, 1.0, 0.9)), ("Stair", (4.0, 3.0, 3.0)), ("AC2", (3.5, 1.6, 1.4))):
@@ -684,6 +887,8 @@ for nm_, bx in (("AC", (2.2, 1.3, 1.1)), ("Vent", (1.0, 1.0, 0.9)), ("Stair", (4
     kit.append(o)
 kit.append(cylinder("KitTank", 1.4, 3.2, (0, 0, 0), M_CLUT, segs=12, coll_=C_KIT))
 kit.append(cylinder("KitMast", 0.07, 7.0, (0, 0, 0), M_CLUT, segs=6, coll_=C_KIT))
+for o in kit:
+    o.location = (0, 0, -5000.0)
 
 
 def clutter_tree():
@@ -735,8 +940,7 @@ HANDOB = boxes_mesh("HandBlocks", hb, hattrs, coll=C_CITY)
 HANDOB.data.materials.append(M_FACADE)
 
 # ground (wet asphalt everywhere) + REAL roads: lit wet ribbons, street lamps, left-hand traffic (Hong Kong)
-gr = mesh_obj("Ground", [(-2600, -1400, 0), (2600, -1400, 0), (2600, 2800, 0), (-2600, 2800, 0)], [(0, 1, 2, 3)], coll=C_CITY)
-gr.data.materials.append(M_GROUND)
+# (v2.1: the flat 5.2×4.2 km ground rectangle is gone — the terrain mesh is the ground, flat z=0 under the city)
 
 
 def curve_obj(name, polylines, z=0.0, cyclic=False):
@@ -795,35 +999,56 @@ def road_in_home(p):
     return (-60 < p[:, 0]) & (p[:, 0] < 60) & (-55 < p[:, 1]) & (p[:, 1] < 55)
 
 
-ROADS_T = []      # traffic roads (main + residential)
-for cls_set, w in ((city_osm.MAIN_ROADS, 15.0), (city_osm.RES_ROADS, 8.0), ({"service"}, 5.0)):
-    pls = [np.column_stack([r["pts"], np.full(len(r["pts"]), 0.06 + 0.01 * (w > 10))]) for r in OSM_R if r["cls"] in cls_set]
-    if not pls:
+# all roads: core tiles + major roads (±8 km), de-duplicated, draped on the terrain; harbour crossings (tunnels) dropped
+_maj = os.path.join(BMO, "osm_hk_majorroads", "osm.json")
+_, _MAJ_R = city_osm.load([_maj], rng) if os.path.exists(_maj) else ([], [])
+_ids = set()
+ALL_R = []
+for r in OSM_R + _MAJ_R:
+    if r.get("id") in _ids:
         continue
+    _ids.add(r.get("id"))
+    wet = terrain.mask_at(TER, "water", r["pts"][:, 0], r["pts"][:, 1])
+    if wet.mean() > 0.25:
+        continue
+    r["z"] = np.maximum(terrain.height_at(TER, r["pts"][:, 0], r["pts"][:, 1]), 0.0)
+    r["dc"] = float(np.hypot(r["pts"][:, 0].mean(), r["pts"][:, 1].mean() - 500.0))
+    ALL_R.append(r)
+ROADS_T = []      # traffic roads (main + residential near the core)
+for cls_set, w in ((city_osm.MAIN_ROADS | {"motorway_link", "trunk_link"}, 15.0), (city_osm.RES_ROADS, 8.0), ({"service"}, 5.0)):
+    sel = [r for r in ALL_R if r["cls"] in cls_set and (w > 10 or r["dc"] < 3200)]
+    if not sel:
+        continue
+    pls = [np.column_stack([r["pts"], r["z"] + 0.06 + 0.01 * (w > 10) + 0.25 * (r["z"] > 1.0)]) for r in sel]
     ob = curve_obj(f"Roads{int(w)}", pls)
     add_gn(ob, ribbon_tree(w))
     if w > 6:
-        ROADS_T += [(r, w) for r in OSM_R if r["cls"] in cls_set]
+        ROADS_T += [(r, w) for r in sel]
 sl_pts = []
 for r, w in ROADS_T:
-    P_, Tn = city_osm.resample(r["pts"], 26.0)
+    P_, Tn = city_osm.resample(r["pts"], 26.0 if r["dc"] < 3000 else 42.0)
     if len(P_) == 0:
         continue
     nrm_ = np.stack([-Tn[:, 1], Tn[:, 0]], 1)
     sgn = np.where(np.arange(len(P_)) % 2 == 0, 1.0, -1.0)[:, None]
     q = P_ + nrm_ * sgn * (w / 2 + 1.0)
-    sl_pts += [(x, y, 7.5) for x, y in q]
+    zq = np.maximum(terrain.height_at(TER, q[:, 0], q[:, 1]), 0.0) + 7.5
+    sl_pts += [(x, y, z_) for (x, y), z_ in zip(q, zq)]
 # traffic along the real roads (Sample Curve on a curve object; Hong Kong drives on the LEFT)
-RC = curve_obj("TrafficRoads", [np.column_stack([r["pts"], np.full(len(r["pts"]), 0.9)]) for r, w in ROADS_T])
+RC = curve_obj("TrafficRoads", [np.column_stack([r["pts"], r["z"] + 0.9]) for r, w in ROADS_T])
 RC.hide_render = True
 tr = dict(ci=[], L=[], off=[], spd=[], dirn=[], lane=[])
 for i, (r, w) in enumerate(ROADS_T):
     Lr = city_osm.length(r["pts"])
-    dens = 1 / 45.0 if w > 10 else 1 / 90.0
+    if r["dc"] < 3000:
+        dens = 1 / 45.0 if w > 10 else 1 / 90.0
+    else:
+        dens = 1 / 140.0 if r["cls"] in ("motorway", "trunk") else 1 / 260.0     # highway streams far out
     dirs = (1.0,) if r["oneway"] else (1.0, -1.0)
     for dn in dirs:
         for _ in range(max(1, int(Lr * dens))):
-            tr["ci"].append(float(i)); tr["L"].append(Lr); tr["off"].append(rng.random()); tr["spd"].append(rng.uniform(7, 15))
+            tr["ci"].append(float(i)); tr["L"].append(Lr); tr["off"].append(rng.random())
+            tr["spd"].append(rng.uniform(7, 15) if r["dc"] < 3000 else rng.uniform(16, 26))
             tr["dirn"].append(dn); tr["lane"].append((w / 4.0) if not r["oneway"] else rng.uniform(-w / 4, w / 4))
 
 
@@ -892,32 +1117,6 @@ TRAF = points_obj("Traffic", np.zeros((len(tr["ci"]), 3)), {k: np.asarray(v) for
 add_gn(TRAF, traffic_tree())
 print(f"[roads] {len(ROADS_T)} traffic roads, {len(tr['ci'])} cars, {len(sl_pts)} street lamps")
 
-
-
-def lamps_tree(name, radius, mat):
-    ng, nb, gi, go = gn_tree(name)
-    ico = nb.n("GeometryNodeMeshIcoSphere")
-    nb.set(ico.inputs["Radius"], radius)
-    nb.set(ico.inputs["Subdivisions"], 1)
-    inst = nb.n("GeometryNodeInstanceOnPoints")
-    nb.link(gi.outputs[0], inst.inputs["Points"])
-    nb.link(ico.outputs["Mesh"], inst.inputs["Instance"])
-    sm = nb.n("GeometryNodeSetMaterial")
-    nb.link(inst.outputs[0], sm.inputs["Geometry"])
-    sm.inputs["Material"].default_value = mat
-    nb.link(sm.outputs[0], go.inputs[0])
-    return ng
-
-
-def keyed_emit(name, color, strength, key="city", offset=0.25):
-    m, nb, out = new_mat(name)
-    cg = ctrl(nb)
-    e = nb.n("ShaderNodeEmission")
-    nb.set(e.inputs["Color"], color)
-    lv = nb.m("MULTIPLY", nb.m("SUBTRACT", 1.0, cg["shut"]), nb.m("ADD", offset, nb.m("MULTIPLY", cg[key], 1 - offset)))
-    nb.link(nb.m("MULTIPLY", lv, strength), e.inputs["Strength"])
-    nb.link(e.outputs[0], out.inputs["Surface"])
-    return m
 
 
 SL = points_obj("StreetLights", np.asarray(sl_pts), coll=C_CITY)
@@ -1537,22 +1736,23 @@ for k, (x, y, col) in enumerate([(-10.5, 12.5, (1.0, 0.72, 0.45)), (10.5, 13.5, 
 
 
 # ---------------------------------------------------------------------------------------------------------
-# 12. drones (shape-keyed formations; GN instances lights on the verts)
+# 12. DRONE LIGHT SHOW v2.1 — after real shows (research 10-13: Sky Elements / Intel / SPH / Skybrush docs):
+#     720 drones over Victoria Harbour (HK shows fly over the harbour), launched from a barge grid (2.5 m), ≥~3 m
+#     spacing in the air (hex lattice), formation ~100 m, centre 112 m up; transitions = minimum-distance matching
+#     (Hungarian, what Skybrush's server does — its free tier caps at 64 drones, so emulated offline) + staggered
+#     smootherstep moves (zero velocity + acceleration at both ends) under a speed budget; RTK-scale jitter (cm).
+#     Swarm = GN INSTANCES of one CC-BY quad (+ LED dome) driven by a 10 Hz trajectory; the HERO drone is a full
+#     object keyed per frame: tilt from its own acceleration (a = g·tanθ), hover corrections, spinning props, beat LED.
 # ---------------------------------------------------------------------------------------------------------
-ND = 480
-cam5 = Vector((-300.0, 140.0, 230.0))
-dvw = (DS_C - cam5)
+import subprocess  # noqa: E402
+
+ND = 720
+DS_CAM_END = Vector((-125.0, -2420.0, 40.0))                   # where the pull-out ends (over the water, ~285 m out)
+dvw = DS_C - DS_CAM_END
 dvw.z = 0
-dvw.normalize()
+dvw.normalize()                                                  # camera → show (≈ south, HK Island behind)
 RIGHT = dvw.cross(Vector((0, 0, 1)))
 UP = Vector((0, 0, 1))
-
-
-def frame_pts(uv, depth=None):
-    uv = np.asarray(uv, dtype=np.float64)
-    d = np.zeros(len(uv)) if depth is None else depth
-    R, U, D = np.array(RIGHT), np.array(UP), np.array(dvw)
-    return np.array(DS_C)[None, :] + uv[:, 0:1] * R[None, :] + uv[:, 1:2] * U[None, :] + d[:, None] * D[None, :]
 
 
 def fib_sphere(n, r):
@@ -1562,146 +1762,351 @@ def fib_sphere(n, r):
     return np.stack([r * np.cos(th) * np.sin(phi), r * np.sin(th) * np.sin(phi), r * np.cos(phi)], 1)
 
 
-def heart(n, s):
-    t = np.linspace(0, 2 * np.pi, int(n * 0.62), endpoint=False)
-    x = 16 * np.sin(t) ** 3
-    y = 13 * np.cos(t) - 5 * np.cos(2 * t) - 2 * np.cos(3 * t) - np.cos(4 * t)
-    t2 = np.linspace(0, 2 * np.pi, n - len(t), endpoint=False)
-    x2 = 0.62 * 16 * np.sin(t2) ** 3
-    y2 = 0.62 * (13 * np.cos(t2) - 5 * np.cos(2 * t2) - 2 * np.cos(3 * t2) - np.cos(4 * t2)) + 1.5
-    return np.stack([np.concatenate([x, x2]) * s, np.concatenate([y, y2]) * s], 1)
+def frame_pts(uv):
+    uv = np.asarray(uv, dtype=np.float64)
+    return np.array(DS_C)[None, :] + uv[:, 0:1] * np.array(RIGHT)[None, :] + uv[:, 1:2] * np.array(UP)[None, :]
 
 
-def text_points(n, text, height):
-    font = bpy.data.fonts.load(os.path.join(A.assets, "fonts", "b612", "B612-Bold.ttf"), check_existing=True)
-    cu = bpy.data.curves.new("DroneTxt", "FONT")
-    cu.body = text
-    cu.font = font
-    cu.align_x = "CENTER"
-    cu.align_y = "CENTER"
-    cu.size = height
-    ob = bpy.data.objects.new("DroneTxt", cu)
-    SC.collection.objects.link(ob)
-    dg = bpy.context.evaluated_depsgraph_get()
-    me = ob.evaluated_get(dg).to_mesh()
-    me.calc_loop_triangles()
-    tri = np.array([[v for v in lt.vertices] for lt in me.loop_triangles])
-    co = np.array([v.co[:] for v in me.vertices])
-    a, b, c = co[tri[:, 0]], co[tri[:, 1]], co[tri[:, 2]]
-    area = 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
-    # dart-throwing with a min spacing for an even, readable fill
-    pts = []
-    cand = 40 * n
-    ti = rng.choice(len(tri), size=cand, p=area / area.sum())
-    r1, r2 = rng.random(cand), rng.random(cand)
-    s1 = np.sqrt(r1)
-    P_ = (1 - s1)[:, None] * a[ti] + (s1 * (1 - r2))[:, None] * b[ti] + (s1 * r2)[:, None] * c[ti]
-    dmin = height * 0.075
-    for p in P_:
-        if all((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 > dmin * dmin for q in pts[-400:]):
-            pts.append(p)
-            if len(pts) >= n:
-                break
-    while len(pts) < n:
-        pts.append(P_[rng.integers(len(P_))])
-    ob.to_mesh_clear()
-    bpy.data.objects.remove(ob)
-    return np.array(pts)[:, :2]
+def in_poly(P, poly):
+    x, y = P[:, 0], P[:, 1]
+    inside = np.zeros(len(P), bool)
+    j = len(poly) - 1
+    for i in range(len(poly)):
+        xi, yi, xj, yj = poly[i, 0], poly[i, 1], poly[j, 0], poly[j, 1]
+        cr = ((yi > y) != (yj > y)) & (x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi)
+        inside ^= cr
+        j = i
+    return inside
 
 
-def order_by_angle(uv):
-    return np.argsort(np.arctan2(uv[:, 1], uv[:, 0]))
+def in_tris(P, tri):
+    a, b, c = tri[:, 0][None], tri[:, 1][None], tri[:, 2][None]
+    p = P[:, None, :]
+    def sgn(p1, p2, p3):
+        return (p1[..., 0] - p3[..., 0]) * (p2[..., 1] - p3[..., 1]) - (p2[..., 0] - p3[..., 0]) * (p1[..., 1] - p3[..., 1])
+    d1, d2, d3 = sgn(p, a, b), sgn(p, b, c), sgn(p, c, a)
+    neg = (d1 < 0) | (d2 < 0) | (d3 < 0)
+    pos = (d1 > 0) | (d2 > 0) | (d3 > 0)
+    return (~(neg & pos)).any(1)
 
 
-gx_, gy_ = np.meshgrid(np.arange(24), np.arange(20))
-launch = np.stack([(gx_.ravel() - 11.5) * 3.0, (gy_.ravel() - 9.5) * 3.0], 1)[:ND]
-launch_w = np.array(DS_C)[None, :] + np.stack([launch[:, 0], launch[:, 1], np.full(ND, 0.0)], 1)
-launch_w[:, 2] = 96.0
-sph = fib_sphere(ND, 58.0)
-sph_w = np.array(DS_C)[None, :] + sph
-hrt = heart(ND, 4.4)
-hrt_w = frame_pts(hrt)
-th = np.linspace(0, 2 * np.pi, ND, endpoint=False)
-ring = np.stack([66 * np.cos(th), 66 * np.sin(th)], 1)
-ring_w = frame_pts(ring, depth=18 * np.sin(th))
-txt = text_points(ND, "BE MY ONE", 30.0)
-txt_w = frame_pts(txt)
-# consistent assignment: drone i takes the i-th point of each formation sorted by polar angle in the view plane
-base_order = order_by_angle(launch - launch.mean(0))
+def hex_fill(inside, lo, hi, n):
+    """even hex-lattice fill of a 2-D shape with exactly n points (spacing solved by bisection)"""
+    def lattice(s):
+        ys = np.arange(lo[1], hi[1] + s, s * 0.8660254)
+        pts = []
+        for k, y in enumerate(ys):
+            xs = np.arange(lo[0] + (s / 2 if k % 2 else 0.0), hi[0] + s, s)
+            pts.append(np.stack([xs, np.full(len(xs), y)], 1))
+        P_ = np.concatenate(pts)
+        return P_[inside(P_)]
+    a_, b_ = 0.5, 20.0
+    for _ in range(40):
+        m_ = 0.5 * (a_ + b_)
+        if len(lattice(m_)) >= n:
+            a_ = m_
+        else:
+            b_ = m_
+    P_ = lattice(a_)
+    extra = len(P_) - n
+    if extra > 0:                                             # drop the few surplus points (spread out, not a hole)
+        P_ = np.delete(P_, rng.choice(len(P_), extra, replace=False), 0)
+    return P_, a_
 
 
-def assign(world, uv=None):
-    if uv is None:
-        rel = world - np.array(DS_C)[None, :]
-        uv = np.stack([rel @ np.array(RIGHT), rel @ np.array(UP)], 1)
-    o = order_by_angle(uv - uv.mean(0))
-    out = np.empty_like(world)
-    out[base_order] = world[o]
-    return out
+# F1: filled heart (≈100 m wide) · F2: "BE MY / ONE" (≈105 m wide)
+_t = np.linspace(0, 2 * np.pi, 400, endpoint=False)
+_heart = np.stack([16 * np.sin(_t) ** 3, 13 * np.cos(_t) - 5 * np.cos(2 * _t) - 2 * np.cos(3 * _t) - np.cos(4 * _t)], 1) * 3.7
+_heart[:, 1] -= _heart[:, 1].mean() * 0.0 + 4.0
+F1_uv, sp1 = hex_fill(lambda P_: in_poly(P_, _heart), _heart.min(0), _heart.max(0), ND)
+_font = bpy.data.fonts.load(os.path.join(A.assets, "fonts", "b612", "B612-Bold.ttf"), check_existing=True)
+_cu = bpy.data.curves.new("DroneTxt", "FONT")
+_cu.body = "BE MY\nONE"
+_cu.font = _font
+_cu.align_x, _cu.align_y = "CENTER", "CENTER"
+_cu.size = 10.0
+_tob = bpy.data.objects.new("DroneTxt", _cu)
+SC.collection.objects.link(_tob)
+_me = _tob.evaluated_get(bpy.context.evaluated_depsgraph_get()).to_mesh()
+_me.calc_loop_triangles()
+_tri = np.array([[_me.vertices[v].co[:2] for v in lt.vertices] for lt in _me.loop_triangles])
+_tob.to_mesh_clear()
+bpy.data.objects.remove(_tob)
+_sc = 140.0 / (_tri[..., 0].max() - _tri[..., 0].min())
+_tri = (_tri - _tri.reshape(-1, 2).mean(0)) * _sc
+F2_uv, sp2 = hex_fill(lambda P_: in_tris(P_, _tri), _tri.reshape(-1, 2).min(0), _tri.reshape(-1, 2).max(0), ND)
+# launch grid on a barge under the show (30 × 24 at 2.5 m, deck at z = 2.0)
+BARGE_C = np.array(DS_C) + np.array(dvw) * -10.0
+gi_, gj_ = np.meshgrid(np.arange(30), np.arange(24))
+G = BARGE_C[None, :] + (gi_.ravel() - 14.5)[:, None] * 2.5 * np.array(RIGHT)[None, :] + (gj_.ravel() - 11.5)[:, None] * 2.5 * np.array(dvw)[None, :]
+G[:, 2] = 2.2
+GROW = gj_.ravel()
+F1 = frame_pts(F1_uv)
+F2 = frame_pts(F2_uv)
+_tmp_in, _tmp_out = "/tmp/bmo_drone_forms.npz", "/tmp/bmo_drone_plan.npz"
+np.savez(_tmp_in, f0=G, f1=F1, f2=F2)
+_py = os.path.expanduser("~/venvs/iris-v100/bin/python")
+_r = subprocess.run([_py, "-I", os.path.join(HERE, "drone_plan.py"), _tmp_in, _tmp_out], capture_output=True, text=True)
+print(_r.stdout.strip(), _r.stderr.strip()[-300:])
+_pl = np.load(_tmp_out)
+G, F1, F2 = _pl["f0"], _pl["f1"], _pl["f2"]
+print(f"[drones] {ND} drones; heart lattice spacing {sp1:.2f} m, text lattice spacing {sp2:.2f} m")
+
+# per-drone schedule (seconds). Transitions are SYNCHRONISED (same start + duration for every drone): with the
+# minimum-squared-distance matching, straight synchronous paths don't cross — staggering them is what made v2.1a collide.
+T_TO = 3.0 + GROW * 0.35                                       # layered takeoff, row by row (downwash), off-camera
+CLIMB = 20.0
+G_UP = G + np.array([0, 0, CLIMB])
+d1 = np.linalg.norm(F1 - G_UP, axis=1)
+s1 = np.full(ND, 22.0)
+dur1 = np.full(ND, 35.0)                                       # fly-in 22 → 57 s (in the dark, off-camera)
+ux = (F1_uv[:, 0] - F1_uv[:, 0].min()) / np.ptp(F1_uv[:, 0])
+d2 = np.linalg.norm(F2 - F1, axis=1)
+s2 = np.full(ND, bt(B_DROP2 + 14))                             # heart → text starts on beat 143 …
+dur2 = np.full(ND, 11.0)                                       # … 11 s, longest move peaks just under 10 m/s
+T_OFF = tFL + 1.0
+ph_ = rng.uniform(0, 2 * np.pi, (ND, 3))
+fq_ = rng.uniform(0.6, 1.7, (ND, 3))
 
 
-forms = [launch_w, assign(sph_w), assign(hrt_w, hrt), assign(ring_w, ring), assign(txt_w, txt)]
-DR = points_obj("Drones", forms[0], {"g": (forms[0][:, 2] * 0 + rng.random(ND))}, coll=C_FX)
-DR.shape_key_add(name="Basis")
-for k, fw in enumerate(forms[1:], 1):
-    sk = DR.shape_key_add(name=f"F{k}")
-    sk.data.foreach_set("co", fw.astype(np.float32).ravel())
-# weights over time (transitions eased, start on downbeats)
-trans = [(B_DROP2, B_DROP2 + 8), (B_DROP2 + 8, B_DROP2 + 12), (B_DROP2 + 16, B_DROP2 + 20), (B_DROP2 + 24, B_DROP2 + 28)]
-wts = np.zeros((NF, 4))
-for k, (b0, b1) in enumerate(trans):
-    up = smootherstep((T - bt(b0)) / (bt(b1) - bt(b0)))
-    wts[:, k] = up
-    if k > 0:
-        wts[:, k - 1] *= 1.0 - up
-kb = DR.data.shape_keys
-for k in range(4):
-    bake(kb, f'key_blocks["F{k + 1}"].value', wts[:, k])
-dhue = np.zeros(NF)
-dsat = np.full(NF, 0.8)
-for k, (b0, _b1) in enumerate(trans):
-    dhue[T >= bt(b0)] = [0.52, 0.95, 0.75, 0.12][k]
-    if k == 3:
-        dsat[T >= bt(b0)] = 0.2
-CTRL.interface.new_socket("dhue", in_out="OUTPUT", socket_type="NodeSocketFloat")
-CTRL.interface.new_socket("dsat", in_out="OUTPUT", socket_type="NodeSocketFloat")
-for nm_, arr in (("dhue", dhue), ("dsat", dsat)):
-    s_ = _cn.val(nm_, 0.0)
-    _cn.link(s_, _cgo.inputs[nm_])
-    bake(CTRL, f'nodes["{nm_}"].outputs[0].default_value', arr, interp="CONSTANT")
+def drone_pos(tt):
+    tt = np.asarray(tt, float)[:, None]
+    p = np.repeat(G[None], len(tt), 0).astype(np.float64)
+    a = smootherstep((tt - T_TO[None]) / 10.0)[..., None]
+    p = p + a * (G_UP - G)[None]
+    b = smootherstep((tt - s1[None]) / dur1[None])[..., None]
+    p = p + b * (F1 - G_UP)[None]
+    c = smootherstep((tt - s2[None]) / dur2[None])[..., None]
+    p = p + c * (F2 - F1)[None]
+    air = smoothstep((tt - T_TO[None] - 0.5) / 2.0)[..., None]   # RTK jitter fades in once airborne
+    jit = 0.02 * np.sin(tt[..., None] * fq_[None] * 2 * np.pi + ph_[None])     # RTK: centimetres, not metres
+    return p + jit * air
 
 
-def drone_tree():
-    ng, nb, gi, go = gn_tree("DroneLights")
-    ico = nb.n("GeometryNodeMeshIcoSphere")
-    nb.set(ico.inputs["Radius"], 1.6)
-    nb.set(ico.inputs["Subdivisions"], 1)
+def hsv2rgb(h, s, v):
+    h = (h % 1.0) * 6.0
+    i = np.floor(h).astype(int) % 6
+    f = h - np.floor(h)
+    p_, q_, t_ = v * (1 - s), v * (1 - s * f), v * (1 - s * (1 - f))
+    r = np.choose(i, [v, q_, p_, p_, t_, v]); g = np.choose(i, [t_, v, v, q_, p_, p_]); b = np.choose(i, [p_, p_, t_, v, v, q_])
+    return np.stack([r, g, b], -1)
+
+
+vF1 = (F1_uv[:, 1] - F1_uv[:, 1].min()) / np.ptp(F1_uv[:, 1])
+
+
+def drone_light(tt):
+    """colour (len, N, 3) + level (len, N): dim white while flying in, the heart's gradient STEPS on every beat
+    (so each drone — the hero too — changes colour on the beat), warm white + beat pulse on the text"""
+    tt = np.asarray(tt, float)[:, None]
+    beat = np.floor((tt - T0) / P)
+    hue = 0.93 + 0.18 * ((vF1[None] * 0.8 + 0.25 * beat) % 1.0)
+    c1 = hsv2rgb(hue, 0.85, 1.0)
+    c2 = np.broadcast_to(np.array([1.0, 0.86, 0.62]), c1.shape)
+    w = smootherstep((tt - s2[None]) / dur2[None])[..., None]
+    col = c1 * (1 - w) + c2 * w
+    show = (tt >= tD2 - 0.05).astype(float)
+    pulse = np.exp(-((tt - T0) / P - beat) * P / 0.18)
+    moving = np.clip(w * (1 - w) * 4.0, 0, 1)
+    lv = np.where(show > 0, 1.0 - 0.3 * moving[..., 0] + 0.25 * pulse * w[..., 0], 0.12 * (tt > T_TO[None]))
+    lv = lv * (1.0 - smoothstep((tt - T_OFF) / 0.6))
+    tw = 1.0 + 0.04 * np.sin(tt * 23.0 + np.arange(ND)[None] * 1.7)
+    return col, lv * tw
+
+
+# safety check (Skybrush-style): spacing, speeds, acceleration over the whole flight
+_ts = np.arange(2.5, 77.6, 0.1)
+_PS = drone_pos(_ts)
+_V = np.gradient(_PS, 0.1, axis=0)
+_Acc = np.gradient(_V, 0.1, axis=0)
+_minsep = 1e9
+for k in range(0, len(_ts), 5):
+    if _ts[k] < 4.0:
+        continue
+    D_ = np.linalg.norm(_PS[k][:, None] - _PS[k][None], axis=-1)
+    D_[np.diag_indices(ND)] = 1e9
+    _minsep = min(_minsep, float(D_.min()))
+_vh = float(np.linalg.norm(_V[..., :2], axis=-1).max())
+_vu, _vd = float(_V[..., 2].max()), float(-_V[..., 2].min())
+_am = float(np.linalg.norm(_Acc, axis=-1).max())
+print(f"[drones] safety: min spacing in the air {_minsep:.2f} m · max horizontal {_vh:.1f} m/s · up {_vu:.1f} · down {_vd:.1f} m/s · max accel {_am:.2f} m/s²")
+_COL, _LV = drone_light(_ts)
+# trajectory "lookup" mesh: vertex (sample k, drone i) at index i + N·k
+TRAJ = points_obj("DroneTraj", _PS.reshape(-1, 3), {"dcol": _COL.reshape(-1, 3), "dlv": _LV.reshape(-1)}, coll=C_FX)
+TRAJ.hide_render = True              # a vertex-only lookup mesh: never hide it from the depsgraph (GN reads it)
+
+# show-drone model: CC-BY "Quadrocopter 2" (yanix) minus its camera gimbal + an LED dome underneath
+_q = import_glb("sf_drone_quadrocopter2")
+DS_SCALE = 0.384 / 808.0                                        # Intel Shooting Star class: ~38 cm across
+C_DKIT = coll("_drone_kit")          # NOT hidden: a hidden collection instances as EMPTY (measured 10-13: 0 drones).
+KIT_Z = -5000.0                      # the kit lives 5 km underground; instance_offset brings instances back to the points
+C_DKIT.instance_offset = (0.0, 0.0, KIT_Z)
+_ledm, _ledb, _ledo = new_mat("DroneLED")
+_ia = _ledb.sattr("dcol", "INSTANCER").outputs["Vector"]
+_il = _ledb.sattr("dlv", "INSTANCER").outputs["Fac"]
+_le = _ledb.n("ShaderNodeEmission")
+_ledb.link(_ia, _le.inputs["Color"])
+_ledb.link(_ledb.m("MULTIPLY", _il, 600.0), _le.inputs["Strength"])
+_ledb.link(_le.outputs[0], _ledo.inputs["Surface"])
+_disc_m, _db, _do = new_mat("PropBlurDisc")
+_disc_m.surface_render_method = "BLENDED"
+_dt = _db.n("ShaderNodeBsdfTransparent")
+_dd = _db.n("ShaderNodeBsdfDiffuse")
+_db.set(_dd.inputs["Color"], (0.05, 0.05, 0.05))
+_dm = _db.n("ShaderNodeMixShader")
+_db.set(_dm.inputs[0], 0.18)
+_db.link(_dt.outputs[0], _dm.inputs[1])
+_db.link(_dd.outputs[0], _dm.inputs[2])
+_db.link(_dm.outputs[0], _do.inputs["Surface"])
+_parts = {}
+for nm, me0 in _q:
+    if "cam2" in nm or "cam3" in nm:
+        continue                                                # camera gimbal + lens: show drones don't carry them
+    me = me0.copy()
+    me.transform(Matrix.Diagonal((DS_SCALE,) * 3 + (1,)) @ Matrix.Translation((0, 0, -104.655)))
+    _parts[nm] = me
+
+
+def _led_dome(name, mat, r=0.045):
+    import bmesh
+    me = bpy.data.meshes.new(name)
+    bm = bmesh.new()
+    try:
+        bmesh.ops.create_uvsphere(bm, u_segments=16, v_segments=8, radius=r)
+        bm.to_mesh(me)
+    finally:
+        bm.free()
+    me.materials.append(mat)
+    return me
+
+
+_LED_Z = (-30.7 - 104.655) * DS_SCALE
+for nm, me in _parts.items():
+    o = bpy.data.objects.new(f"Kit_{nm}", me)
+    C_DKIT.objects.link(o)
+    o.location = (0, 0, KIT_Z)
+_ko = bpy.data.objects.new("Kit_LED", _led_dome("KitLED", _ledm, 0.07))
+_ko.location = (0, 0, _LED_Z + KIT_Z)
+C_DKIT.objects.link(_ko)
+
+
+def swarm_tree(S, hero_i):
+    ng, nb, gi, go = gn_tree("DroneSwarm")
+    T_ = nb.n("GeometryNodeInputSceneTime").outputs["Seconds"]
+    oi = nb.n("GeometryNodeObjectInfo", transform_space="ORIGINAL")
+    oi.inputs["Object"].default_value = TRAJ
+    s = nb.m("MINIMUM", nb.m("MAXIMUM", nb.m("DIVIDE", nb.m("SUBTRACT", T_, float(_ts[0])), 0.1), 0.0), float(S) - 1.0001)
+    s0 = nb.m("FLOOR", s)
+    fr_ = nb.m("SUBTRACT", s, s0)
+    idx = nb.n("GeometryNodeInputIndex").outputs[0]
+    ia = nb.m("ADD", idx, nb.m("MULTIPLY", s0, float(ND)))
+    ib = nb.m("ADD", ia, float(ND))
+
+    def samp(index, dtype, value):
+        si = nb.n("GeometryNodeSampleIndex", data_type=dtype, domain="POINT")
+        nb.link(oi.outputs["Geometry"], si.inputs["Geometry"])
+        fi = nb.n("FunctionNodeFloatToInt", rounding_mode="ROUND")
+        nb.link(index, fi.inputs[0])
+        nb.link(fi.outputs[0], si.inputs["Index"])
+        nb.link(value, si.inputs["Value"])
+        return si.outputs[0]
+
+    pos_in = nb.n("GeometryNodeInputPosition").outputs[0]
+    pa, pb = samp(ia, "FLOAT_VECTOR", pos_in), samp(ib, "FLOAT_VECTOR", pos_in)
+    pos = nb.mix(fr_, pa, pb, dtype="VECTOR")
+    col = samp(ia, "FLOAT_VECTOR", nb.attr("dcol", "FLOAT_VECTOR"))
+    lv = samp(ia, "FLOAT", nb.attr("dlv"))
+    sp = nb.n("GeometryNodeSetPosition")
+    nb.link(gi.outputs[0], sp.inputs["Geometry"])
+    nb.link(pos, sp.inputs["Position"])
+    dl = nb.n("GeometryNodeDeleteGeometry", domain="POINT")
+    nb.link(sp.outputs[0], dl.inputs["Geometry"])
+    nb.link(nb.cmp("EQUAL", idx, float(hero_i)), dl.inputs["Selection"])     # the hero is a real object
+    g_ = nb.store(nb.store(dl.outputs[0], "dcol", col, dtype="FLOAT_VECTOR"), "dlv", lv)
+    ci = nb.n("GeometryNodeCollectionInfo", transform_space="ORIGINAL")
+    ci.inputs["Collection"].default_value = C_DKIT
     inst = nb.n("GeometryNodeInstanceOnPoints")
-    nb.link(gi.outputs[0], inst.inputs["Points"])
-    nb.link(ico.outputs["Mesh"], inst.inputs["Instance"])
-    rl = nb.n("GeometryNodeRealizeInstances")
-    nb.link(inst.outputs[0], rl.inputs["Geometry"])
-    m, mb, out = new_mat("DroneLight")
-    cg = ctrl(mb)
-    g = mb.sattr("g").outputs["Fac"]
-    hsv = mb.n("ShaderNodeCombineColor", mode="HSV")
-    mb.link(mb.m("FRACT", mb.m("ADD", cg["dhue"], mb.m("MULTIPLY", g, 0.12))), hsv.inputs[0])
-    mb.link(cg["dsat"], hsv.inputs[1])
-    mb.set(hsv.inputs[2], 1.0)
-    e = mb.n("ShaderNodeEmission")
-    mb.link(hsv.outputs[0], e.inputs["Color"])
-    mb.link(mb.m("MULTIPLY", cg["drone"], 40.0), e.inputs["Strength"])
-    mb.link(e.outputs[0], out.inputs["Surface"])
-    sm = nb.n("GeometryNodeSetMaterial")
-    nb.link(rl.outputs[0], sm.inputs["Geometry"])
-    sm.inputs["Material"].default_value = m
-    # hide entirely when the show is off (keeps BVH light)
-    nb.link(sm.outputs[0], go.inputs[0])
+    nb.link(g_, inst.inputs["Points"])
+    nb.link(ci.outputs[0], inst.inputs["Instance"])
+    nb.link(inst.outputs[0], go.inputs[0])
     return ng
 
 
-add_gn(DR, drone_tree())
-bake(DR, "hide_render", (drone_lv < 0.001).astype(float), interp="CONSTANT")
+# hero drone: the one on the heart's left lobe, facing the camera
+_tgt = np.array(DS_C) + np.array(RIGHT) * -26.0 + np.array(UP) * 14.0
+HERO_I = int(np.argmin(np.linalg.norm(F1 - _tgt, axis=1)))
+SWARM = points_obj("DroneSwarm", np.zeros((ND, 3)), coll=C_FX)
+add_gn(SWARM, swarm_tree(len(_ts), HERO_I))
+swarm_vis = ((T > 2.0) & (T < T_OFF + 0.8)).astype(float)
+bake(SWARM, "hide_render", 1.0 - swarm_vis, interp="CONSTANT")
+# the barge they launched from (dark steel, work lights)
+BARGE = boxes_mesh("LaunchBarge", [(BARGE_C[0] - 42, BARGE_C[1] - 34, -1.5, BARGE_C[0] + 42, BARGE_C[1] + 34, 2.0)], coll=C_FX)
+BARGE.data.materials.append(simple_mat("BargeSteel", (0.03, 0.03, 0.032), 0.45, 0.3))
+_bl = [(BARGE_C[0] + sx_ * 41, BARGE_C[1] + sy_ * 33, 3.0) for sx_ in (-1, 1) for sy_ in (-1, 1)]
+add_gn(points_obj("BargeLights", np.array(_bl), coll=C_FX), lamps_tree("BargeLightPts", 0.4, M_BEACON))
+
+# hero object, keyed per frame
+FT = T                                                           # frame times
+HP = drone_pos(FT)[:, HERO_I]
+HV = np.gradient(HP, 1.0 / FPS, axis=0)
+HA = np.gradient(HV, 1.0 / FPS, axis=0)
+_g = 9.81
+thrust = HA + np.array([0, 0, _g])
+corr = np.stack([np.sin(FT * 2 * np.pi * 2.3 + 0.4) + 0.5 * np.sin(FT * 2 * np.pi * 3.7),
+                 np.sin(FT * 2 * np.pi * 2.9 + 1.7) + 0.5 * np.sin(FT * 2 * np.pi * 4.3 + 0.9)], 1) * math.radians(0.8)
+HERO = bpy.data.objects.new("HeroDrone", None)
+C_FX.objects.link(HERO)
+eul = []
+for k in range(NF):
+    tv = Vector(thrust[k]).normalized()
+    q = Vector((0, 0, 1)).rotation_difference(tv)               # body z = thrust direction → tilts INTO the motion
+    e_ = q.to_euler("XYZ")
+    eul.append((e_.x + corr[k, 0], e_.y + corr[k, 1], 0.0))      # yaw held fixed (as real show drones)
+bake_vec(HERO, "location", HP)
+bake_vec(HERO, "rotation_euler", np.array(eul))
+_hled_m, _hb, _ho = new_mat("HeroLED")
+_hr, _hg, _hbb, _hl = _hb.val("r", 1.0), _hb.val("g", 1.0), _hb.val("b", 1.0), _hb.val("lv", 0.0)
+_he = _hb.n("ShaderNodeEmission")
+_hb.link(_hb.xyz(_hr, _hg, _hbb), _he.inputs["Color"])
+_hb.link(_hb.m("MULTIPLY", _hl, 600.0), _he.inputs["Strength"])     # same LED as the swarm; close-up dimming below
+_hb.link(_he.outputs[0], _ho.inputs["Surface"])
+_HC, _HL = drone_light(FT)
+for nm_, arr in (("r", _HC[:, HERO_I, 0]), ("g", _HC[:, HERO_I, 1]), ("b", _HC[:, HERO_I, 2]), ("lv", _HL[:, HERO_I])):
+    bake(_hled_m.node_tree, f'nodes["{nm_}"].outputs[0].default_value', arr, interp="CONSTANT")
+for nm, me in _parts.items():
+    if "propeller" in nm:
+        co = np.empty(len(me.vertices) * 3, np.float32)
+        me.vertices.foreach_get("co", co)
+        cen = co.reshape(-1, 3).mean(0)
+        pm = me.copy()
+        pm.transform(Matrix.Translation(-Vector(cen)))
+        po = bpy.data.objects.new(f"Hero_{nm}", pm)
+        C_FX.objects.link(po)
+        po.parent = HERO
+        po.location = Vector(cen)
+        k_ = int(nm.split("_")[2]) if nm.split("_")[2].isdigit() else 1
+        spin = (1 if k_ % 2 else -1) * 0.31 * np.arange(NF)       # ~6,000 rpm reads stroboscopically slow on a 30 fps camera
+        bake(po, "rotation_euler", spin, index=2)
+        disc = cylinder(f"HeroPropDisc{k_}", 232.0 * DS_SCALE, 0.002, Vector(cen) + Vector((0, 0, 0.004)), _disc_m, segs=24, coll_=C_FX)
+        disc.parent = HERO
+        disc.location = Vector(cen) + Vector((0, 0, 0.004))
+    else:
+        o = bpy.data.objects.new(f"Hero_{nm}", me)
+        C_FX.objects.link(o)
+        o.parent = HERO
+_hled = bpy.data.objects.new("Hero_LED", _led_dome("HeroLEDDome", _hled_m))
+C_FX.objects.link(_hled)
+_hled.parent = HERO
+_hled.location = (0, 0, _LED_Z)
+for o in [HERO] + list(HERO.children_recursive):
+    bake(o, "hide_render", 1.0 - swarm_vis, interp="CONSTANT")
+SC.frame_set(fr(bt(B_DROP2 + 16)))
+_dg = bpy.context.evaluated_depsgraph_get()
+_ninst = sum(1 for i_ in _dg.object_instances if i_.is_instance and i_.parent and i_.parent.original == SWARM)
+print(f"[drones] swarm instances evaluated at beat 145: {_ninst} (expect {(ND - 1) * len(C_DKIT.objects)})")
+assert _ninst == (ND - 1) * len(C_DKIT.objects), "drone swarm does not evaluate"
+_tilt = np.degrees(np.arccos(np.clip(np.einsum("ij,j->i", thrust / np.linalg.norm(thrust, axis=1)[:, None], [0, 0, 1]), -1, 1)))
+print(f"[drones] hero = drone {HERO_I}: max tilt {_tilt[swarm_vis > 0].max():.1f}° (a=g·tanθ), max speed {np.linalg.norm(HV, axis=1).max():.1f} m/s")
 
 # ---------------------------------------------------------------------------------------------------------
 # 13. fireworks — analytic (no sim): rockets (launch → apex) and burst sparks with drag + gravity
@@ -2279,8 +2684,32 @@ def crane(t):
 shot(tD1, crane)
 shot(tBK, lambda t: (lerpv((-8.0, 28.0, 92.0), (-5.0, 34.0, 93.0), smoothstep((t - tBK) / (tD2 - tBK))),
                      Vector((HOLO_C.x, HOLO_C.y, 99.0)), 38.0, 5.6, 60.0))
-shot(tD2, lambda t: (lerpv(cam5, cam5 + Vector((22.0, 20.0, -2.0)), smoothstep((t - tD2) / (tFL - tD2))),
-                     DS_C + Vector((0, 0, -12.0)), 32.0, 16.0, 400.0))
+# drop 2 (director's call, Zeke 10-13): CLOSE-UP on one hero drone, then ONE continuous pull-back that reveals it's a
+# single pixel of the heart. Planned move (not music-reactive); the cut into it is the drop-2 downbeat. The camera is
+# anchored to the hero's STATIC slot, so the drone's real micro-motion (cm jitter, hover corrections) reads.
+_H_SLOT = Vector(F1[HERO_I])
+_PULL_END = bt(B_DROP2 + 16)
+_dir = (DS_CAM_END - _H_SLOT).normalized()
+_d1 = (DS_CAM_END - _H_SLOT).length
+
+
+def pullout(t):
+    if t < _PULL_END:
+        s_ = (t - tD2) / (_PULL_END - tD2)
+        e_ = smootherstep(s_)
+        dist = 1.35 * (_d1 / 1.35) ** float(e_)                 # exponential: constant perceived speed
+        loc = _H_SLOT + _dir * dist + Vector((0, 0, 0.18)) * (1 - float(e_))
+        w_ = float(smoothstep((dist - 12.0) / 128.0))            # aim stays ON the hero until the camera is ~12 m out
+        hp = Vector(HP[min(NF - 1, int(round(t * FPS)))])
+        tg = hp.lerp(DS_C, w_)
+        focus = (loc - hp).length if w_ < 0.5 else (loc - DS_C).length
+        return loc, tg, 45.0 - 10.0 * float(e_), 2.0 + 9.0 * float(e_), focus
+    x = smoothstep((t - _PULL_END) / (tFL - _PULL_END))
+    loc = DS_CAM_END + Vector((6.0, 4.0, 1.5)) * float(x)
+    return loc, DS_C + Vector((0, 0, -4.0)), 35.0, 11.0, (loc - DS_C).length
+
+
+shot(tD2, pullout)
 T_SETTLE = bt(B_BRIDGE + 4)
 BRIDGE_CAM = FLY[-1]
 
@@ -2356,6 +2785,11 @@ for fc_ in CAM.animation_data.action.layers[0].strips[0].channelbags[0].fcurves:
         assert abs(kp_.co[0] - (cf - 1)) < 1e-3
         kp_.interpolation = "CONSTANT"
 print("[camera] cut-safe CONSTANT keys at frames", [c_ - 1 for c_ in _cut_frames])
+# hero LED: identical to its neighbours once the camera is >12 m away; only in the 1–3 m close-up is it stopped down
+# (exposure for the close-up — otherwise the 600-strength pod clips into a white disc)
+_cd = np.linalg.norm(np.array(loc_a) - HP, axis=1)
+_k = np.clip((_cd - 2.0) / 10.0, 0.0, 1.0)
+bake(_hled_m.node_tree, 'nodes["lv"].outputs[0].default_value', _HL[:, HERO_I] * (70.0 + 530.0 * _k) / 600.0, interp="LINEAR")
 # clearance: no hero car may pass through the camera, and no car may fly through a tower
 LOC_A = np.array(loc_a)
 for k, car in enumerate(HERO_CARS + [BRK]):
@@ -2371,7 +2805,7 @@ for k, car in enumerate(HERO_CARS + [BRK]):
     assert dmin > 6.0 and tmin > 3.0, f"car {k} clips the camera or a tower"
 bake(CAM.data, "lens", np.array(lens_a))
 CAM.data.sensor_width = 36.0
-CAM.data.clip_start, CAM.data.clip_end = 0.1, 6000.0
+CAM.data.clip_start, CAM.data.clip_end = 0.1, 60000.0
 CAM.data.dof.use_dof = True
 CAM.data.dof.aperture_blades = 7
 bake(CAM.data, "dof.aperture_fstop", np.array(fst_a))
@@ -2451,7 +2885,7 @@ SC.collection.objects.link(moon)
 vl = SC.view_layers[0]
 vl.use_pass_mist = True
 W.mist_settings.start = 15.0
-W.mist_settings.depth = 1500.0
+W.mist_settings.depth = 5200.0
 W.mist_settings.falloff = "LINEAR"
 cg = bpy.data.node_groups.new("Post", "CompositorNodeTree")
 cg.interface.new_socket(name="Image", in_out="OUTPUT", socket_type="NodeSocketColor")

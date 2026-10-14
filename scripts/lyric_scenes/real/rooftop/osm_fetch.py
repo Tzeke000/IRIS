@@ -3,6 +3,7 @@ Data © OpenStreetMap contributors, ODbL 1.0 — credit required in the video de
 usage: osm_fetch.py SOUTH WEST NORTH EAST OUTDIR"""
 import json, os, sys, urllib.parse, urllib.request
 s, w, n, e = (float(x) for x in sys.argv[1:5]); out = sys.argv[5]
+MODE = sys.argv[6] if len(sys.argv) > 6 else "all"
 q = f"""[out:json][timeout:300][maxsize:536870912];
 (way["building"]({s},{w},{n},{e});
  way["building:part"]({s},{w},{n},{e});
@@ -12,7 +13,15 @@ out body geom;"""
 import time
 URLS = ("https://overpass-api.de/api/interpreter", "https://overpass.private.coffee/api/interpreter",
         "https://maps.mail.ru/osm/tools/overpass/api/interpreter", "https://overpass.kumi.systems/api/interpreter")
-for url in URLS * 2:
+if MODE == "majorroads":
+    q = f"""[out:json][timeout:300];
+(way["highway"~"^(motorway|motorway_link|trunk|trunk_link|primary|secondary|tertiary)$"]({s},{w},{n},{e}););
+out body geom;"""
+elif MODE == "buildings":
+    q = f"""[out:json][timeout:300][maxsize:536870912];
+(way["building"]({s},{w},{n},{e}); way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified)$"]({s},{w},{n},{e}););
+out body geom;"""
+for url in URLS * 3:
     try:
         req = urllib.request.Request(url, data=urllib.parse.urlencode({"data": q}).encode(), headers={"User-Agent": "iris-scene/1.0"})
         data = urllib.request.urlopen(req, timeout=240).read()
