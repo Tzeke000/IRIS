@@ -52,3 +52,24 @@ https://livescience.com/65860-why-blue-fireworks-are-rare.html · interior mappi
 ODbL attribution https://osmfoundation.org/wiki/Attribution · Overpass etiquette https://dev.overpass-api.de/overpass-doc/en/preface/commons.html ·
 nav-light convention https://www.faa.gov/documentLibrary/media/Advisory_Circular/AC_43-217.pdf · Spinner lift
 https://bladerunner.fandom.com/wiki/Spinner · glTF axes https://docs.godotengine.org/en/4.2/tutorials/assets_pipeline/importing_3d_scenes/model_export_considerations.html
+
+## v2.1 (10-13 night) — real geography to the horizon + a real drone show
+
+| Asset | Source | Author | Licence | Used for |
+|---|---|---|---|---|
+| Copernicus DEM GLO-30, tile N22 E114 (`dem_cop30/`, window prepared by `dem_prep.py` inside Blender) | https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N22_00_E114_00_DEM/ | ESA / Copernicus | Copernicus DEM licence — free for any use with attribution | real terrain ±16 km: Kowloon hills, Lion Rock range, HK Island peaks, Victoria Harbour (sea plane to the horizon) |
+| OpenStreetMap buildings + roads, urban Kowloon in 4 tiles (lat 22.293–22.346, lon 114.150–114.208) + major roads ±8 km | https://www.openstreetmap.org/copyright | OpenStreetMap contributors | ODbL 1.0 | 12,379 real footprints (natural edges: harbour S/W, hills N; east edge eroded), 19,110 roads → highway light streams |
+| "Quadrocopter 2" (camera gimbal removed, LED dome added) | https://sketchfab.com/3d-models/quadrocopter-2-6885c5f1a68148e1b2b3a4f69b8b3d70 | yanix | CC BY 4.0 | the 720 show drones (GN instances) + the hero close-up drone |
+| Skybrush Studio for Blender 5.0.4 (evaluated, NOT used in the build) | https://github.com/skybrush-io/studio-blender/releases/download/5.0.4/skybrush-studio-for-blender-5.0.4.zip | CollMot Robotics | GPL-3.0 | enables headless on 5.2 (62 operators, `create_takeoff_grid` works; harmless GPU draw-handler errors), but smart transitions run on Skybrush's server — free community tier capped at 64 drones → emulated offline (`drone_plan.py`: Hungarian matching + synchronised smootherstep moves + Skybrush-style safety report) |
+
+Video description credits to ADD for v2.1:
+- Terrain: Copernicus DEM GLO-30 — © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA
+- "Quadrocopter 2" by yanix — CC BY 4.0
+- Map data © OpenStreetMap contributors (already listed)
+
+Drone-show research (10-13): spacing ≥2–2.5 m https://sphengineering.com/news/how-to-create-a-beautiful-drone-show-presentation-using-nothing-but-a-simple-animation-and-drone-show-software ·
+https://stpetecatalyst.com/ever-wonder-how-drone-show-works-so-did-we/ · altitude/airspace https://www.intel.com/content/dam/www/public/us/en/documents/brief/planning-for-your-intel-drone-light-show-brief.pdf ·
+transitions/limits https://docs.skybrush.io/public/skybrush-studio-for-blender/latest/concepts.html · https://skybrush.io/blog/2026-07-30-skybrush-studio-5.0/ ·
+launch/landing https://docs.skybrush.io/public/skybrush-live-doc/latest/dialogs/adapt_show.html · community-server cap https://skybrush.io/blog/2025-02-04-skybrush-store/ ·
+show size https://skyelementsdrones.com/new-york · record https://www.guinnessworldrecords.com/news/2025/7/spectacular-light-show-featuring-11000-drones-creates-record-breaking-image-in-the-sky ·
+Intel Shooting Star hardware https://www.engadget.com/2016/11/06/intel-shooting-star-drone/ · camera look https://celestial.show/capturing-drone-light-shows/
