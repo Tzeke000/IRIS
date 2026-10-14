@@ -67,11 +67,11 @@ SC.render.use_motion_blur = True
 SC.render.motion_blur_shutter = 0.5
 SC.render.motion_blur_position = "START"
 ee = SC.eevee
-ee.taa_render_samples = 48
+ee.taa_render_samples = 24             # v2.2: measured — 1:1 crops indistinguishable from 48 (see v22/timing/cmp_*.jpg)
 ee.use_raytracing = True
 ee.ray_tracing_method = "SCREEN"
 ee.ray_tracing_options.resolution_scale = "2"
-ee.ray_tracing_options.trace_max_roughness = 0.45
+ee.ray_tracing_options.trace_max_roughness = 0.3
 ee.ray_tracing_options.screen_trace_quality = 0.5
 ee.use_fast_gi = True
 ee.use_shadows = True
@@ -82,8 +82,9 @@ ee.shadow_pool_size = "1024"
 ee.motion_blur_steps = 1
 ee.volumetric_start = 0.5
 ee.volumetric_end = 2200.0
-ee.volumetric_tile_size = "8"
-ee.volumetric_samples = 64
+ee.volumetric_tile_size = "16"
+ee.volumetric_samples = 32
+ee.shadow_resolution_scale = 0.5
 ee.volumetric_sample_distribution = 0.85
 ee.use_volumetric_shadows = False
 se = SC.sequence_editor_create()
@@ -425,13 +426,13 @@ def lamps_tree(name, radius, mat):
     ico = nb.n("GeometryNodeMeshIcoSphere")
     nb.set(ico.inputs["Radius"], radius)
     nb.set(ico.inputs["Subdivisions"], 1)
+    smi = nb.n("GeometryNodeSetMaterial")                  # material on the template: instances keep it
+    nb.link(ico.outputs["Mesh"], smi.inputs["Geometry"])
+    smi.inputs["Material"].default_value = mat
     inst = nb.n("GeometryNodeInstanceOnPoints")
     nb.link(gi.outputs[0], inst.inputs["Points"])
-    nb.link(ico.outputs["Mesh"], inst.inputs["Instance"])
-    sm = nb.n("GeometryNodeSetMaterial")
-    nb.link(inst.outputs[0], sm.inputs["Geometry"])
-    sm.inputs["Material"].default_value = mat
-    nb.link(sm.outputs[0], go.inputs[0])
+    nb.link(smi.outputs[0], inst.inputs["Instance"])
+    nb.link(inst.outputs[0], go.inputs[0])
     return ng
 
 
@@ -460,8 +461,8 @@ TCEN = Vector((80.0, 520.0, 0.0))                              # tallest tower
 TDECK = 300.0
 DS_C = Vector((-150.0, -2700.0, 112.0))                        # drone show centre — over Victoria Harbour (v2.1)
 HOLO_C = Vector((40.0, 212.0, 0.0))                            # holo billboard building (roof 80)
-FLY = [Vector(p) for p in [(-205, 196, 96), (-122, 266, 104), (-55, 330, 118), (-12, 378, 148), (18, 428, 212),
-                            (44, 474, 284), (63, 503, 321)]]
+FLY = [Vector(p) for p in [(-205, 196, 96), (-122, 266, 104), (-55, 330, 118), (-12, 378, 148), (2, 415, 215),
+                            (12, 445, 284), (18, 458, 312)]]          # v2.2: ends OFF the crown (deck no longer fills the frame)
 HEROES = [  # (model, x, y, height m, yaw deg) — v2: Artemis "b" (carried a baked "2023" sign) → real-world towers
     ("sf_skyscraper_a", -178.0, 300.0, 205.0, 20.0),
     ("sf_bld_atlanta", -40.0, 236.0, 205.0, -15.0),
@@ -1091,14 +1092,6 @@ def traffic_tree(curve_ob=None, name="Traffic", scale=1.0):
     nb.link(tmpl.outputs[0], tmpl_r.inputs["Geometry"])
     _, ty_, _ = nb.sep(nb.n("GeometryNodeInputPosition").outputs[0])
     tmpl_s = nb.store(tmpl_r.outputs[0], "front", nb.m("GREATER_THAN", ty_, 0.0))
-    al = nb.n("FunctionNodeAlignRotationToVector", axis="Y")
-    nb.link(fwd, al.inputs["Vector"])
-    inst = nb.n("GeometryNodeInstanceOnPoints")
-    nb.link(sp.outputs[0], inst.inputs["Points"])
-    nb.link(tmpl_s, inst.inputs["Instance"])
-    nb.link(al.outputs[0], inst.inputs["Rotation"])
-    rl = nb.n("GeometryNodeRealizeInstances")
-    nb.link(inst.outputs[0], rl.inputs["Geometry"])
     m, mb, out = new_mat(f"{name}Lights")
     cg = ctrl(mb)
     fr_ = mb.sattr("front").outputs["Fac"]
@@ -1106,6 +1099,17 @@ def traffic_tree(curve_ob=None, name="Traffic", scale=1.0):
     mb.set(e.inputs["Color"], mb.mix(fr_, (1.0, 0.04, 0.02), (1.0, 0.9, 0.75)))
     mb.set(e.inputs["Strength"], mb.m("MULTIPLY", mb.m("SUBTRACT", 1.0, cg["shut"]), mb.mix(fr_, 3.5, 12.0, dtype="FLOAT")))
     mb.link(e.outputs[0], out.inputs["Surface"])
+    _smt = nb.n("GeometryNodeSetMaterial")                 # on the template: instances keep it
+    nb.link(tmpl_s, _smt.inputs["Geometry"])
+    _smt.inputs["Material"].default_value = m
+    tmpl_s = _smt.outputs[0]
+    al = nb.n("FunctionNodeAlignRotationToVector", axis="Y")
+    nb.link(fwd, al.inputs["Vector"])
+    inst = nb.n("GeometryNodeInstanceOnPoints")
+    nb.link(sp.outputs[0], inst.inputs["Points"])
+    nb.link(tmpl_s, inst.inputs["Instance"])
+    nb.link(al.outputs[0], inst.inputs["Rotation"])
+    rl = inst                                              # v2.2: stay instances (no 1.2 M-vertex realize per frame)
     sm = nb.n("GeometryNodeSetMaterial")
     nb.link(rl.outputs[0], sm.inputs["Geometry"])
     sm.inputs["Material"].default_value = m
@@ -2132,7 +2136,7 @@ def burst_center_home():
 def burst_center():
     # ring around the tallest tower, biased NE (the bridge camera's view) but spread so the home roof sees them
     for _ in range(100):
-        ang = rng.uniform(-0.35, 1.9)
+        ang = rng.uniform(0.12, 1.45)                     # v2.2: inside the off-crown bridge camera's view cone
         r = rng.uniform(190, 680)
         c = Vector((TCEN.x + r * math.cos(ang), TCEN.y + r * math.sin(ang), rng.uniform(330, 440)))
         if -700 < c.x < 950 and 250 < c.y < 1350:
@@ -2263,6 +2267,10 @@ def streak_instancer(nb, pts_geo, vel, length, radius, store):
     nb.set(tf.inputs["Translation"], (0, 0, -0.5))
     _, _, tz = nb.sep(nb.n("GeometryNodeInputPosition").outputs[0])
     tmpl = nb.store(tf.outputs["Geometry"], "tz", tz)
+    _smt = nb.n("GeometryNodeSetMaterial")                 # instances keep their template's material → set it here
+    nb.link(tmpl, _smt.inputs["Geometry"])
+    _smt.inputs["Material"].default_value = M_FW
+    tmpl = _smt.outputs[0]
     for nm, val in store.items():
         pts_geo = nb.store(pts_geo, nm, val, dtype="FLOAT_VECTOR" if nm == "fc" else "FLOAT")
     al = nb.n("FunctionNodeAlignRotationToVector", axis="Z")
@@ -2272,15 +2280,13 @@ def streak_instancer(nb, pts_geo, vel, length, radius, store):
     nb.link(tmpl, inst.inputs["Instance"])
     nb.link(al.outputs[0], inst.inputs["Rotation"])
     nb.link(nb.xyz(radius, radius, length), inst.inputs["Scale"])
-    rl = nb.n("GeometryNodeRealizeInstances")
-    nb.link(inst.outputs[0], rl.inputs["Geometry"])
-    return rl.outputs[0]
+    return inst.outputs[0]                                 # v2.2: instances (fc/fb read as INSTANCER attributes)
 
 
 def fw_material():
     m, nb, out = new_mat("Firework")
-    fc = nb.sattr("fc").outputs["Vector"]
-    fb = nb.sattr("fb").outputs["Fac"]
+    fc = nb.sattr("fc", "INSTANCER").outputs["Vector"]
+    fb = nb.sattr("fb", "INSTANCER").outputs["Fac"]
     tz = nb.sattr("tz").outputs["Fac"]
     tail = nb.m("POWER", nb.m("ADD", tz, 1.0), 2.2)
     hot = nb.mix(nb.m("POWER", nb.m("ADD", tz, 1.0), 12.0), fc, (1.0, 0.95, 0.85))      # white-hot star head
@@ -2654,7 +2660,7 @@ def catmull(pts, s):
     return 0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t + (-p0 + 3 * p1 - 3 * p2 + p3) * t ** 3)
 
 
-BRIDGE_LOOK = Vector((TCEN.x + 10, TCEN.y + 10, TDECK + 15))
+BRIDGE_LOOK = Vector((TCEN.x + 10.5, TCEN.y + 10.5, TDECK + 27))   # the spire (hero) — deck is a thin edge-on sliver
 SHOTS = []          # (t_start, fn(t) -> (loc, target, lens, fstop, focus))
 
 
@@ -2726,9 +2732,9 @@ def flythrough(t):
         look = loc + hd * 160.0 + Vector((0, 0, -22.0))      # level gaze: the city falls away as we climb
         w = smoothstep((s - 0.6) / 0.4)
         tg = look.lerp(BRIDGE_LOOK, w)
-        return loc, tg, 22.0 - 4.0 * w, 16.0, 200.0
+        return loc, tg, 22.0 + 4.0 * w, 16.0, 200.0
     x = smoothstep((t - T_SETTLE) / (bt(B_LAST + 4) - T_SETTLE))
-    return BRIDGE_CAM + Vector((1.2, 1.2, -0.6)) * x, BRIDGE_LOOK, 18.0, 16.0, 200.0
+    return BRIDGE_CAM + Vector((1.5, 1.5, 0.4)) * x, BRIDGE_LOOK, 26.0, 16.0, 200.0
 
 
 shot(tFL, flythrough)
@@ -2810,6 +2816,43 @@ CAM.data.dof.use_dof = True
 CAM.data.dof.aperture_blades = 7
 bake(CAM.data, "dof.aperture_fstop", np.array(fst_a))
 bake(CAM.data, "dof.focus_distance", np.array(foc_a))
+# ---------------------------------------------------------------------------------------------------------
+# v2.2 per-shot existence (Zeke: "the drones don't need to exist until they show up in cam"). Each mask was
+# MEASURED: render with/without, count changed pixels (v22/vis) — far lights 0–3 px from the roof shots, road
+# traffic 0 px in the intro/dip shots (65 px in the rising outro → kept there), steam only near the home roof.
+# ---------------------------------------------------------------------------------------------------------
+SHOT_T = [s_[0] for s_ in SHOTS] + [NF / FPS + 1]
+def in_shots(*idx):
+    m_ = np.zeros(NF, bool)
+    for i_ in idx:
+        m_ |= (T >= SHOT_T[i_]) & (T < SHOT_T[i_ + 1])
+    return m_
+# shot indices: 0 intro A · 1 intro B · 2 crane · 3 breakdown · 4 drone pull-out · 5 fly+bridge · 6 orbit · 7 dip · 8 outro
+ROOF_LOW = in_shots(0, 1, 7)
+VIS_RULES = [
+    (lambda o: o.name.startswith(("DroneSwarm", "HeroDrone", "Hero_", "HeroPropDisc", "LaunchBarge", "BargeLights")),
+     in_shots(4)),
+    (lambda o: o.name.startswith(("Steam", "VentLight", "VentPipe")), in_shots(0, 1, 7, 8)),
+    (lambda o: o.name.startswith(("FarLights", "HillLights")), ~(ROOF_LOW | in_shots(8))),
+    (lambda o: o.name == "Traffic", ~ROOF_LOW),
+    (lambda o: o.name.startswith(("Lane", "SkyTraffic")), ~in_shots(4)),
+]
+_vis_count = {}
+for o in list(bpy.data.objects):
+    for rule, mask in VIS_RULES:
+        if rule(o):
+            prev = np.zeros(NF, bool)
+            ad = o.animation_data
+            if ad and ad.action:
+                for cb_ in [cb_ for ly in ad.action.layers for st_ in ly.strips for cb_ in st_.channelbags]:
+                    fc_ = cb_.fcurves.find("hide_render")
+                    if fc_:
+                        prev = np.array([fc_.evaluate(f_ + 1) > 0.5 for f_ in range(NF)])
+            hidden = prev | ~mask
+            bake(o, "hide_render", hidden.astype(float), interp="CONSTANT")
+            _vis_count[rule] = _vis_count.get(rule, 0) + 1
+            break
+print("[visibility] per-shot hide_render keyed on", sum(_vis_count.values()), "objects")
 # timeline markers at the cuts (for scrubbing)
 for t0_, _fn in SHOTS:
     SC.timeline_markers.new(f"cut {t0_:.2f}s", frame=fr(t0_))
@@ -2898,7 +2941,7 @@ for k_, v_ in enumerate((0.030, 0.026, 0.042)):
 hm = cb.mix(cb.m("MINIMUM", cb.m("MULTIPLY", rl.outputs["Mist"], 0.95), 0.82), rl.outputs["Image"], haze_c.outputs[0])
 glr = cb.n("CompositorNodeGlare")
 glr.inputs["Type"].default_value = "Fog Glow"
-glr.inputs["Quality"].default_value = "High"
+glr.inputs["Quality"].default_value = "Medium"
 glr.inputs["Threshold"].default_value = 0.9
 glr.inputs["Strength"].default_value = 0.55
 glr.inputs["Size"].default_value = 0.75
