@@ -1,4 +1,4 @@
-"""Render the arena preview stills from arena_v1.blend (per-still visibility tweaks are applied in memory only; the
+"""Render the arena preview stills from arena_v1.blend / arena_v2.blend / arena_v3.blend (per-still visibility tweaks are applied in memory only; the
 .blend on disk is never modified). Launched by render.sh (under scripts/server/render.sh + the GPU lock):
 
     blender -b arena_v1.blend --python-exit-code 1 --python render_stills.py -- --out DIR --names a_wide,b_stairs [--scale 100]
@@ -77,14 +77,16 @@ def setup(name):
     """returns an undo callable"""
     undo = []
     proof = D.collections["SIZE_PROOF"]
-    proof.hide_render = name != "d_overhead"
-    if name == "d_overhead":
+    proof.hide_render = not name.startswith("d_")
+    if name.startswith("d_"):          # plan views (v1 d_overhead, v2 d_plan): roof off, dragon + haze hidden
         hide = [o for o in D.objects if o.get("role") in ("intact", "piece")
                 and o.get("breakable_group", "").startswith(("Vault", "RoofSlates", "RoofTimber"))]
         hide += list(D.collections["ROOF_static_ruin"].all_objects)
         hide += [o for o in D.objects if o.name.startswith("Clerestory_")]
         hide += tree(D.objects["DRAGON"])
         hide += list(D.collections["FX_haze"].all_objects)
+        if name == "d_hallplan":       # v3 hall plan: arcade arches + aisle roofs off too, so the cover in the bands shows
+            hide += [o for o in D.objects if o.name.endswith("_arch_INTACT") or o.name.startswith("AisleRoof_")]
         set_hidden(hide, True)
         undo.append(lambda: set_hidden(hide, False))
         ld = D.lights.new("PlanFill", "SUN")
@@ -127,8 +129,12 @@ for name in a.names.split(","):
                                     setattr(o, "matrix_basis", M)) for o, hr, hv, M in snap])
     SC.camera = cam
     ex0 = SC.view_settings.exposure
-    if name == "d_overhead":
+    EXPO = {"a_compound": 0.9, "a_compound_se": 0.9, "b_colossi": 0.35, "f_colossus": 0.25, "c_hall": 0.3, "h_aisle": 0.4,
+            "i_cover": 0.5, "j_cover_run": 0.5, "e_hoard": 0.3, "k_town": 0.6, "l_valley": 0.6, "m_grass": 0.6}
+    if name.startswith("d_"):
         SC.view_settings.exposure = ex0 + 0.6
+    elif name in EXPO:
+        SC.view_settings.exposure = ex0 + EXPO[name]
     SC.render.filepath = os.path.join(os.path.abspath(a.out), f"{name}.png")
     t0 = time.time()
     bpy.ops.render.render(write_still=True)

@@ -1,0 +1,627 @@
+{
+ "song": "/data/iris_assets/dragon_slayer/dragon_slayer.wav",
+ "notes": "Choreography v1 (Iris 10-15, from Zeke's ear map + edits). t = rough seconds; snap: hit=nearest kick/snare within 0.5 s, none=free. Every contact event MUST appear here (no-pass-through contract).",
+ "events": [
+  {
+   "t": 0.0,
+   "snap": "none",
+   "sec": "intro_drop",
+   "who": "cam",
+   "what": "valley sweep: fog, town windows, path up the hill to the cathedral",
+   "t_snap": 0.0,
+   "frame": 0
+  },
+  {
+   "t": 7.0,
+   "snap": "hit",
+   "sec": "intro_drop",
+   "who": "cam",
+   "what": "cut: colossi + courtyard, push toward doors",
+   "t_snap": 6.983,
+   "frame": 209
+  },
+  {
+   "t": 13.0,
+   "snap": "hit",
+   "sec": "intro_drop",
+   "who": "dragon",
+   "what": "inside: dragon asleep on the hoard, slow breath; golden RPG glints (star glint on hit)",
+   "t_snap": 12.997,
+   "frame": 390
+  },
+  {
+   "t": 18.0,
+   "snap": "hit",
+   "sec": "intro_drop",
+   "who": "knight",
+   "what": "knight steps into frame at the foot of the stairs",
+   "t_snap": 18.0,
+   "snap_note": "no drum hit within 0.5 s (nearest +0.89)",
+   "frame": 540
+  },
+  {
+   "t": 20.0,
+   "snap": "hit",
+   "sec": "halftime_strings",
+   "who": "knight",
+   "what": "climb begins: one step per half-time hit; torches flare on snares",
+   "t_snap": 19.992,
+   "frame": 600
+  },
+  {
+   "t": 23.5,
+   "snap": "hit",
+   "sec": "halftime_strings",
+   "who": "knight",
+   "what": "KIT 1: hand rests on the sheathed sword (close-up)",
+   "t_snap": 23.539,
+   "frame": 706
+  },
+  {
+   "t": 27.0,
+   "snap": "hit",
+   "sec": "halftime_strings",
+   "who": "knight",
+   "what": "KIT 2: fire ignites in both palms",
+   "t_snap": 26.941,
+   "frame": 808
+  },
+  {
+   "t": 30.0,
+   "snap": "hit",
+   "sec": "halftime_strings",
+   "who": "knight",
+   "what": "KIT 3: fire collapses into 3 rocks orbiting his hands",
+   "t_snap": 30.047,
+   "frame": 901
+  },
+  {
+   "t": 33.0,
+   "snap": "hit",
+   "sec": "build",
+   "who": "knight",
+   "what": "top of stairs, pushes the doors; dust falls in rhythm with the build",
+   "t_snap": 32.943,
+   "frame": 988
+  },
+  {
+   "t": 39.0,
+   "snap": "hit",
+   "sec": "build",
+   "who": "dragon",
+   "what": "EYE SNAPS OPEN (extreme close-up)",
+   "t_snap": 39.027,
+   "frame": 1171
+  },
+  {
+   "t": 40.0,
+   "snap": "hit",
+   "sec": "pre_drop",
+   "who": "dragon",
+   "what": "rises off the hoard, wings half open, ROAR",
+   "t_snap": 39.933,
+   "frame": 1198
+  },
+  {
+   "t": 44.0,
+   "snap": "hit",
+   "sec": "pre_drop",
+   "who": "dragon",
+   "what": "flames SMOLDER from mouth/nostrils (no breath)",
+   "t_snap": 43.961,
+   "frame": 1319
+  },
+  {
+   "t": 48.0,
+   "snap": "hit",
+   "sec": "pre_drop",
+   "who": "knight",
+   "what": "knight steps in, orbiting rocks still circling",
+   "t_snap": 47.961,
+   "frame": 1439
+  },
+  {
+   "t": 53.0,
+   "snap": "hit",
+   "sec": "pre_drop_tail",
+   "who": "both",
+   "what": "circling standoff (both move laterally)",
+   "t_snap": 52.93,
+   "frame": 1588
+  },
+  {
+   "t": 57.0,
+   "snap": "hit",
+   "sec": "pre_drop_tail",
+   "who": "knight",
+   "what": "DRAWS the sword (ring + glint)",
+   "t_snap": 57.0,
+   "snap_note": "no drum hit within 0.5 s (nearest -1.01)",
+   "frame": 1710
+  },
+  {
+   "t": 61.5,
+   "snap": "hit",
+   "sec": "pre_drop_tail",
+   "who": "dragon",
+   "what": "test TAIL SWIPE",
+   "t_snap": 61.62,
+   "frame": 1849
+  },
+  {
+   "t": 62.0,
+   "snap": "hit",
+   "sec": "pre_drop_tail",
+   "who": "knight",
+   "what": "DODGE (back-dash) under the tail; tail clips a pillar -> first pillar cracks",
+   "contact": [
+    "dragon.tail",
+    "pillar_1"
+   ],
+   "t_snap": 61.846,
+   "frame": 1855
+  },
+  {
+   "t": 67.0,
+   "snap": "hit",
+   "sec": "drop_A",
+   "who": "knight",
+   "what": "DASH in + 3-hit sword combo on the foreleg",
+   "contact": [
+    "knight.sword",
+    "dragon.foreleg_L"
+   ],
+   "t_snap": 67.181,
+   "frame": 2015
+  },
+  {
+   "t": 70.0,
+   "snap": "hit",
+   "sec": "drop_A",
+   "who": "dragon",
+   "what": "TALON SWIPE",
+   "t_snap": 70.38,
+   "frame": 2111
+  },
+  {
+   "t": 70.4,
+   "snap": "hit",
+   "sec": "drop_A",
+   "who": "knight",
+   "what": "PARRY the talons (sparks, hit-stop 3f)",
+   "contact": [
+    "dragon.talon_R",
+    "knight.sword"
+   ],
+   "t_snap": 70.397,
+   "frame": 2112
+  },
+  {
+   "t": 74.0,
+   "snap": "hit",
+   "sec": "drop_A",
+   "who": "dragon",
+   "what": "TAIL SMASH misses knight, SHATTERS pillar 2 on the beat",
+   "contact": [
+    "dragon.tail",
+    "pillar_2"
+   ],
+   "t_snap": 74.362,
+   "frame": 2231
+  },
+  {
+   "t": 77.0,
+   "snap": "hit",
+   "sec": "drop_A",
+   "who": "knight",
+   "what": "FIREBALL x2 (small, fast) to the dragon's chest -> FLINCH",
+   "contact": [
+    "fireball_1",
+    "dragon.chest"
+   ],
+   "t_snap": 77.021,
+   "frame": 2311
+  },
+  {
+   "t": 80.0,
+   "snap": "hit",
+   "sec": "drop_A",
+   "who": "dragon",
+   "what": "ceiling chunk falls (pillar loss) -> knight SHIELD spell blocks it",
+   "contact": [
+    "ceiling_chunk_1",
+    "knight.shield"
+   ],
+   "t_snap": 79.975,
+   "frame": 2399
+  },
+  {
+   "t": 84.0,
+   "snap": "hit",
+   "sec": "drop_A",
+   "who": "knight",
+   "what": "jump + overhead slash on the neck -> FLINCH",
+   "contact": [
+    "knight.sword",
+    "dragon.neck"
+   ],
+   "t_snap": 83.934,
+   "frame": 2518
+  },
+  {
+   "t": 88.0,
+   "snap": "hit",
+   "sec": "drop_A",
+   "who": "dragon",
+   "what": "BITE lunge; knight side-dash dodge",
+   "t_snap": 87.94,
+   "frame": 2638
+  },
+  {
+   "t": 91.0,
+   "snap": "hit",
+   "sec": "drop_A",
+   "who": "dragon",
+   "what": "TAIL SMASH pillar 3",
+   "contact": [
+    "dragon.tail",
+    "pillar_3"
+   ],
+   "t_snap": 90.987,
+   "frame": 2730
+  },
+  {
+   "t": 93.0,
+   "snap": "hit",
+   "sec": "bridge",
+   "who": "both",
+   "what": "reset: both back off, dust settling, camera orbits",
+   "t_snap": 92.944,
+   "frame": 2788
+  },
+  {
+   "t": 96.0,
+   "snap": "hit",
+   "sec": "drop_B",
+   "who": "knight",
+   "what": "EARTH MAGIC: rock spikes erupt in a line toward the dragon on the beat",
+   "contact": [
+    "earth_spikes",
+    "dragon.belly"
+   ],
+   "t_snap": 95.898,
+   "frame": 2877
+  },
+  {
+   "t": 100.0,
+   "snap": "hit",
+   "sec": "drop_B",
+   "who": "dragon",
+   "what": "stumbles from spikes, FLINCH + roar",
+   "t_snap": 99.846,
+   "frame": 2995
+  },
+  {
+   "t": 104.0,
+   "snap": "hit",
+   "sec": "drop_B",
+   "who": "knight",
+   "what": "orbiting rocks launched x3 -> hit head/shoulder, dragon reacts",
+   "contact": [
+    "rock_1",
+    "dragon.head"
+   ],
+   "t_snap": 103.811,
+   "frame": 3114
+  },
+  {
+   "t": 108.0,
+   "snap": "hit",
+   "sec": "drop_B",
+   "who": "dragon",
+   "what": "FIREBALL spit x2 -> knight SHIELD blocks both",
+   "contact": [
+    "dragon_fireball_1",
+    "knight.shield"
+   ],
+   "t_snap": 108.037,
+   "frame": 3241
+  },
+  {
+   "t": 112.0,
+   "snap": "hit",
+   "sec": "drop_B",
+   "who": "dragon",
+   "what": "BITE MISSES (jaws snap on air, knight ducks)",
+   "t_snap": 111.74,
+   "frame": 3352
+  },
+  {
+   "t": 114.0,
+   "snap": "hit",
+   "sec": "drop_B",
+   "who": "dragon",
+   "what": "BODY SLAM LANDS -> floor cracks, shockwave",
+   "contact": [
+    "dragon.body",
+    "knight.body"
+   ],
+   "t_snap": 113.981,
+   "frame": 3419
+  },
+  {
+   "t": 114.2,
+   "snap": "none",
+   "sec": "drop_B",
+   "who": "knight",
+   "what": "thrown through the air BEHIND COVER (fallen column), hit-stop + slow-mo",
+   "contact": [
+    "knight.body",
+    "cover_column_A"
+   ],
+   "t_snap": 114.2,
+   "frame": 3426
+  },
+  {
+   "t": 121.0,
+   "snap": "hit",
+   "sec": "breakdown",
+   "who": "knight",
+   "what": "behind cover, hurt; DRINKS HEALTH POTION (green glow up the body)",
+   "t_snap": 121.063,
+   "frame": 3632
+  },
+  {
+   "t": 127.0,
+   "snap": "hit",
+   "sec": "build_impacts",
+   "who": "knight",
+   "what": "stands; pulls the GEM out",
+   "t_snap": 127.112,
+   "frame": 3813
+  },
+  {
+   "t": 133.0,
+   "snap": "hit",
+   "sec": "build_impacts",
+   "who": "knight",
+   "what": "CRUSHES the gem -> power AURA builds with the impacts",
+   "t_snap": 133.016,
+   "frame": 3990
+  },
+  {
+   "t": 140.0,
+   "snap": "hit",
+   "sec": "build_impacts",
+   "who": "dragon",
+   "what": "dragon rears, wings spread, launches upward",
+   "t_snap": 139.976,
+   "frame": 4199
+  },
+  {
+   "t": 146.0,
+   "snap": "hit",
+   "sec": "build_impacts",
+   "who": "dragon",
+   "what": "BURSTS UP THROUGH THE ROOF (pre-fractured vault released on impact hits)",
+   "contact": [
+    "dragon.head",
+    "roof_vault"
+   ],
+   "t_snap": 146.001,
+   "frame": 4380
+  },
+  {
+   "t": 148.0,
+   "snap": "hit",
+   "sec": "build_impacts",
+   "who": "knight",
+   "what": "roof chunks rain down -> SHIELD dome; one chunk hits the dragon's wing on the way up -> flinch",
+   "contact": [
+    "roof_chunks",
+    "knight.shield"
+   ],
+   "t_snap": 148.0,
+   "snap_note": "no drum hit within 0.5 s (nearest -1.01)",
+   "frame": 4440
+  },
+  {
+   "t": 152.0,
+   "snap": "hit",
+   "sec": "build_impacts",
+   "who": "dragon",
+   "what": "outside: dragon circles the MOON (silhouette), guitar solo",
+   "t_snap": 152.0,
+   "snap_note": "no drum hit within 0.5 s (nearest +0.68)",
+   "frame": 4560
+  },
+  {
+   "t": 158.0,
+   "snap": "hit",
+   "sec": "build_impacts",
+   "who": "knight",
+   "what": "knight runs out to the courtyard, aura blazing",
+   "t_snap": 157.983,
+   "frame": 4739
+  },
+  {
+   "t": 162.0,
+   "snap": "hit",
+   "sec": "halftime_big_drop",
+   "who": "dragon",
+   "what": "DIVE from the sky with FIRE BREATH across the courtyard",
+   "t_snap": 162.087,
+   "frame": 4863
+  },
+  {
+   "t": 163.0,
+   "snap": "hit",
+   "sec": "halftime_big_drop",
+   "who": "knight",
+   "what": "SHIELD holds the fire stream",
+   "t_snap": 162.871,
+   "frame": 4886
+  },
+  {
+   "t": 167.0,
+   "snap": "hit",
+   "sec": "halftime_big_drop",
+   "who": "knight",
+   "what": "BIG FIREBALL back -> dragon hit mid-air, spins",
+   "contact": [
+    "fireball_big_1",
+    "dragon.chest"
+   ],
+   "t_snap": 167.039,
+   "frame": 5011
+  },
+  {
+   "t": 171.0,
+   "snap": "hit",
+   "sec": "halftime_big_drop",
+   "who": "dragon",
+   "what": "fireball volley -> one misses knight and smashes a COLOSSUS arm",
+   "contact": [
+    "dragon_fireball_v",
+    "colossus_E.arm"
+   ],
+   "t_snap": 170.696,
+   "frame": 5121
+  },
+  {
+   "t": 175.0,
+   "snap": "hit",
+   "sec": "halftime_big_drop",
+   "who": "knight",
+   "what": "dash dodges across the courtyard (grass/rubble kicked up)",
+   "t_snap": 175.38,
+   "frame": 5261
+  },
+  {
+   "t": 179.0,
+   "snap": "hit",
+   "sec": "halftime_big_drop",
+   "who": "dragon",
+   "what": "LANDS hard in the courtyard (ground crack)",
+   "t_snap": 179.032,
+   "frame": 5371
+  },
+  {
+   "t": 181.0,
+   "snap": "hit",
+   "sec": "cinematic",
+   "who": "both",
+   "what": "slow standoff, wide moonlit shot, embers drifting",
+   "t_snap": 180.866,
+   "frame": 5426
+  },
+  {
+   "t": 190.0,
+   "snap": "hit",
+   "sec": "cinematic",
+   "who": "knight",
+   "what": "raises hand to the sky",
+   "t_snap": 189.98,
+   "frame": 5699
+  },
+  {
+   "t": 196.0,
+   "snap": "hit",
+   "sec": "cinematic",
+   "who": "fx",
+   "what": "GIANT HOLY SWORD begins forming in the clouds (light gathering)",
+   "t_snap": 196.005,
+   "frame": 5880
+  },
+  {
+   "t": 205.0,
+   "snap": "hit",
+   "sec": "cinematic",
+   "who": "dragon",
+   "what": "dragon charges / inhales for a final breath",
+   "t_snap": 205.032,
+   "frame": 6151
+  },
+  {
+   "t": 213.0,
+   "snap": "hit",
+   "sec": "cinematic",
+   "who": "fx",
+   "what": "holy sword fully formed, points down",
+   "t_snap": 213.002,
+   "frame": 6390
+  },
+  {
+   "t": 215.0,
+   "snap": "hit",
+   "sec": "drop_strings",
+   "who": "fx",
+   "what": "HOLY SWORD FALLS onto the dragon -> huge impact, flash, shockwave",
+   "contact": [
+    "holy_sword",
+    "dragon.back"
+   ],
+   "t_snap": 214.965,
+   "frame": 6449
+  },
+  {
+   "t": 219.0,
+   "snap": "hit",
+   "sec": "drop_strings",
+   "who": "dragon",
+   "what": "thrashes, wings flail, pinned",
+   "t_snap": 219.266,
+   "frame": 6578
+  },
+  {
+   "t": 226.0,
+   "snap": "hit",
+   "sec": "drop_strings",
+   "who": "dragon",
+   "what": "collapses",
+   "t_snap": 226.058,
+   "frame": 6782
+  },
+  {
+   "t": 228.0,
+   "snap": "none",
+   "sec": "outro",
+   "who": "knight",
+   "what": "music box: walks into the ruined hall to the hoard, lifts the GOLDEN RPG, admires it",
+   "t_snap": 228.0,
+   "frame": 6840
+  },
+  {
+   "t": 243.0,
+   "snap": "hit",
+   "sec": "outro",
+   "who": "dragon",
+   "what": "impact hits return: dragon's eye opens / it twitches back up behind him",
+   "t_snap": 242.979,
+   "frame": 7289
+  },
+  {
+   "t": 247.0,
+   "snap": "hit",
+   "sec": "outro",
+   "who": "knight",
+   "what": "turns, shoulders the RPG (rolling snare)",
+   "t_snap": 246.985,
+   "frame": 7410
+  },
+  {
+   "t": 252.0,
+   "snap": "hit",
+   "sec": "outro",
+   "who": "knight",
+   "what": "FIRES on the last impact -> explosion -> cut to black",
+   "contact": [
+    "rpg_rocket",
+    "dragon.head"
+   ],
+   "t_snap": 252.0,
+   "snap_note": "no drum hit within 0.5 s (nearest -1.04)",
+   "frame": 7560
+  }
+ ]
+}
