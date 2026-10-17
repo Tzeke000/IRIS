@@ -94,9 +94,15 @@ def _pid_alive(pid: int) -> bool:
     if not _IS_WIN:
         try:
             os.kill(pid, 0)
-            return True
         except OSError:
             return False
+        # A live PID is not proof: after the 10-14 power outage the stale pidfile's PID was
+        # reused by pipewire-media-session and the watcher refused to start for 2.5 days.
+        try:
+            cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ")
+            return b"zeke_presence" in cmd
+        except OSError:
+            return True
     try:
         out = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}"],
