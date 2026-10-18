@@ -2130,6 +2130,7 @@ PAL = [RED, GREEN, GOLD, SILVER, ORANGE, PURPLE, RED, GREEN, GOLD, BLUE]
 rockets = dict(L=[], A=[], tl=[], ta=[], dud=[], col=[], thick=[])
 sparks = dict(c=[], v=[], t0=[], life=[], col=[], col2=[], tc=[], k=[], g=[], tr=[], tw=[], sb=[], sz=[], br=[])
 BURSTS = []          # (t0, centre, colour, radius) → flash lights + smoke puffs
+RINGS = []           # v3.1: (first spark index, end index, t0, life, centre) of every ring shell
 
 
 def burst_center_home():
@@ -2194,8 +2195,10 @@ def add_burst(c, t0, kind=None, col=None, size=None):
         ax = Vector(rng.normal(0, 1, 3)).normalized()
         u = ax.orthogonal().normalized()
         w = ax.cross(u)
+        i0 = len(sparks["t0"])
         for a in np.linspace(0, 2 * np.pi, 150, endpoint=False):
             push(np.array((math.cos(a) * u + math.sin(a) * w)[:]), R, 2.4, tr=0.14)
+        RINGS.append((i0, len(sparks["t0"]), t0, 2.4, Vector(c[:])))
     elif kind == "palm":
         for _ in range(8):
             arm = Vector(rng.normal(0, 1, 3)).normalized()
@@ -3163,6 +3166,44 @@ for idb_ in (CTRL, _hled_m.node_tree):
             assert abs(fc_.evaluate(cf - 0.5) - fc_.evaluate(cf - 1)) < 1e-9
         _n_ctrl += 1
 print(f"[camera] cut-safe CONSTANT keys on {_n_ctrl} shader-control curves too")
+# v3.1 (Zeke, f3090: "like an audio visualization connecting all of the fireworks"): a RING shell seen edge-on
+# projects to a straight dotted line across the sky (the f3051 ring: |ring axis · view| = 0.03). Real, but it reads as
+# a glitch. Each ring keeps its random orientation unless the camera would see it within ~49° of edge-on; then it is
+# tilted (smallest rotation) until it is at least 41° open to the mean view direction over its life. No rng draws change.
+RING_MIN_OPEN = 0.75                                      # |axis · view| ≥ 0.75  ⇔ ring plane ≥ 48.6° from edge-on
+_fv = FWS.data.attributes["v"]
+_vv = np.empty(len(FWS.data.vertices) * 3, np.float32)
+_fv.data.foreach_get("vector", _vv)
+_vv = _vv.reshape(-1, 3)
+_tilted, _worst = 0, 1.0
+for i0_, i1_, t0_, life_, c_ in RINGS:
+    on_ = (T >= t0_) & (T < t0_ + life_)
+    vd = (np.array(loc_a)[on_] - np.array(c_[:])).mean(0)
+    vd /= np.linalg.norm(vd)
+    blk = _vv[i0_:i1_].astype(np.float64)
+    n_ = np.linalg.svd(blk - blk.mean(0))[2][-1]
+    if np.dot(n_, vd) < 0:
+        n_ = -n_
+    cosang = float(np.dot(n_, vd))
+    if cosang < RING_MIN_OPEN:
+        ax_ = np.cross(n_, vd)
+        ax_ /= np.linalg.norm(ax_)
+        ang = math.acos(max(-1.0, min(1.0, cosang))) - math.acos(RING_MIN_OPEN)
+        Rm = np.array(Matrix.Rotation(ang, 3, Vector(ax_)))
+        _vv[i0_:i1_] = (blk @ Rm.T).astype(np.float32)
+        _tilted += 1
+        n2 = Rm @ n_
+        cosang = float(np.dot(n2, vd))
+    # per-frame check over the ring's life (the view direction moves with the camera)
+    blk = _vv[i0_:i1_].astype(np.float64)
+    n_ = np.linalg.svd(blk - blk.mean(0))[2][-1]
+    vds = np.array(loc_a)[on_] - np.array(c_[:])
+    vds /= np.linalg.norm(vds, axis=1, keepdims=True)
+    _worst = min(_worst, float(np.abs(vds @ n_).min()))
+_fv.data.foreach_set("vector", _vv.ravel())
+FWS.data.update()
+print(f"[ringcheck] {len(RINGS)} ring shells, {_tilted} tilted toward the camera; worst |axis·view| over any frame = {_worst:.2f}")
+assert _worst > 0.5, "a ring shell is seen near edge-on (reads as a straight line)"
 # ---------------------------------------------------------------------------------------------------------
 # v2.2 per-shot existence (Zeke: "the drones don't need to exist until they show up in cam"). Each mask was
 # MEASURED: render with/without, count changed pixels (v22/vis) — far lights 0–3 px from the roof shots, road
