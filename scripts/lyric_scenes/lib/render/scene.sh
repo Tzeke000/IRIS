@@ -5,6 +5,8 @@
 #   scene.sh /ABS/real/<scene>/scene.env VERB [args]       (run from your shell — it launches the units itself)
 #
 #   build                     run BUILD_SCRIPT → BLEND                        (blocking unit <NAME>-build)
+#   verify [ARGS]             lib/qa/verify_saved.py on the SAVED BLEND in a fresh process → OUT_DIR/verify_saved.json;
+#                             exit 1 on a failed check; ARGS + VERIFY_ARGS from scene.env (blocking unit <NAME>-verify)
 #   stills SPEC [PCT] [SPP]   SPEC = frames "721,1021,1500-1502" or camera names "a_wide,c_hall" (CAM_PREFIX applied)
 #                             → STILLS_DIR (+ sheet.jpg, safe to Read)       (blocking unit <NAME>-stills)
 #   frames [S] [E]            one worker over S..E, 60-frame chunks          (DETACHED unit <NAME>-frames; FG=1 blocks)
@@ -23,6 +25,7 @@
 #   AUDIO=/abs/song.wav NF=3852 FPS=30           for frames/mux/full defaults
 #   BUILD_SCRIPT=$SCENE_DIR/build_scene.py  BUILD_ARGS="--out $BLEND ..."  BUILD_FROM=/abs/base.blend (layered builds)
 #   CAM_PREFIX=CAM_  CAM_PROPS='{"c_hall":{"exposure_offset":0.3}}'  STILLS_HOOK=$SCENE_DIR/stills_hook.py  PATCH='{...}'
+#   VERIFY_ARGS="--ground Terrain --grounded Props --ignore HazeBox"   (verify_saved.py options, word-split)
 #   optional: STILLS_DIR MP4 GRAIN(5; 0=off) CRF(17) CHUNK(60) WORKERS(2) PCT(100) SPP(0=scene) LOCK OVERLAY_DIR
 #             PARTS(3) PART_MB(7.5) PART_W(960) MEM(render.sh MemoryMax) BLENDER SHEET_PY
 #             RENDER_FLAGS (default "--factory-startup": no user add-ons in render runs, deterministic + quieter; set ""
@@ -41,7 +44,7 @@ RENDER_SH="$REPO/scripts/server/render.sh"
 OVERRIDABLE="PCT SPP CHUNK WORKERS LOCK FORCE GRAIN CRF MP4 STILLS_DIR CAM_PROPS PATCH MEM OUT_DIR FG"
 
 die() { echo "[scene] $*" >&2; exit 2; }
-[[ $# -ge 2 ]] || { sed -n '2,30p' "$SELF"; exit 1; }
+[[ $# -ge 2 ]] || { sed -n '2,36p' "$SELF"; exit 1; }
 SCENE_ENV="$(readlink -f "$1")"; shift
 VERB=$1; shift
 [[ -f "$SCENE_ENV" ]] || die "no scene.env at $SCENE_ENV"
@@ -106,6 +109,16 @@ _build() {
   # shellcheck disable=SC2086
   gpu "$BLENDER" -b --factory-startup ${BUILD_FLAGS:-} "${from[@]}" --python-exit-code 1 --python "$BUILD_SCRIPT" -- ${BUILD_ARGS:-}
   [[ -f "$BLEND" ]] || die "build finished but $BLEND does not exist (does BUILD_ARGS pass --out \$BLEND?)"
+}
+
+_verify() {   # extra verify_saved.py args
+  [[ -f "$BLEND" ]] || die "no $BLEND — build first"
+  local run=("$BLENDER" -b --factory-startup "$BLEND" --python-exit-code 1 --python "$LIB/qa/verify_saved.py" --
+             --out "$OUT_DIR/verify_saved.json")
+  # shellcheck disable=SC2206
+  local extra=(${VERIFY_ARGS:-} "$@")
+  mkdir -p "$OUT_DIR"
+  if [[ " ${extra[*]} " == *" --render "* ]]; then gpu "${run[@]}" "${extra[@]}"; else nice -n 10 "${run[@]}" "${extra[@]}"; fi
 }
 
 _stills() {   # SPEC PCT SPP
@@ -201,7 +214,7 @@ _full() {     # S E
 # ------------------------------------------------------------------ dispatch
 if [[ "${SCENE_IN_UNIT:-0}" == 1 ]]; then
   case "$VERB" in
-    _build|_stills|_chunks|_full|_mux) "$VERB" "$@" ;;
+    _build|_verify|_stills|_chunks|_full|_mux) "$VERB" "$@" ;;
     *) die "internal verb expected inside a unit, got $VERB" ;;
   esac
   exit 0
@@ -209,6 +222,7 @@ fi
 
 case "$VERB" in
   build) launch "$NAME-build" wait _build ;;
+  verify) launch "$NAME-verify" wait _verify "$@" ;;
   stills) [[ $# -ge 1 ]] || die "stills SPEC [PCT] [SPP]"; launch "$NAME-stills" wait _stills "$@" ;;
   frames)
     if [[ $# -lt 2 ]]; then need_nf; fi
@@ -225,5 +239,5 @@ case "$VERB" in
   full) if [[ $# -lt 2 ]]; then need_nf; fi; launch "$NAME-full" detach _full "${1:-1}" "${2:-$NF}" ;;
   parts) "$LIBR/discord_parts.sh" "${1:-$MP4}" "$OUT_DIR/discord" "$PARTS" "$PART_MB" "$PART_W" ;;
   sheet) d=${1:-$STILLS_DIR}; "$SHEET_PY" -I "$LIB/qa/sheet.py" "$d/sheet.jpg" --dir "$d" --glob '*.png' ;;
-  *) sed -n '2,30p' "$SELF"; exit 1 ;;
+  *) sed -n '2,36p' "$SELF"; exit 1 ;;
 esac
