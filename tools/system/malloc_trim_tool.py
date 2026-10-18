@@ -26,11 +26,34 @@ def _rss_mb() -> float:
     return -1.0
 
 
+class _MallInfo2(ctypes.Structure):
+    _fields_ = [(n, ctypes.c_size_t) for n in (
+        "arena", "ordblks", "smblks", "hblks", "hblkhd", "usmblks", "fsmblks", "uordblks", "fordblks",
+        "keepcost")]
+
+
+def _mallinfo() -> dict[str, Any]:
+    """glibc mallinfo2() summed over ALL arenas (2026-10-18). in_use = live malloc'd bytes,
+    free = freed-but-held bytes inside arenas, mmap = big direct mmaps. If RSS grows while in_use is
+    flat and free grows, it's fragmentation/retention; if in_use grows, it's a real native leak."""
+    libc = ctypes.CDLL("libc.so.6")
+    libc.mallinfo2.restype = _MallInfo2
+    m = libc.mallinfo2()
+    mb = lambda v: round(v / 1048576.0, 1)  # noqa: E731
+    return {"arena_mb": mb(m.arena), "in_use_mb": mb(m.uordblks), "free_mb": mb(m.fordblks),
+            "mmap_mb": mb(m.hblkhd), "mmap_count": int(m.hblks), "free_chunks": int(m.ordblks)}
+
+
 def _malloc_trim(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     action = str(params.get("action") or "trim").lower()
     before = _rss_mb()
     if action == "status":
         return {"ok": True, "rss_mb": before}
+    if action == "info":
+        try:
+            return {"ok": True, "rss_mb": before, **_mallinfo()}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": repr(e), "rss_mb": before}
     try:
         libc = ctypes.CDLL("libc.so.6")
         released = int(libc.malloc_trim(0))
@@ -55,6 +78,10 @@ def _guard() -> None:
             r = _malloc_trim({"action": "trim"}, {})
             r["ts"] = time.strftime("%Y-%m-%dT%H:%M:%S")
             r["threads"] = len(os.listdir(f"/proc/{os.getpid()}/task"))
+            try:
+                r["mallinfo"] = _mallinfo()
+            except Exception:  # noqa: BLE001
+                pass
             with open(_LOG, "a", encoding="utf-8") as f:
                 f.write(json.dumps(r) + "\n")
             if os.path.getsize(_LOG) > 2_000_000:
@@ -78,7 +105,7 @@ def _ensure_guard() -> None:
 register_tool(
     name="malloc_trim",
     description="Release freed glibc heap memory to the OS (malloc_trim(0)) and report runtime RSS before/after. "
-                "action=trim|status. Safe: only returns already-free pages.",
+                "action=trim|status|info (info = glibc mallinfo2: in-use vs free-held vs mmap). Safe: only returns already-free pages.",
     tier=1,
     handler=_malloc_trim,
 )
