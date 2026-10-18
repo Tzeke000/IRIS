@@ -15,6 +15,10 @@ model that carried a "2023" sign; research-based fireworks (shell sizes, crosset
 strobes, smoke lit from within, diffuse-only flash spill); hero flying cars + sky-lane traffic with aviation nav
 lights, all direction-checked; drop-2 strobe is a clean radial ripple.
 
+v3 (Zeke 10-17, "fix the flying cars that aren't there — just the headlights"): the sky traffic (SkyTraffic) is now
+real car bodies (the 3 measured models, decimated, GN-instanced) with the heads at the nose, tails at the back and a
+neon underglow trim; nothing else in the scene changes. Road traffic (Traffic) stays light pairs on purpose.
+
 Song map (Zeke's ear, snapped to the grid):  intro 0–29.18 · DROP1 29.18 (beat 65) · breakdown 43.50 (97)
 · DROP2 57.82 (129) · short break 72.14 (161) · fly-through 75.72 (169) · BRIDGE 86.46 (193)
 · LAST DROP 100.77 (225) · dip 111.51 (249) · final burst 118.67 (265) · music ends 125.83 (281) · 128.4 end.
@@ -2630,7 +2634,9 @@ for k, (slug, li, ph, spd) in enumerate(LANE_CARS):
     drive(car, pos, lane_vis, f"lane car {k} ({slug}, nose {NOSE[slug]})")
     HERO_CARS.append(car)
 
-# distant sky traffic: light pairs (white heads +Y / red tails) + a coloured underglow, along the same lanes
+# distant sky traffic along the same lanes. v2–v2.2 were light pairs only (no body); v3 (Zeke 10-17: "fix the flying
+# cars that aren't there — just the headlights") instances a REAL body (the same 3 measured models, decimated) on every
+# point, with the white heads at the nose and red tails at the back of each body.
 SKY = curve_obj("SkyLanes", LANE_PTS, cyclic=True)
 SKY.hide_render = True
 st = dict(ci=[], L=[], off=[], spd=[], dirn=[], lane=[])
@@ -2639,10 +2645,283 @@ for li, lp in enumerate(LANE_PTS):
     for j in range(int(Ll / 55)):
         st["ci"].append(float(li)); st["L"].append(Ll); st["off"].append(rng.random()); st["spd"].append(rng.uniform(22, 40))
         st["dirn"].append(1.0); st["lane"].append(float(rng.choice([-6.0, 0.0, 6.0])))
+# v3: bodies can't pass through each other the way light pairs did. Same draws as v2.2 (main rng untouched), then per
+# slot (lane × sub-lane): one shared speed (the slot's mean) and order-preserving even spacing, so nobody overtakes
+# through a body; the centre sub-lane rides 4 m higher, clear of the hero cars flying the lane centre line.
+st["zoff"] = [0.0] * len(st["ci"])
+_slots = {}
+for k, key in enumerate(zip(st["ci"], st["lane"])):
+    _slots.setdefault(key, []).append(k)
+for (li_, ln_), ks in _slots.items():
+    v_ = float(np.mean([st["spd"][k] for k in ks]))
+    ks = sorted(ks, key=lambda k: st["off"][k])
+    n_ = len(ks)
+    for r_, k in enumerate(ks):
+        st["spd"][k] = v_
+        st["off"][k] = (r_ + 0.35 * ((st["off"][k] * n_) % 1.0)) / n_
+        st["zoff"][k] = 4.0 if ln_ == 0.0 else 0.0
+_krng = np.random.default_rng(20261017)                  # own generator: the scene's main rng sequence is unchanged
+st["model"] = [float(x) for x in _krng.integers(0, 3, len(st["ci"]))]
+SKY_GLOW = [(0.2, 0.7, 1.0), (1.0, 0.25, 0.8), (0.6, 0.3, 1.0)]       # the hero cars' underglow palette
+st["glow"] = [SKY_GLOW[int(x)] for x in _krng.integers(0, 3, len(st["ci"]))]
+SKY_MODELS = [("sf_hover_car", 5.4), ("sf_car_vertascan", 4.8), ("sf_car_dylanheyes", 6.0)]   # = the hero cars' sizes
+SKY_DECIMATE = 0.25                                     # ~47–50k → ~12k faces each; they are 100s of m away
+
+
+def _lights_mat(name):
+    """the v2.2 traffic-lamp material: white heads (front=1) / red tails, dimmed by the outro shutoff"""
+    m, mb, out = new_mat(f"{name}Lights")
+    cg_ = ctrl(mb)
+    fr_ = mb.sattr("front").outputs["Fac"]
+    e = mb.n("ShaderNodeEmission")
+    mb.set(e.inputs["Color"], mb.mix(fr_, (1.0, 0.04, 0.02), (1.0, 0.9, 0.75)))
+    mb.set(e.inputs["Strength"], mb.m("MULTIPLY", mb.m("SUBTRACT", 1.0, cg_["shut"]), mb.mix(fr_, 3.5, 12.0, dtype="FLOAT")))
+    mb.link(e.outputs[0], out.inputs["Surface"])
+    return m
+
+
+def _underglow_mat(name):
+    """coloured underglow pad (the hero cars' underglow, as an emitter): colour per car from the instancer"""
+    m, mb, out = new_mat(name)
+    cg_ = ctrl(mb)
+    e = mb.n("ShaderNodeEmission")
+    mb.link(mb.sattr("glow", "INSTANCER").outputs["Vector"], e.inputs["Color"])
+    rim = mb.sattr("ug").outputs["Fac"]                  # 1 on the outer edge → 0 inside: a neon trim, not a slab
+    mb.set(e.inputs["Strength"], mb.m("MULTIPLY", mb.m("MULTIPLY", mb.m("SUBTRACT", 1.0, cg_["shut"]), SKY_GLOW_STR),
+                                      mb.m("MULTIPLY", rim, rim)))
+    mb.link(e.outputs[0], out.inputs["Surface"])
+    return m
+
+
+SKY_GLOW_STR = 4.0
+
+
+def car_kit_mesh(slug, length, lamp_mat, kname, glow_mat=None):
+    """one joined + decimated body, nose on +Y (NOSE dict, same mapping as make_car), centred, `length` long, with
+    head lamps ON the nose surface and tail lamps ON the back surface (front=1 / 0 point attribute for the lamp shader)"""
+    import bmesh
+    meshes = import_glb(slug)
+    lo, hi = model_bbox(meshes)
+    ax = NOSE[slug]
+    long_i = 0 if "X" in ax else 1
+    cs = length / (hi[long_i] - lo[long_i])
+    M_ = Matrix.Rotation(deg(NOSE_ROT[ax]), 4, "Z") @ Matrix.Diagonal((cs, cs, cs, 1.0)) @ \
+        Matrix.Translation((-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -(lo[2] + hi[2]) / 2))
+    me = bpy.data.meshes.new(kname)
+    bm = bmesh.new()
+    try:
+        for _nm, src in meshes:                      # join: append each part, remap its material slots
+            tmp = src.copy()
+            tmp.transform(M_)
+            nf0 = len(bm.faces)
+            bm.from_mesh(tmp)
+            bm.faces.ensure_lookup_table()
+            remap = []
+            for mt in tmp.materials:
+                if mt is not None and mt.name not in [x.name for x in me.materials if x]:
+                    me.materials.append(mt)
+                remap.append([x.name for x in me.materials if x].index(mt.name) if mt is not None else 0)
+            for f in bm.faces[nf0:]:
+                f.material_index = remap[f.material_index] if remap else 0
+            bpy.data.meshes.remove(tmp)
+        bm.to_mesh(me)
+    finally:
+        bm.free()
+    tmp_o = bpy.data.objects.new(f"_tmp_{kname}", me)
+    SC.collection.objects.link(tmp_o)
+    dm = tmp_o.modifiers.new("dec", "DECIMATE")
+    dm.ratio = SKY_DECIMATE
+    dg = bpy.context.evaluated_depsgraph_get()
+    me_d = bpy.data.meshes.new_from_object(tmp_o.evaluated_get(dg), preserve_all_data_layers=True, depsgraph=dg)
+    me_d.name = f"{kname}Mesh"
+    bpy.data.objects.remove(tmp_o)
+    co = np.empty(len(me.vertices) * 3, np.float32)
+    me.vertices.foreach_get("co", co)
+    co = co.reshape(-1, 3)
+    bpy.data.meshes.remove(me)
+    W_, H_ = float(np.ptp(co[:, 0])), float(np.ptp(co[:, 2]))
+
+    def surface_lamp(end):                           # end = +1 nose, -1 tail
+        yy = co[:, 1] * end
+        band = co[yy > yy.max() - 0.10 * length]
+        zl = float(np.median(band[:, 2]))
+        xl = float(np.clip(np.percentile(np.abs(band[:, 0]), 80) * 0.8, 0.22 * W_, 0.38 * W_))
+        out_ = []
+        for sx in (-1.0, 1.0):
+            near = co[(np.abs(co[:, 0] - sx * xl) < 0.12 * W_) & (np.abs(co[:, 2] - zl) < 0.18 * H_)]
+            ys = (near[:, 1] * end).max() if len(near) else yy.max()
+            out_.append((sx * xl, float(ys) * end, zl))
+        return out_
+    heads, tails = surface_lamp(1.0), surface_lamp(-1.0)
+    lamp_i = len(me_d.materials)
+    me_d.materials.append(lamp_mat)
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(me_d)
+        fl = bm.verts.layers.float.new("front")
+        for (px, py, pz), r_, is_head in [(p_, 0.22, 1.0) for p_ in heads] + [(p_, 0.20, 0.0) for p_ in tails]:
+            # sphere centre a little inside the surface: it bulges ~60 % of r out of the body, like a real lamp lens
+            ctr = Vector((px, py - (0.4 * r_ if is_head else -0.4 * r_), pz))
+            res = bmesh.ops.create_icosphere(bm, subdivisions=1, radius=r_, matrix=Matrix.Translation(ctr))
+            for v in res["verts"]:
+                v[fl] = is_head
+            for f in {f for v in res["verts"] for f in v.link_faces}:
+                f.material_index = lamp_i
+        if glow_mat is not None:                     # underglow: a neon frame just under the belly edge
+            g_i = len(me_d.materials)
+            me_d.materials.append(glow_mat)
+            ugl = bm.verts.layers.float.get("ug") or bm.verts.layers.float.new("ug")
+            zb = float(co[:, 2].min()) - 0.06
+            gw, gl = 0.50 * W_, 0.47 * length
+            outer = [bm.verts.new((x_ * gw, y_ * gl, zb)) for x_, y_ in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+            inner = [bm.verts.new((x_ * (gw - 0.45), y_ * (gl - 0.6), zb)) for x_, y_ in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+            for v in outer:
+                v[ugl] = 1.0
+            for v in inner:
+                v[ugl] = 0.0
+            for i_ in range(4):                      # 4 quads of the frame, normals DOWN
+                j_ = (i_ + 1) % 4
+                bm.faces.new((outer[i_], inner[i_], inner[j_], outer[j_])).material_index = g_i
+        if A.markers:                                # green +Y cube ahead of the nose (direction-check renders only)
+            mk_i = len(me_d.materials)
+            me_d.materials.append(emit_mat(f"{kname}MarkerGreen", (0.0, 1.0, 0.0), 30.0))
+            res = bmesh.ops.create_cube(bm, size=0.8, matrix=Matrix.Translation((0.0, length / 2 + 2.4, 0.0)))
+            for f in {f for v in res["verts"] for f in v.link_faces}:
+                f.material_index = mk_i
+        bm.to_mesh(me_d)
+    finally:
+        bm.free()
+    print(f"[skykit] {kname}: {slug} nose {ax}→+Y, {length} m × {W_:.2f} × {H_:.2f}, {len(me_d.polygons)} faces "
+          f"(decimate {SKY_DECIMATE}); heads {[tuple(round(c, 2) for c in p_) for p_ in heads]} "
+          f"tails {[tuple(round(c, 2) for c in p_) for p_ in tails]}")
+    return me_d, Vector((0.0, heads[0][1], heads[0][2])), Vector((0.0, tails[0][1], tails[0][2]))
+
+
+C_CKIT = coll("_skycar_kit")        # NOT hidden (hidden → instances empty); parked underground, Reset Children re-centres
+M_SKYLAMP = _lights_mat("SkyTraffic")
+M_SKYGLOW = _underglow_mat("SkyTrafficUnderglow")
+SKY_KIT = []
+for k, (slug, ln_) in enumerate(SKY_MODELS):
+    me_k, nose_k, tail_k = car_kit_mesh(slug, ln_, M_SKYLAMP, f"SkyCarKit{k}", M_SKYGLOW)
+    ko = bpy.data.objects.new(f"SkyCarKit{k}_{slug}", me_k)        # name order = Collection Info child order
+    C_CKIT.objects.link(ko)
+    ko.location = (0.0, 0.0, -5000.0)
+    SKY_KIT.append(dict(ob=ko, nose=nose_k, tail=tail_k, length=ln_))
+
+
+def sky_traffic_tree(curve_ob, name, kit_coll):
+    """same analytic lane motion as traffic_tree (Sample Curve by factor, +Y = direction of travel), but instances a
+    picked car body (attribute `model`) per point — instances, not realized geometry (render-optimization §4)"""
+    ng, nb, gi, go = gn_tree(name)
+    T_ = nb.n("GeometryNodeInputSceneTime").outputs["Seconds"]
+    ci, L, off, spd, dirn, lane = nb.attr("ci"), nb.attr("L"), nb.attr("off"), nb.attr("spd"), nb.attr("dirn"), nb.attr("lane")
+    oi = nb.n("GeometryNodeObjectInfo", transform_space="ORIGINAL")
+    oi.inputs["Object"].default_value = curve_ob
+    f_ = nb.m("FRACT", nb.m("ADD", off, nb.m("DIVIDE", nb.m("MULTIPLY", spd, T_), L)))
+    f_ = nb.mix(nb.m("GREATER_THAN", dirn, 0.0), nb.m("SUBTRACT", 1.0, f_), f_, dtype="FLOAT")
+    sc_ = nb.n("GeometryNodeSampleCurve", mode="FACTOR", use_all_curves=False)
+    nb.link(oi.outputs["Geometry"], sc_.inputs["Curves"])
+    nb.link(f_, sc_.inputs["Factor"])
+    fi = nb.n("FunctionNodeFloatToInt", rounding_mode="ROUND")
+    nb.link(ci, fi.inputs[0])
+    nb.link(fi.outputs[0], sc_.inputs["Curve Index"])
+    fwd = nb.v("SCALE", nb.v("NORMALIZE", sc_.outputs["Tangent"]), dirn)
+    left = nb.v("NORMALIZE", nb.v("CROSS_PRODUCT", (0.0, 0.0, 1.0), fwd))
+    pos = nb.v("ADD", nb.v("ADD", sc_.outputs["Position"], nb.v("SCALE", left, lane)), nb.xyz(0.0, 0.0, nb.attr("zoff")))
+    sp = nb.n("GeometryNodeSetPosition")
+    nb.link(gi.outputs[0], sp.inputs["Geometry"])
+    nb.link(pos, sp.inputs["Position"])
+    kit = nb.n("GeometryNodeCollectionInfo", transform_space="ORIGINAL")
+    kit.inputs["Collection"].default_value = kit_coll
+    nb.set(kit.inputs["Separate Children"], True)
+    nb.set(kit.inputs["Reset Children"], True)
+    al = nb.n("FunctionNodeAlignRotationToVector", axis="Y", pivot_axis="Z")     # yaw only: never rolls a body over
+    nb.link(fwd, al.inputs["Vector"])
+    mi = nb.n("FunctionNodeFloatToInt", rounding_mode="ROUND")
+    nb.link(nb.attr("model"), mi.inputs[0])
+    inst = nb.n("GeometryNodeInstanceOnPoints")
+    nb.link(sp.outputs[0], inst.inputs["Points"])
+    nb.link(kit.outputs[0], inst.inputs["Instance"])
+    nb.set(inst.inputs["Pick Instance"], True)
+    nb.link(mi.outputs[0], inst.inputs["Instance Index"])
+    nb.link(al.outputs[0], inst.inputs["Rotation"])
+    nb.link(inst.outputs[0], go.inputs[0])
+    return ng
+
+
 SKYT = points_obj("SkyTraffic", np.zeros((len(st["ci"]), 3)), {k: np.asarray(v) for k, v in st.items()}, coll=C_FX)
-add_gn(SKYT, traffic_tree(SKY, "SkyTraffic", scale=1.6))
+add_gn(SKYT, sky_traffic_tree(SKY, "SkyTraffic", C_CKIT))
 bake(SKYT, "hide_render", 1.0 - lane_vis, interp="CONSTANT")
-print(f"[sky] {len(HERO_CARS)} hero cars + {len(st['ci'])} distant flying cars on {len(LANES)} lanes")
+
+
+def sky_positions():
+    """the GN motion re-computed in numpy (arc-length factor on the closed poly lanes) → pos, fwd (NF, N, 3)"""
+    N_ = len(st["ci"])
+    pos_ = np.zeros((NF, N_, 3))
+    fwd_ = np.zeros((NF, N_, 3))
+    for k in range(N_):
+        lp = LANE_PTS[int(st["ci"][k])]
+        P_ = np.vstack([lp, lp[:1]])
+        sg = np.diff(P_, axis=0)
+        sl = np.linalg.norm(sg[:, :2], axis=1)
+        cum = np.concatenate([[0.0], np.cumsum(sl)])
+        d = ((st["off"][k] + st["spd"][k] * (T + 1.0 / FPS) / st["L"][k]) % 1.0) * cum[-1]   # GN Scene Time = frame/FPS
+        i = np.clip(np.searchsorted(cum, d) - 1, 0, len(sl) - 1)
+        f = (d - cum[i]) / np.maximum(sl[i], 1e-6)
+        tg = sg[i] / np.linalg.norm(sg[i], axis=1, keepdims=True)
+        lf = np.stack([-tg[:, 1], tg[:, 0], np.zeros(NF)], 1)
+        lf /= np.linalg.norm(lf, axis=1, keepdims=True)
+        pos_[:, k] = P_[i] + sg[i] * f[:, None] + lf * st["lane"][k] + np.array([0.0, 0.0, st["zoff"][k]])
+        fwd_[:, k] = tg
+    return pos_, fwd_
+
+
+SKY_POS, SKY_FWD = sky_positions()
+SKY_VIS = lane_vis > 0.5
+# spacing: no two sky bodies (or a sky body and a hero car) ever overlap while they're on screen
+_hero_pos = np.stack([c["pos"] for c in HERO_CARS], 1)
+_mins = []
+for i_ in np.nonzero(SKY_VIS)[0][::3]:
+    p_ = SKY_POS[i_]
+    dd = np.linalg.norm(p_[:, None] - p_[None], axis=2) + np.eye(len(p_)) * 1e9
+    dh = np.linalg.norm(p_[:, None] - _hero_pos[i_][None], axis=2)
+    _mins.append((dd.min(), dh.min()))
+_mins = np.array(_mins)
+print(f"[skycheck] min sky↔sky {_mins[:, 0].min():.1f} m · min sky↔hero {_mins[:, 1].min():.1f} m")
+assert _mins[:, 0].min() > 6.5 and _mins[:, 1].min() > 3.6, "sky traffic bodies overlap"
+# direction (the same test drive() runs on the hero cars, on the EVALUATED instances): nose − tail of every body
+# instance vs its measured displacement over 2 frames, at 3 frames; plus the instance count and the model per point
+_dg = bpy.context.evaluated_depsgraph_get()
+_kit_names = [d["ob"].name for d in SKY_KIT]
+
+
+def _sky_instances(frame):
+    SC.frame_set(frame)
+    dg_ = bpy.context.evaluated_depsgraph_get()
+    out_ = {}
+    for di in dg_.object_instances:
+        if di.is_instance and di.parent and di.parent.original.name == "SkyTraffic":
+            out_[di.persistent_id[0]] = (di.object.original.name, di.matrix_world.copy())
+    return out_
+
+
+_worst, _ninst = 1.0, None
+for f0 in (int(np.nonzero(SKY_VIS)[0][0]) + 40, 1021, 2881):
+    a_, b_ = _sky_instances(f0), _sky_instances(f0 + 2)
+    _ninst = len(a_)
+    assert _ninst == len(st["ci"]), f"SkyTraffic evaluates to {_ninst} instances, expected {len(st['ci'])}"
+    for pid, (onm, mw) in a_.items():
+        mk = _kit_names.index(onm)
+        assert mk == int(st["model"][pid]), f"sky car {pid} instanced {onm}, expected model {st['model'][pid]}"
+        kd = SKY_KIT[mk]
+        nose_tail = (mw @ kd["nose"]) - (mw @ kd["tail"])
+        vel = b_[pid][1].translation - mw.translation
+        _worst = min(_worst, nose_tail.normalized().dot(vel.normalized()))
+        assert (mw.translation - Vector(SKY_POS[f0 - 1, pid])).length < 1.5, "numpy sky positions disagree with GN"
+print(f"[dircheck] sky traffic: {_ninst} body instances × 3 frames, worst nose·velocity = {_worst:+.3f}")
+assert _worst > 0.9, "a sky-traffic body is not facing its velocity"
+SC.frame_set(1)
+print(f"[sky] {len(HERO_CARS)} hero cars + {len(st['ci'])} distant flying cars (real bodies, v3) on {len(LANES)} lanes")
 
 # ---------------------------------------------------------------------------------------------------------
 # 15. camera shots (never react to the music; cuts on downbeats)
@@ -2809,6 +3088,18 @@ for k, car in enumerate(HERO_CARS + [BRK]):
         tmin = min(tmin, float(np.min(np.linalg.norm(q - car["pos"][on][::5], axis=1))) if on.any() else 1e9)
     print(f"[carcheck] car {k}: min dist to camera {dmin:.1f} m (frame {car['closest_frame']}), to tower bbox {tmin:.1f} m")
     assert dmin > 6.0 and tmin > 3.0, f"car {k} clips the camera or a tower"
+# v3: the sky-traffic bodies get the same camera + tower clearance check (SkyTraffic only renders where SKY_VIS)
+_sd = np.where(SKY_VIS[:, None], np.linalg.norm(SKY_POS - LOC_A[:, None], axis=2), 1e9)
+_sf, _sk = np.unravel_index(int(np.argmin(_sd)), _sd.shape)
+_st = 1e9
+for nm_, lo_, hi_ in _boxes:
+    q = np.clip(SKY_POS[SKY_VIS][::5], np.array(lo_), np.array(hi_))
+    _st = min(_st, float(np.min(np.linalg.norm(q - SKY_POS[SKY_VIS][::5], axis=2))))
+print(f"[carcheck] sky traffic: min dist to camera {_sd.min():.1f} m (car {_sk}, frame {_sf + 1}), to tower bbox {_st:.1f} m")
+for f_ in (1021, 2341, 2881, 3049, 3200):
+    o_ = np.argsort(_sd[f_ - 1])[:3]
+    print(f"[skynear] frame {f_}: nearest sky cars {[(int(k_), round(float(_sd[f_ - 1, k_]))) for k_ in o_]} m")
+assert _sd.min() > 8.0 and _st > 3.0, "a sky-traffic car clips the camera or a tower"
 bake(CAM.data, "lens", np.array(lens_a))
 CAM.data.sensor_width = 36.0
 CAM.data.clip_start, CAM.data.clip_end = 0.1, 60000.0
