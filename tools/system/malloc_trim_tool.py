@@ -44,11 +44,39 @@ def _mallinfo() -> dict[str, Any]:
             "mmap_mb": mb(m.hblkhd), "mmap_count": int(m.hblks), "free_chunks": int(m.ordblks)}
 
 
+_M_MMAP_THRESHOLD = -3
+_M_ARENA_MAX = -8
+_MMAP_KB = 1024  # 1 MB: frames + detector tensors go to mmap; small/medium churn stays in arenas
+
+
+def _tune(mmap_kb: int, arena_max: int = 0) -> dict[str, Any]:
+    libc = ctypes.CDLL("libc.so.6")
+    out = {"mmap_threshold_kb": mmap_kb,
+           "mmap_threshold_set": int(libc.mallopt(_M_MMAP_THRESHOLD, mmap_kb * 1024))}
+    if arena_max > 0:
+        out["arena_max"] = arena_max
+        out["arena_max_set"] = int(libc.mallopt(_M_ARENA_MAX, arena_max))
+    return out
+
+
 def _malloc_trim(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     action = str(params.get("action") or "trim").lower()
     before = _rss_mb()
     if action == "status":
         return {"ok": True, "rss_mb": before}
+    if action == "tune":
+        # 2026-10-18: glibc's DYNAMIC mmap threshold creeps up to 32 MB after big blocks are freed,
+        # so frame-sized buffers (1280x720x3 = 2.7 MB, detector tensors ~5 MB) stop being mmaps
+        # and land in the ~300 per-thread arenas, where freed space fragments and RSS climbs while
+        # in_use stays flat (measured: in_use 1.44 GB flat, free_held 1.23 -> 2.02 GB in an hour).
+        # Pinning M_MMAP_THRESHOLD turns the dynamic threshold off: big blocks go back to mmap and
+        # are returned to the OS on free. Live-safe (mallopt); re-applied by the guard at boot.
+        try:
+            r = _tune(int(params.get("mmap_threshold_kb") or _MMAP_KB),
+                      int(params.get("arena_max") or 0))
+            return {"ok": True, "rss_mb": before, **r, **_mallinfo()}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": repr(e), "rss_mb": before}
     if action == "info":
         try:
             return {"ok": True, "rss_mb": before, **_mallinfo()}
@@ -73,6 +101,14 @@ def _guard() -> None:
     import json
     import time
     time.sleep(30)
+    try:
+        r = _tune(_MMAP_KB)
+        r["ts"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        r["event"] = "tune_at_boot"
+        with open(_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(r) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
     while True:
         try:
             r = _malloc_trim({"action": "trim"}, {})
@@ -105,7 +141,7 @@ def _ensure_guard() -> None:
 register_tool(
     name="malloc_trim",
     description="Release freed glibc heap memory to the OS (malloc_trim(0)) and report runtime RSS before/after. "
-                "action=trim|status|info (info = glibc mallinfo2: in-use vs free-held vs mmap). Safe: only returns already-free pages.",
+                "action=trim|status|info|tune (tune = pin glibc mmap threshold, mmap_threshold_kb=1024, optional arena_max; info = glibc mallinfo2: in-use vs free-held vs mmap). Safe: only returns already-free pages.",
     tier=1,
     handler=_malloc_trim,
 )

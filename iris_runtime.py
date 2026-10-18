@@ -3179,13 +3179,16 @@ def iris_health(ctx: _IrisContext = None) -> dict:
         # registered and run_due_practices is never invoked). Reporting `true` was a lie the
         # self-check repeated every 3 h. "configured-unwired" is the honest value until a
         # consumer exists; the verdict block never counted them anyway.
-        "identity_stability": "configured-unwired" if _g.get("_identity_stability_ready") else False,
+        # 2026-10-18: identity_stability WIRED — tools/system/identity_stability_tool.py runs it daily
+        # (thread identity_stability_daily); report whether that consumer is actually alive.
+        "identity_stability": (any(t.name == "identity_stability_daily" and t.is_alive()
+                                   for t in threading.enumerate())
+                               if _g.get("_identity_stability_ready") else False),
         "daily_practice": "configured-unwired" if _g.get("_daily_practice_ready") else False,
         "counterfactual_archive": bool(_g.get("_counterfactual_archive_ready")),
         "extraction_queue": bool(_g.get("_iris_extraction_queue_ready")),
     }
     out["subsystems_unwired"] = {
-        "identity_stability": "no caller; run_check() reads state/self_narrative.json (stale since 2026-07-22) - wire or retire",
         "daily_practice": "zero practices registered; run_due_practices(g) is never called - wire or retire",
     }
     # Surface any bootstrap failures so I can see what didn't wire.
