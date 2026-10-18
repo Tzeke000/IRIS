@@ -93,6 +93,11 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     # signal as a suggestion-nudge. Chores->code, wakes->decisions.
     _try(g, "unknown_capture", lambda: _bootstrap_unknown_capture(g))
 
+    # Face liveness SHADOW (2026-10-18, Zeke "go for it"): decoy gallery + MiniFASNet
+    # anti-spoof, LOGS what it would decide, changes nothing live. Default OFF - starts
+    # only if state/face_liveness_shadow.json says {"on": true}. Card: profiles/vision/face_liveness.md
+    _try(g, "face_liveness_shadow", lambda: _bootstrap_face_liveness(g))
+
     # Scene memory (2026-09-02, Zeke's "photographic memory" second half): a
     # keyframe + one sentence whenever the room changes, hourly otherwise.
     _try(g, "scene_memory", lambda: _bootstrap_scene_memory(g))
@@ -348,6 +353,11 @@ def _bootstrap_unknown_capture(g: dict[str, Any]) -> None:
 
 
 # ── L3 helpers ──────────────────────────────────────────────────────────────
+
+def _bootstrap_face_liveness(g: dict[str, Any]) -> None:
+    from brain import face_liveness
+    g["_face_liveness_boot"] = face_liveness.maybe_autostart(g)
+
 
 def _bootstrap_anchor_moments(g: dict[str, Any], root: Path) -> None:
     from brain import anchor_moments
