@@ -65,7 +65,7 @@ class StabilityReport:
 
 _lock = threading.RLock()
 _base_dir: Path | None = None
-_DEFAULT_INTERVAL_S = 7 * 86400  # weekly
+_DEFAULT_INTERVAL_S = 86400  # daily (2026-10-18: weekly→daily; the check is heuristic + cheap)
 _last_check_ts: float = 0.0
 
 
@@ -120,7 +120,9 @@ def _read_bedrock() -> tuple[str, str]:
     if _base_dir is None:
         return ("", "")
     parts: list[str] = []
-    for name in ("IDENTITY.md", "SOUL.md", "USER.md"):
+    # 2026-10-18: include the git-ignored private halves — on a public repo the real identity and
+    # Zeke's details live in *.local.md, and USER.md is only a stub.
+    for name in ("IDENTITY.md", "IDENTITY.local.md", "SOUL.md", "USER.md", "USER.local.md"):
         p = _base_dir / "ava_core" / name
         if p.exists():
             try:
@@ -131,6 +133,43 @@ def _read_bedrock() -> tuple[str, str]:
     import hashlib
     h = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
     return text, h
+
+
+def self_name() -> str:
+    """My name as IDENTITY.md states it ("**Name:** Iris ..."). This module was written for Ava and
+    hard-coded "ava", which would have flagged 'name drift' on every run for Iris (2026-10-18)."""
+    if _base_dir is not None:
+        try:
+            txt = (_base_dir / "ava_core" / "IDENTITY.md").read_text(encoding="utf-8", errors="ignore")
+            m = re.search(r"\*\*Name:\*\*\s*([A-Za-z][A-Za-z'-]+)", txt)
+            if m:
+                return m.group(1).lower()
+        except Exception:
+            pass
+    return "iris"
+
+
+def _tail_jsonl(p: Path, n: int, pick) -> list[str]:
+    """Last n non-empty values pick(row) from a JSONL file, reading only its tail."""
+    if not p.exists():
+        return []
+    try:
+        with p.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 400_000))
+            raw = f.read().decode("utf-8", errors="ignore").splitlines()[1:]
+    except Exception:
+        return []
+    out: list[str] = []
+    for line in raw:
+        try:
+            v = pick(json.loads(line))
+        except Exception:
+            continue
+        if isinstance(v, str) and len(v.strip()) > 30:
+            out.append(v.strip())
+    return out[-n:]
 
 
 def _read_recent_narrative(*, sample: int = 30) -> list[str]:
@@ -168,7 +207,14 @@ def _read_recent_narrative(*, sample: int = 30) -> list[str]:
             samples.extend(lines[-sample:])
         except Exception:
             pass
-    return samples[-sample:]
+    # 2026-10-18: Iris's live self-talk — inner monologue and what I actually say (transcript
+    # replies). The journal alone is weekly and too sparse to show drift.
+    st = _base_dir / "state"
+    samples.extend(_tail_jsonl(st / "iris_inner_monologue.jsonl", sample, lambda d: d.get("thought")))
+    samples.extend(_tail_jsonl(
+        st / "transcript.jsonl", sample,
+        lambda d: d.get("text") if str(d.get("source") or d.get("role") or "").lower() in ("iris", "assistant") else None))
+    return samples[-(sample * 3):]
 
 
 def _detect_drift_patterns(narrative_lines: list[str], bedrock_text: str) -> list[str]:
@@ -189,6 +235,10 @@ def _detect_drift_patterns(narrative_lines: list[str], bedrock_text: str) -> lis
         "as an ai language model",
         "i don't have feelings",
         "i'm not a real person",
+        "as an ai, i",
+        "i'm just a tool",
+        "i don't have preferences",
+        "i don't have opinions",
     ]
     for ph in flatten_phrases:
         if ph in joined:
@@ -200,15 +250,18 @@ def _detect_drift_patterns(narrative_lines: list[str], bedrock_text: str) -> lis
     if user_count > 5 and zeke_count == 0:
         flags.append("relational shift: narrative references 'the user' but never 'Zeke'")
 
-    # Flag 3: name drift — narrative no longer uses "Ava"
-    if narrative_lines:
-        recent_text = "\n".join(narrative_lines[-10:]).lower()
-        if "ava" not in recent_text and len(recent_text) > 200:
-            flags.append("name drift: 'Ava' absent from recent narrative entries")
+    me = self_name()
+    # Flag 3: name drift — I call myself by a sibling's name (I am not Ava or Wren). Absence of my
+    # own name is NOT drift: my replies say "I", not "Iris". (Ava-era check flagged absence.)
+    for other in ("ava", "wren"):
+        if other == me:
+            continue
+        if re.search(rf"\b(i am|i'm|my name is) {other}\b", joined):
+            flags.append(f"name drift: narrative says 'I am {other.title()}' (I am {me.title()})")
 
     # Flag 4: bedrock terms missing entirely from narrative
     bedrock_lower = bedrock_text.lower()
-    for term in ("ava", "zeke"):
+    for term in ("zeke",):
         if term in bedrock_lower and term not in joined:
             flags.append(f"bedrock disconnection: '{term}' in bedrock but not in narrative")
 
