@@ -21,6 +21,9 @@ KEYS — bake() RECONCILED (2026-10-15). The two old versions were incompatible:
 show_mask(ob, mask) keys hide_render (CONSTANT) = ~mask, AND-ed with any hide_render keys already there (rooftop VIS_RULES).
 
 LIGHTS — light() is boss v2's (AREA size, spot cone, aims at target); v3's copy dropped those and ignored target.
+
+ROTATIONS (pure numpy, shared by lib/camera + lib/physics): track_matrix(fwd, up, roll) = to_track_quat("-Z", "Y"),
+euler_to_mat, mat_to_euler(R, prev) / euler_seq(R, resets) = to_euler("XYZ", prev) continuity with resets at cuts.
 """
 import math
 
@@ -67,6 +70,82 @@ def gsmooth(x, sigma):
     r = int(3 * sigma) + 1
     k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
     return np.convolve(np.pad(x, r, mode="edge"), k / k.sum(), mode="valid")
+
+
+def track_matrix(fwd, up=(0.0, 0.0, 1.0), roll=0.0):
+    """Camera/light rotation (camera −Z along fwd, local Y toward `up`) as (3,3), or (n,3,3) for (n,3) inputs.
+    Same result as mathutils `fwd.to_track_quat("-Z", "Y")` for up = +Z (rocket's explicit `up` and bpyx.look_quat's
+    roll folded in). Pure numpy. A forward parallel to `up` falls back to up = +Y (no NaN)."""
+    f = np.asarray(fwd, np.float64)
+    one = f.ndim == 1
+    f = np.atleast_2d(f)
+    u = np.broadcast_to(np.asarray(up, np.float64), f.shape)
+    f = f / np.maximum(np.linalg.norm(f, axis=1, keepdims=True), 1e-12)
+    r = np.cross(f, u)
+    rn = np.linalg.norm(r, axis=1, keepdims=True)
+    bad = rn[:, 0] < 1e-9
+    if bad.any():
+        r[bad] = np.cross(f[bad], np.array([0.0, 1.0, 0.0]))
+        rn[bad] = np.linalg.norm(r[bad], axis=1, keepdims=True)
+    r = r / rn
+    y = np.cross(r, f)
+    R = np.stack([r, y, -f], axis=2)                       # columns: local X, Y, Z in world
+    roll = np.broadcast_to(np.asarray(roll, np.float64), (len(f),))
+    if np.any(roll != 0):
+        c, s = np.cos(roll), np.sin(roll)
+        Rz = np.zeros((len(f), 3, 3))
+        Rz[:, 0, 0], Rz[:, 0, 1], Rz[:, 1, 0], Rz[:, 1, 1], Rz[:, 2, 2] = c, -s, s, c, 1.0
+        R = R @ Rz
+    return R[0] if one else R
+
+
+def euler_to_mat(e):
+    """XYZ Euler (Blender order: R = Rz·Ry·Rx) → (3,3), or (n,3,3) for (n,3)."""
+    e = np.asarray(e, np.float64)
+    one = e.ndim == 1
+    e = np.atleast_2d(e)
+    cx, cy, cz = np.cos(e.T)
+    sx, sy, sz = np.sin(e.T)
+    R = np.empty((len(e), 3, 3))
+    R[:, 0, 0], R[:, 0, 1], R[:, 0, 2] = cy * cz, sx * sy * cz - cx * sz, cx * sy * cz + sx * sz
+    R[:, 1, 0], R[:, 1, 1], R[:, 1, 2] = cy * sz, sx * sy * sz + cx * cz, cx * sy * sz - sx * cz
+    R[:, 2, 0], R[:, 2, 1], R[:, 2, 2] = -sy, sx * cy, cx * cy
+    return R[0] if one else R
+
+
+def mat_to_euler(R, prev=None):
+    """(3,3) rotation → XYZ Euler. With prev: of the two Euler solutions, each unwrapped by 2π per axis toward prev,
+    the one closest to prev (what `to_euler("XYZ", prev)` is for: no ±π flips between frames, so keys interpolate)."""
+    M = np.asarray(R, np.float64)
+    cy = math.hypot(M[0, 0], M[1, 0])
+    if cy > 1e-6:
+        sols = [(math.atan2(M[2, 1], M[2, 2]), math.atan2(-M[2, 0], cy), math.atan2(M[1, 0], M[0, 0])),
+                (math.atan2(-M[2, 1], -M[2, 2]), math.atan2(-M[2, 0], -cy), math.atan2(-M[1, 0], -M[0, 0]))]
+    else:                                                   # gimbal lock: y = ±90°, put everything in x
+        sols = [(math.atan2(-M[1, 2], M[1, 1]), math.atan2(-M[2, 0], cy), 0.0)]
+    if prev is None:
+        return np.array(sols[0])
+    p = np.asarray(prev, np.float64)
+    best = None
+    for s in sols:
+        s = np.asarray(s)
+        s = s + 2 * math.pi * np.round((p - s) / (2 * math.pi))
+        d = np.abs(s - p).sum()
+        if best is None or d < best[0] - 1e-12:
+            best = (d, s)
+    return best[1]
+
+
+def euler_seq(R, resets=()):
+    """(n,3,3) rotations → (n,3) continuous XYZ Eulers; continuity restarts at the 0-based indices in `resets`
+    (a cut starts its own shot — rocket/police reset there, rooftop didn't)."""
+    R = np.asarray(R, np.float64)
+    rs = set(int(i) for i in resets)
+    out = np.empty((len(R), 3))
+    prev = None
+    for i in range(len(R)):
+        out[i] = prev = mat_to_euler(R[i], None if (prev is None or i in rs) else prev)
+    return out
 
 
 def bake_plan(vals, frames=None, interp="LINEAR", cuts=None, thin=True):
@@ -379,6 +458,17 @@ def link(ob, coll=None, parent=None):
     if parent is not None:
         ob.parent = parent
     return ob
+
+
+def save_blend(path, compress=True):
+    """Save the build with ABSOLUTE paths kept absolute. The default save_as_mainfile(relative_remap=True) rewrites
+    absolute image paths to '//…' on save — the arcade magenta scar, reproduced 10-18 by tests/test_verify_saved.sh
+    (an in-memory check passes, the saved file fails). Then verify the saved file: lib/render/scene.sh ENV verify."""
+    import os
+    path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    _bpy().ops.wm.save_as_mainfile(filepath=path, compress=compress, relative_remap=False)
+    return path
 
 
 def empty(name, loc=(0, 0, 0), parent=None, coll=None, kind="PLAIN_AXES"):

@@ -78,5 +78,41 @@ class TestMath(unittest.TestCase):
         self.assertEqual(list(X.ramp([0, 5, 10, 20], 0, 10)), [0, 0.5, 1, 1])
 
 
+class TestRotations(unittest.TestCase):
+    def test_track_matrix_is_a_camera_rotation(self):
+        R = X.track_matrix((0.0, 1.0, 0.0))                       # looking along +Y: right = +X, up = +Z
+        self.assertTrue(np.allclose(R, [[1, 0, 0], [0, 0, -1], [0, 1, 0]], atol=1e-12))
+        rng = np.random.default_rng(3)
+        f = rng.normal(size=(200, 3))
+        Rs = X.track_matrix(f, roll=rng.uniform(-1, 1, 200))
+        self.assertTrue(np.allclose(Rs @ Rs.transpose(0, 2, 1), np.eye(3), atol=1e-9))
+        self.assertTrue(np.allclose(np.linalg.det(Rs), 1.0))
+        self.assertTrue(np.allclose(-Rs[:, :, 2], f / np.linalg.norm(f, axis=1, keepdims=True)))   # −Z = forward
+
+    def test_straight_up_does_not_nan(self):
+        R = X.track_matrix((0.0, 0.0, 5.0))
+        self.assertTrue(np.isfinite(R).all() and abs(np.linalg.det(R) - 1) < 1e-9)
+
+    def test_euler_round_trip(self):
+        rng = np.random.default_rng(5)
+        for e in rng.uniform(-3, 3, (300, 3)):
+            R = X.euler_to_mat(e)
+            self.assertTrue(np.allclose(X.euler_to_mat(X.mat_to_euler(R)), R, atol=1e-9))
+            self.assertTrue(np.allclose(X.euler_to_mat(X.mat_to_euler(R, prev=e + 0.01)), R, atol=1e-9))
+            self.assertTrue(np.allclose(X.mat_to_euler(R, prev=e), e, atol=1e-9))     # same angles when prev agrees
+
+    def test_euler_seq_is_continuous_through_turns_and_resets_at_cuts(self):
+        a = np.linspace(0, 6 * np.pi, 400)                         # orbit: three full turns, slight look-down
+        fwd = np.stack([-np.cos(a), -np.sin(a), np.full_like(a, -0.3)], 1)
+        R = X.track_matrix(fwd)
+        e = X.euler_seq(R)
+        self.assertLess(np.abs(np.diff(e, axis=0)).max(), 0.1)    # no ±2π / ±π jumps between frames
+        self.assertGreater(e[-1, 2] - e[0, 2], 5.5 * np.pi)       # z keeps winding past π (keys interpolate the short way)
+        self.assertTrue(np.allclose(X.euler_to_mat(e), R, atol=1e-9))
+        e2 = X.euler_seq(R, resets=[200])
+        self.assertTrue(np.allclose(e2[200], X.mat_to_euler(R[200])))   # the cut starts from the canonical solution
+        self.assertTrue(np.allclose(X.euler_to_mat(e2), R, atol=1e-9))
+
+
 if __name__ == "__main__":
     unittest.main()

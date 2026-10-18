@@ -136,4 +136,5 @@ def main():
     sys.exit(1 if FAILS else 0)
 
 
-main()
+if __name__ == "__main__":         # Blender runs --python scripts as __main__; bpy_test_probe imports gltf()
+    main()

@@ -35,6 +35,11 @@ mean() { "$HOME/venvs/iris-v100/bin/python" -I -c "import sys,numpy as n;from PI
 # 1. build (blocking unit libtest-build)
 "$SCENE" "$E" build >"$W/build.log" 2>&1
 chk "build → blend exists" test -f "$W/tiny.blend"
+# 1b. verify the SAVED file in a fresh unit (lib/qa/verify_saved.py); VERIFY_ARGS forwarded, failures → non-zero
+"$SCENE" "$E" verify --min-cam 0.5 >"$W/verify.log" 2>&1; rc=$?
+chk "verify → exit 0 + verify_saved.json (rc=$rc)" test "$rc" -eq 0 -a -f "$W/out/verify_saved.json"
+"$SCENE" "$E" verify --min-cam 30 >"$W/verify2.log" 2>&1; rc=$?
+chk "verify fails when a check fails (camera within 30 m of the cube, rc=$rc)" test "$rc" -ne 0
 
 # 2. stills by frame and by camera (+ sheet)
 "$SCENE" "$E" stills 1,24 >"$W/stills1.log" 2>&1
