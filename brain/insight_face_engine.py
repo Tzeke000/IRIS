@@ -390,6 +390,13 @@ class InsightFaceEngine:
                 pose = getattr(f, "pose", None)
                 age = getattr(f, "age", None)
                 gender = getattr(f, "gender", None)
+                # 2026-10-18 face_liveness (SHADOW): ADDITIVE fields only. det_score was computed
+                # in _fast_get and dropped here; kps = the 5 detector keypoints, so the shadow
+                # scorer embeds exactly this box instead of re-detecting. Nothing live reads them.
+                # Lands on the next stack restart - do NOT brain_hot_swap this module (reload
+                # resets _SINGLETON, and get_insight_face() callers would see None).
+                _det = getattr(f, "det_score", None)
+                _kps = getattr(f, "kps", None)
                 results.append({
                     "bbox": [int(v) for v in bbox.tolist()] if bbox is not None else [0, 0, 0, 0],
                     "landmarks": landmark.tolist() if landmark is not None else None,
@@ -399,6 +406,8 @@ class InsightFaceEngine:
                     "person_id": pid,
                     "confidence": float(conf),
                     "sticky": bool(sticky),
+                    "det_score": float(_det) if _det is not None else None,
+                    "kps": _kps.tolist() if _kps is not None else None,
                 })
             except Exception as e:
                 print(f"[insight_face] face decode error: {e!r}")

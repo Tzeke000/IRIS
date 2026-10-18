@@ -129,3 +129,6 @@ apps/ava-control/src-tauri/gen/
 # lyric_scenes generated art (10-10): rebuilt by scripts/lyric_scenes/blender/*.py — see scripts/lyric_scenes/README.md
 assets/scenes/
 scripts/lyric_scenes/**/__pycache__/
+
+# Face liveness anti-spoof (MiniFASNet, Apache-2.0) - rebuilt by scripts/vision/build_antispoof_onnx.py
+models/antispoof/*.onnx
