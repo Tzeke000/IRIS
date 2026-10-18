@@ -31,7 +31,7 @@
 #             RENDER_FLAGS (default "--factory-startup": no user add-ons in render runs, deterministic + quieter; set ""
 #             if the scene needs an add-on at render time)  BUILD_FLAGS (e.g. --disable-autoexec)
 # Command-line env overrides win over scene.env for: PCT SPP CHUNK WORKERS LOCK FORCE GRAIN CRF MP4 STILLS_DIR
-#   CAM_PROPS PATCH MEM OUT_DIR FG — and are forwarded into the units with -E (units start in $HOME with a bare env).
+#   STILL_AT CAM_PROPS PATCH MEM OUT_DIR FG — and are forwarded into the units with -E (units start in $HOME with a bare env).
 # Every Blender launch runs inside a scripts/server/render.sh unit (iris-render.slice, MemoryMax, OOMScoreAdjust)
 # and under `flock $LOCK nice -n 15`.
 set -euo pipefail
@@ -41,7 +41,7 @@ LIBR="$(dirname "$SELF")"
 LIB="$(dirname "$LIBR")"
 REPO="$(cd "$LIB/../../.." && pwd)"
 RENDER_SH="$REPO/scripts/server/render.sh"
-OVERRIDABLE="PCT SPP CHUNK WORKERS LOCK FORCE GRAIN CRF MP4 STILLS_DIR CAM_PROPS PATCH MEM OUT_DIR FG"
+OVERRIDABLE="PCT SPP CHUNK WORKERS LOCK FORCE GRAIN CRF MP4 STILLS_DIR STILL_AT CAM_PROPS PATCH MEM OUT_DIR FG"
 
 die() { echo "[scene] $*" >&2; exit 2; }
 [[ $# -ge 2 ]] || { sed -n '2,36p' "$SELF"; exit 1; }
