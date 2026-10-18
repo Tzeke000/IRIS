@@ -2260,8 +2260,9 @@ print(f"[fireworks] rockets {len(rockets['tl'])}, bursts {len(BURSTS)}, sparks {
 assert min(rockets["tl"]) > bt(B_BRIDGE), "fireworks must not appear before the bridge"
 
 
-def streak_instancer(nb, pts_geo, vel, length, radius, store):
-    """Instance a tail-cylinder (head at the point, tail along -vel), realize, keep per-point attributes."""
+def streak_instancer(nb, pts_geo, vel, length, radius, store, vis=None):
+    """Instance a tail-cylinder (head at the point, tail along -vel), keep per-point attributes.
+    v3.1: `vis` (0/1) scales dead/unborn instances to 0 instead of deleting them — see sparks_tree."""
     cyl = nb.n("GeometryNodeMeshCylinder")
     nb.set(cyl.inputs["Vertices"], 4)
     nb.set(cyl.inputs["Radius"], 1.0)
@@ -2283,7 +2284,8 @@ def streak_instancer(nb, pts_geo, vel, length, radius, store):
     nb.link(pts_geo, inst.inputs["Points"])
     nb.link(tmpl, inst.inputs["Instance"])
     nb.link(al.outputs[0], inst.inputs["Rotation"])
-    nb.link(nb.xyz(radius, radius, length), inst.inputs["Scale"])
+    scl = nb.xyz(radius, radius, length)
+    nb.link(scl if vis is None else nb.v("SCALE", scl, vis), inst.inputs["Scale"])
     return inst.outputs[0]                                 # v2.2: instances (fc/fb read as INSTANCER attributes)
 
 
@@ -2313,26 +2315,39 @@ def sparks_tree():
     col2, tcf, sb, br = nb.attr("col2", "FLOAT_VECTOR"), nb.attr("tc"), nb.attr("sb"), nb.attr("br")
     age = nb.m("SUBTRACT", T_, t0)
     vis = nb.band(nb.cmp("GREATER_THAN", age, 0.0), nb.cmp("LESS_THAN", age, life))
-    dl = nb.n("GeometryNodeDeleteGeometry", domain="POINT")
-    nb.link(gi.outputs[0], dl.inputs["Geometry"])
-    nb.link(nb.band(vis, None, op="NOT"), dl.inputs["Selection"])
-    e = nb.m("EXPONENT", nb.m("MULTIPLY", nb.m("MULTIPLY", k, age), -1.0))
+    # v3.1 GLITCH FIX 1+3 (Zeke 10-17 "weird glitches before / while they explode"): NO Delete Geometry. EEVEE pairs
+    # GN instances across the motion-blur shutter by INSTANCE INDEX (persistent_id = (0, index); an `id` attribute
+    # does not change it), and deleting dead/unborn stars renumbered every later star whenever one was born or died →
+    # the blur paired unrelated stars hundreds of metres apart and smeared the sky into dark dithered sheets (f3023).
+    # The same renumbering re-rolled every star's twinkle / sputter / strobe phase (Index-driven) at each birth/death.
+    # Now every star keeps its index for the whole show; dead/unborn ones are scaled to 0 (streak_instancer vis).
+    # positions use the age CLAMPED to the star's life: the kept (scale-0) unborn stars would otherwise sit at
+    # exp(-k·age) ≈ 1e20 m and corrupt EEVEE's scene bounds (it visibly darkened glossy facades, f3409)
+    agep = nb.m("MINIMUM", nb.m("MAXIMUM", age, 0.0), life)
+    e = nb.m("EXPONENT", nb.m("MULTIPLY", nb.m("MULTIPLY", k, agep), -1.0))
     one_e = nb.m("SUBTRACT", 1.0, e)
     disp = nb.v("SCALE", v, nb.m("DIVIDE", one_e, k))
-    sag = nb.m("MULTIPLY", nb.m("DIVIDE", g, k), nb.m("SUBTRACT", age, nb.m("DIVIDE", one_e, k)))
+    sag = nb.m("MULTIPLY", nb.m("DIVIDE", g, k), nb.m("SUBTRACT", agep, nb.m("DIVIDE", one_e, k)))
     pos = nb.v("SUBTRACT", nb.v("ADD", c, disp), nb.xyz(0, 0, sag))
     vel = nb.v("SUBTRACT", nb.v("SCALE", v, e), nb.xyz(0, 0, nb.m("MULTIPLY", nb.m("DIVIDE", g, k), one_e)))
     sp = nb.n("GeometryNodeSetPosition")
-    nb.link(dl.outputs[0], sp.inputs["Geometry"])
+    nb.link(gi.outputs[0], sp.inputs["Geometry"])
     nb.link(pos, sp.inputs["Position"])
     speed = nb.v("LENGTH", vel)
-    length = nb.m("MAXIMUM", nb.m("MULTIPLY", speed, trl), 0.6)
+    # v3.1 GLITCH FIX 2: a trail can't be longer than the distance the star has flown from its burst (or split) point.
+    # It used to be speed·tr from age 0, so every newborn star's tail reached back THROUGH the centre: the shell
+    # popped in as a full-size spiky ball, shrank, then grew again.
+    flown = nb.m("MAXIMUM", nb.v("LENGTH", nb.v("SUBTRACT", pos, c)), 0.3)
+    length = nb.m("MINIMUM", nb.m("MAXIMUM", nb.m("MULTIPLY", speed, trl), 0.6), flown)
     u = nb.m("DIVIDE", age, life)
     fade = nb.m("POWER", nb.m("SUBTRACT", 1.0, u), 0.8)
     flash = nb.m("ADD", 1.0, nb.m("MULTIPLY", 2.5, nb.m("EXPONENT", nb.m("MULTIPLY", age, -14.0))))
     idx = nb.n("GeometryNodeInputIndex").outputs[0]
     wn = nb.n("ShaderNodeTexWhiteNoise", noise_dimensions="2D")
-    nb.link(nb.xyz(idx, nb.m("FLOOR", nb.m("MULTIPLY", T_, 22.0)), 0), wn.inputs["Vector"])
+    # v3.1: twinkle stays 22 Hz per star but each star gets its own phase. With stable indices one shared 22 Hz clock
+    # aliased against 30 fps: every ~3.7 frames ALL stars held for a frame (the old renumbering had masked it).
+    nb.link(nb.xyz(idx, nb.m("FLOOR", nb.m("ADD", nb.m("MULTIPLY", T_, 22.0), nb.m("MULTIPLY", idx, 0.7548777))), 0),
+            wn.inputs["Vector"])
     twk = nb.m("SUBTRACT", 1.0, nb.m("MULTIPLY", tw, nb.m("GREATER_THAN", wn.outputs["Value"], 0.55)))
     # burn-out: the last 15 % of a star's life sputters
     sput = nb.m("SUBTRACT", 1.0, nb.m("MULTIPLY", nb.m("GREATER_THAN", u, 0.85), nb.m("GREATER_THAN", wn.outputs["Value"], 0.4)))
@@ -2341,7 +2356,7 @@ def sparks_tree():
     blink = nb.m("ADD", nb.m("SUBTRACT", 1.0, sb), nb.m("MULTIPLY", sb, nb.m("MULTIPLY", nb.m("GREATER_THAN", ph, 0.55), 1.8)))
     fb = nb.m("MULTIPLY", nb.m("MULTIPLY", nb.m("MULTIPLY", fade, flash), nb.m("MULTIPLY", twk, sput)), nb.m("MULTIPLY", blink, br))
     colnow = nb.mix(nb.m("GREATER_THAN", u, tcf), col, col2, dtype="VECTOR")     # colour-change stars
-    geo = streak_instancer(nb, sp.outputs[0], vel, length, sz, {"fc": colnow, "fb": fb})
+    geo = streak_instancer(nb, sp.outputs[0], vel, length, sz, {"fc": colnow, "fb": fb}, vis=vis)
     sm = nb.n("GeometryNodeSetMaterial")
     nb.link(geo, sm.inputs["Geometry"])
     sm.inputs["Material"].default_value = M_FW
@@ -2356,10 +2371,8 @@ def rockets_tree():
     tl, ta, dud, col, thick = nb.attr("tl"), nb.attr("ta"), nb.attr("dud"), nb.attr("col", "FLOAT_VECTOR"), nb.attr("thick")
     dur = nb.m("SUBTRACT", ta, tl)
     u = nb.m("DIVIDE", nb.m("SUBTRACT", T_, tl), dur)
-    vis = nb.band(nb.cmp("GREATER_THAN", u, 0.0), nb.cmp("LESS_THAN", u, 1.0))
-    dl = nb.n("GeometryNodeDeleteGeometry", domain="POINT")
-    nb.link(gi.outputs[0], dl.inputs["Geometry"])
-    nb.link(nb.band(vis, None, op="NOT"), dl.inputs["Selection"])
+    vis = nb.band(nb.cmp("GREATER_THAN", u, 0.0), nb.cmp("LESS_THAN", u, 1.0))     # v3.1: scale 0, never deleted
+    u = nb.m("MINIMUM", nb.m("MAXIMUM", u, 0.0), 1.0)          # v3.1: hidden rockets park at launch/apex, not 50 km out
     om = nb.m("SUBTRACT", 1.0, u)
     ease = nb.m("SUBTRACT", 1.0, nb.m("MULTIPLY", om, om))
     d = nb.v("SUBTRACT", Ap, L)
@@ -2367,12 +2380,15 @@ def rockets_tree():
     pos = nb.v("ADD", nb.v("ADD", L, nb.v("SCALE", d, ease)), nb.v("SCALE", wob, u))
     vel = nb.v("SCALE", d, nb.m("DIVIDE", nb.m("MULTIPLY", om, 2.0), dur))
     sp = nb.n("GeometryNodeSetPosition")
-    nb.link(dl.outputs[0], sp.inputs["Geometry"])
+    nb.link(gi.outputs[0], sp.inputs["Geometry"])
     nb.link(pos, sp.inputs["Position"])
     length = nb.m("MINIMUM", nb.m("MAXIMUM", nb.m("MULTIPLY", nb.v("LENGTH", vel), 0.45), 3.0), 42.0)
+    # v3.1 GLITCH FIX 2: the trail starts at the launch point (it used to pop in 42 m long, reaching BELOW the launch)
+    length = nb.m("MINIMUM", length, nb.m("MAXIMUM", nb.v("LENGTH", nb.v("SUBTRACT", pos, L)), 0.3))
     duds = nb.m("SUBTRACT", 1.0, nb.m("MULTIPLY", dud, nb.mr(u, 0.72, 1.0)))
     fb = nb.m("MULTIPLY", duds, nb.mr(u, 0.0, 0.04, 0.3, 1.0))
-    geo = streak_instancer(nb, sp.outputs[0], vel, length, nb.m("ADD", 0.45, nb.m("MULTIPLY", thick, 0.7)), {"fc": col, "fb": fb})
+    geo = streak_instancer(nb, sp.outputs[0], vel, length, nb.m("ADD", 0.45, nb.m("MULTIPLY", thick, 0.7)), {"fc": col, "fb": fb},
+                           vis=vis)
     sm = nb.n("GeometryNodeSetMaterial")
     nb.link(geo, sm.inputs["Geometry"])
     sm.inputs["Material"].default_value = M_FW
@@ -2420,15 +2436,24 @@ for j in range(NFL):
 NSM = 22
 sm_loc = np.zeros((NSM, NF, 3)); sm_scl = np.full((NSM, NF), 0.001); sm_den = np.zeros((NSM, NF))
 sm_em = np.zeros((NSM, NF)); sm_col = np.ones((NSM, NF, 3))
+SM_FADE = 0.8        # v3.1: a pooled puff fades out over the 0.8 s before its slot is reused
 for i, (t0, c, col, R) in enumerate(BURSTS):
     j = i % NSM
     m = T >= t0
     age = T[m] - t0
+    # v3.1 GLITCH FIX 4: slots are reused every ~3.6 s (median) while the old puff still had ~67 % of its density —
+    # it vanished and jumped to the new burst. Now it fades to nothing before the jump (the jump stays invisible).
+    tn = BURSTS[i + NSM][0] if i + NSM < len(BURSTS) else 1e9
+    fo = 1.0 - smoothstep((T[m] - (tn - SM_FADE)) / SM_FADE)
     sm_loc[j, m] = np.array(c[:])[None, :] + np.stack([age * 1.6, age * 0.6, age * 0.8], 1)
     sm_scl[j, m] = R * (0.45 + 0.55 * (1 - np.exp(-age / 1.2))) + 2.5 * age
-    sm_den[j, m] = 0.006 * np.exp(-age / 9.0) * (1 - np.exp(-age / 0.35))
-    sm_em[j, m] = 0.3 * np.exp(-age / 0.5)
+    sm_den[j, m] = 0.006 * np.exp(-age / 9.0) * (1 - np.exp(-age / 0.35)) * fo
+    sm_em[j, m] = 0.3 * np.exp(-age / 0.5) * fo
     sm_col[j, m] = col
+_jumps = np.linalg.norm(np.diff(sm_loc, axis=1), axis=2) > 5.0                      # slot reuse = a puff teleports
+_den_at_jump = float(np.max(np.where(_jumps, sm_den[:, :-1], 0.0)))
+print(f"[smokecheck] {int(_jumps.sum())} pooled-puff jumps, max density at a jump {_den_at_jump:.2e} (peak 6e-3)")
+assert _den_at_jump < 3e-5, "a smoke puff jumps to a new burst while still visible"
 SMOKE = []
 for j in range(NSM):
     m, nb, out = new_mat(f"ShellSmoke{j}")
@@ -3063,7 +3088,13 @@ bake_vec(CAM, "location", np.array(loc_a))
 bake_vec(CAM, "rotation_euler", np.array(rot_a))
 # cut-safe motion blur: the key on the LAST frame of every shot holds (CONSTANT), so the START-aligned shutter
 # (frame → frame+0.5) never smears into the next shot's pose
-_cut_frames = [fr(t0_) for t0_, _fn in SHOTS if t0_ > 0]
+# v3.1 GLITCH FIX 6: the cut frame must be the FIRST frame the bake above gives the new shot (T >= t0, i.e. rounding
+# UP). fr() rounds to nearest, which put the CONSTANT key one frame early at 3 cuts (drop 1, orbit→dip, dip→outro):
+# the real last frame of the shot then blurred toward the next shot's camera (f3346 / f3561 smeared end to end).
+_cut_frames = [int(np.argmax(T >= t0_ - 1e-9)) + 1 for t0_, _fn in SHOTS if t0_ > 0]
+for cf, (t0_, _fn) in zip(_cut_frames, [s_ for s_ in SHOTS if s_[0] > 0]):
+    assert T[cf - 2] < t0_ - 1e-9 <= T[cf - 1], "cut frame does not match the camera bake"
+    assert np.linalg.norm(np.array(loc_a[cf - 1]) - np.array(_fn(T[cf - 1])[0][:])) < 1e-6
 for fc_ in CAM.animation_data.action.layers[0].strips[0].channelbags[0].fcurves:
     for cf in _cut_frames:
         kp_ = fc_.keyframe_points[cf - 2]                    # key index = frame - 1 → frame (cut-1)
@@ -3107,6 +3138,31 @@ CAM.data.dof.use_dof = True
 CAM.data.dof.aperture_blades = 7
 bake(CAM.data, "dof.aperture_fstop", np.array(fst_a))
 bake(CAM.data, "dof.focus_distance", np.array(foc_a))
+# v3.1 GLITCH FIX 5: the cut-safe CONSTANT key covered only the camera OBJECT (location/rotation). Lens, f-stop and
+# focus stayed LINEAR across every cut, so the START-aligned shutter of the frame before a cut zoomed + refocused
+# toward the next shot (f3077, bridge→orbit, 26→30 mm, focus 200→900 m: the whole frame smeared for one frame).
+for fc_ in CAM.data.animation_data.action.layers[0].strips[0].channelbags[0].fcurves:
+    for cf in _cut_frames:
+        kp_ = fc_.keyframe_points[cf - 2]
+        assert abs(kp_.co[0] - (cf - 1)) < 1e-3
+        kp_.interpolation = "CONSTANT"
+    for cf in _cut_frames:
+        assert abs(fc_.evaluate(cf - 0.5) - fc_.evaluate(cf - 1)) < 1e-6, f"camera {fc_.data_path} moves across cut {cf}"
+print("[camera] cut-safe CONSTANT lens/f-stop/focus keys too")
+# v3.1 GLITCH FIX 7: the same bleed through the shader controls. EEVEE evaluates keyed values at a sub-frame inside
+# the shutter, and the CTRL curves are LINEAR, so a control that steps AT a cut leaked into the previous shot's last
+# frame — the rooftop lasers (on from the orbit cut) flashed into the bridge shot for one frame (f3077), and the same
+# at drop 1 and the outro. Last frame of every shot → CONSTANT on every CTRL curve + the hero LED level.
+_n_ctrl = 0
+for idb_ in (CTRL, _hled_m.node_tree):
+    for fc_ in idb_.animation_data.action.layers[0].strips[0].channelbags[0].fcurves:
+        for cf in _cut_frames:
+            kp_ = fc_.keyframe_points[cf - 2]
+            assert abs(kp_.co[0] - (cf - 1)) < 1e-3
+            kp_.interpolation = "CONSTANT"
+            assert abs(fc_.evaluate(cf - 0.5) - fc_.evaluate(cf - 1)) < 1e-9
+        _n_ctrl += 1
+print(f"[camera] cut-safe CONSTANT keys on {_n_ctrl} shader-control curves too")
 # ---------------------------------------------------------------------------------------------------------
 # v2.2 per-shot existence (Zeke: "the drones don't need to exist until they show up in cam"). Each mask was
 # MEASURED: render with/without, count changed pixels (v22/vis) — far lights 0–3 px from the roof shots, road
@@ -3144,6 +3200,141 @@ for o in list(bpy.data.objects):
             _vis_count[rule] = _vis_count.get(rule, 0) + 1
             break
 print("[visibility] per-shot hide_render keyed on", sum(_vis_count.values()), "objects")
+# ---------------------------------------------------------------------------------------------------------
+# v3.1 per-shot frustum culling (Zeke 10-17: "only render things within the camera's view"). MEASURED first: hiding
+# the static instance groups (roof clutter, far/hill lights, street lights, beacons ≈ 140k instances) saved 1.1 s of
+# 3.6 s/frame (CPU instance sync — EEVEE already skips off-screen DRAWS); traffic/city/terrain/towers ≤ 0.3 s each.
+# MOTION-BLUR SAFE BY DESIGN: EEVEE pairs GN instances across the shutter by INDEX (see the firework fix), so a
+# per-frame cull would renumber instances whenever something crosses the frustum edge and smear them. The cull set
+# is therefore constant per SHOT: a per-point bitmask "shotmask" (bit k = inside shot k's frustum at ANY frame of the
+# shot, widened by CULL_MARGIN + CULL_PAD metres for shadows/motion) and a CONSTANT-keyed shot index (ShotCtl.x).
+# Fireworks get an exact per-shot ALIVE mask (stars dead or unborn for the whole shot are scale-0 anyway).
+# Each group carries a "ShotCull" modifier (show_render=False → the un-culled scene, for the pixel-diff proof).
+# ---------------------------------------------------------------------------------------------------------
+from mathutils import Euler  # noqa: E402
+CULL_MARGIN, CULL_PAD = 0.25, 20.0            # +25 % on each half-FOV tangent, + 20 m all round (+ object radius)
+SHOT_IDX = np.searchsorted(np.array(SHOT_T), T, side="right") - 1
+for k_ in range(len(SHOTS)):
+    assert np.array_equal(SHOT_IDX == k_, in_shots(k_)), "shot index disagrees with in_shots"
+SHOTCTL = bpy.data.objects.new("ShotCtl", None)
+SC.collection.objects.link(SHOTCTL)
+bake(SHOTCTL, "location", SHOT_IDX.astype(float), index=0, interp="CONSTANT")
+_RW = np.array([np.array(Euler(r_, "XYZ").to_matrix()) for r_ in rot_a])     # camera→world rotations
+_LOC = np.array(loc_a)
+_TX = 0.5 * CAM.data.sensor_width / np.array(lens_a)                         # sensor fit AUTO → horizontal (16:9)
+
+
+def shot_frustum_mask(P, rad):
+    """bit k set ⇔ point is inside shot k's widened frustum at ANY of its frames (and the next frame: shutter)"""
+    P = np.asarray(P, dtype=np.float64)
+    mask = np.zeros(len(P), np.int64)
+    for k_ in range(len(SHOTS)):
+        fi = np.nonzero(SHOT_IDX == k_)[0]
+        fi = np.unique(np.concatenate([fi, np.minimum(fi + 1, NF - 1)]))
+        vis = np.zeros(len(P), bool)
+        for i_ in fi:
+            pc = (P - _LOC[i_]) @ _RW[i_]
+            d = -pc[:, 2]
+            tx = _TX[i_] * (1.0 + CULL_MARGIN)
+            ty = tx * SC.render.resolution_y / SC.render.resolution_x
+            sl = CULL_PAD + rad
+            vis |= (d > -sl) & (np.abs(pc[:, 0]) <= d * tx + sl) & (np.abs(pc[:, 1]) <= d * ty + sl)
+        mask |= vis.astype(np.int64) << k_
+    return mask
+
+
+def set_point_attr(ob, name, vals):
+    me = ob.data
+    a_ = me.attributes.get(name) or me.attributes.new(name, "FLOAT", "POINT")
+    a_.data.foreach_set("value", np.asarray(vals, np.float32))
+    me.update()
+
+
+def shotcull_tree():
+    ng, nb, gi, go = gn_tree("ShotCull")
+    oi = nb.n("GeometryNodeObjectInfo", transform_space="ORIGINAL")
+    oi.inputs["Object"].default_value = SHOTCTL
+    sx, _, _ = nb.sep(oi.outputs["Location"])
+    bit = nb.m("MODULO", nb.m("FLOOR", nb.m("DIVIDE", nb.attr("shotmask"), nb.m("POWER", 2.0, nb.m("ROUND", sx)))), 2.0)
+    dl = nb.n("GeometryNodeDeleteGeometry", domain="INSTANCE")
+    nb.link(gi.outputs[0], dl.inputs["Geometry"])
+    nb.link(nb.cmp("LESS_THAN", bit, 0.5), dl.inputs["Selection"])
+    nb.link(dl.outputs[0], go.inputs[0])
+    return ng
+
+
+NG_CULL = shotcull_tree()
+
+# roof clutter was scattered inside GN (no point positions to mask) → freeze it into an explicit points object with
+# each instance's exact transform (asserted equal), instanced from the same kit objects
+SC.frame_set(1)
+_dg = bpy.context.evaluated_depsgraph_get()
+_kit_i = {o.name: i_ for i_, o in enumerate(kit)}
+_cl = [(_kit_i[di.object.original.name], np.array(di.matrix_world)) for di in _dg.object_instances
+       if di.is_instance and di.parent and di.parent.original.name == "RoofClutter"]
+_cm = np.array([m_ for _, m_ in _cl])
+_ck = np.array([k_ for k_, _ in _cl], float)
+_cs = np.linalg.norm(_cm[:, :3, 0], axis=1)
+_crz = np.arctan2(_cm[:, 1, 0], _cm[:, 0, 0])
+assert np.allclose(_cm[:, 2, :3], [0, 0, 1] * _cs[:, None], atol=1e-4), "clutter has non-yaw rotation"
+bpy.data.objects.remove(CLUT)
+CLUT = points_obj("RoofClutter", _cm[:, :3, 3], {"kit": _ck, "rz": _crz, "s": _cs}, coll=C_CITY)
+
+
+def clutter_pts_tree():
+    ng, nb, gi, go = gn_tree("RoofClutterPts")
+    jn = nb.n("GeometryNodeJoinGeometry")
+    for i_, ko in enumerate(kit):
+        oi = nb.n("GeometryNodeObjectInfo", transform_space="ORIGINAL")
+        oi.inputs["Object"].default_value = ko
+        nb.set(oi.inputs["As Instance"], True)
+        iop = nb.n("GeometryNodeInstanceOnPoints")
+        nb.link(gi.outputs[0], iop.inputs["Points"])
+        nb.link(oi.outputs["Geometry"], iop.inputs["Instance"])
+        nb.link(nb.cmp("EQUAL", nb.attr("kit"), float(i_)), iop.inputs["Selection"])
+        er = nb.n("FunctionNodeEulerToRotation")
+        nb.link(nb.xyz(0, 0, nb.attr("rz")), er.inputs[0])
+        nb.link(er.outputs[0], iop.inputs["Rotation"])
+        nb.link(nb.xyz(nb.attr("s"), nb.attr("s"), nb.attr("s")), iop.inputs["Scale"])
+        nb.link(iop.outputs[0], jn.inputs[0])
+    nb.link(jn.outputs[0], go.inputs[0])
+    return ng
+
+
+add_gn(CLUT, clutter_pts_tree())
+_dg = bpy.context.evaluated_depsgraph_get()
+_nmat = np.array([np.array(di.matrix_world)[:3, :] for di in _dg.object_instances
+                  if di.is_instance and di.parent and di.parent.original.name == "RoofClutter"])
+_omat = _cm[:, :3, :]
+_srt = lambda M_: M_[np.lexsort((np.round(M_[:, 2, 3], 2), np.round(M_[:, 1, 3], 2), np.round(M_[:, 0, 3], 2)))]
+assert len(_nmat) == len(_omat), "frozen clutter instance count differs"
+_err = float(np.abs(_srt(_nmat) - _srt(_omat)).max())
+print(f"[cull] clutter freeze check: {len(_nmat)} instances, max matrix difference {_err:.2e}")
+assert _err < 1e-3, "frozen clutter differs"
+print(f"[cull] roof clutter frozen: {len(_cl)} instances, transforms equal to the scattered ones")
+
+_groups = [(CLUT, 4.0), (SL, 2.0), (BEAC, 2.0), (FAR_W, 3.0), (FAR_C, 3.0), (HILL_L, 3.0)]
+for ob_, rad_ in _groups:
+    n_ = len(ob_.data.vertices)
+    co_ = np.empty(n_ * 3, np.float32)
+    ob_.data.vertices.foreach_get("co", co_)
+    m_ = shot_frustum_mask(co_.reshape(-1, 3), rad_)
+    set_point_attr(ob_, "shotmask", m_)
+    add_gn(ob_, NG_CULL, name="ShotCull")
+    keep = [int(((m_ >> k_) & 1).sum()) for k_ in range(len(SHOTS))]
+    print(f"[cull] {ob_.name}: {n_} pts, kept per shot {keep}")
+# fireworks: exact per-shot alive mask (± 2 frames)
+_fw_m = []
+for ob_, t_on, t_off in ((FWS, np.asarray(sparks["t0"]), np.asarray(sparks["t0"]) + np.asarray(sparks["life"])),
+                         (FWR, np.asarray(rockets["tl"]), np.asarray(rockets["ta"]))):
+    m_ = np.zeros(len(t_on), np.int64)
+    for k_ in range(len(SHOTS)):
+        a0, a1 = SHOT_T[k_] - 2.0 / FPS, SHOT_T[k_ + 1] + 2.0 / FPS
+        m_ |= ((t_on < a1) & (t_off > a0)).astype(np.int64) << k_
+    set_point_attr(ob_, "shotmask", m_)
+    add_gn(ob_, NG_CULL, name="ShotCull")
+    print(f"[cull] {ob_.name}: {len(t_on)} pts, alive per shot {[int(((m_ >> k_) & 1).sum()) for k_ in range(len(SHOTS))]}")
+SC.frame_set(1)
 # timeline markers at the cuts (for scrubbing)
 for t0_, _fn in SHOTS:
     SC.timeline_markers.new(f"cut {t0_:.2f}s", frame=fr(t0_))
