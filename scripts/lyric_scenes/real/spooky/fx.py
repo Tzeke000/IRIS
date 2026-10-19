@@ -55,10 +55,17 @@ def firefly_material():
     return m
 
 
+PETAL_NEAR = (6.0, 11.0)       # v3: petals fade to scale 0 between these camera distances (m) — no pink lens blobs
+
+
 def petals(coll, n=500, seed=5):
     rng = np.random.default_rng(seed)
-    lo = np.array([-13.0, -10.5, 0.0])                                # v2: near the camera (soft, big), fewer far dots
-    size = np.array([30.0, 34.0, 9.0])
+    # v2: denser toward the camera; v3 (Zeke 10-19: petals passing the lens were big blurry pink blobs): the box starts
+    # ~6 m in front of the lens and every petal is scaled to 0 inside PETAL_NEAR of the camera (first try 4.5–8 m: a
+    # 0.2 m petal at ~7 m was still a 45 px glowing disc at 1080p on f4651) — the instance COUNT
+    # never changes (gotcha 10), they shrink smoothly as the wind carries them close
+    lo = np.array([-13.0, -6.0, 0.0])
+    size = np.array([30.0, 30.0, 9.0])
     y = lo[1] + size[1] * rng.random(n) ** 1.6                       # denser near the camera
     base = np.stack([lo[0] + size[0] * rng.random(n), y, lo[2] + size[2] * rng.random(n)], 1)
     attrs = {"pid": rng.random(n), "pglow": rng.random(n),
@@ -76,9 +83,12 @@ def petals(coll, n=500, seed=5):
     pz = nb.m("ADD", pz, nb.m("MULTIPLY", 0.25, nb.m("SINE", nb.m("ADD", nb.m("MULTIPLY", T, 1.7), nb.m("MULTIPLY", wob, 2.0)))))
     (wx, fx), (wy, fy), (wz, fz) = [_wrap_axis(nb, a, float(lo[i]), float(size[i])) for i, a in enumerate((px, py, pz))]
     fade = nb.m("MULTIPLY", nb.m("MULTIPLY", _edge_fade(nb, fx), _edge_fade(nb, fy)), _edge_fade(nb, fz))
+    wp = nb.xyz(wx, wy, wz)
+    dcam = nb.v("DISTANCE", wp, tuple(float(c) for c in C.CAM_LOC))          # the camera is fixed (shake ≤ 5 cm)
+    fade = nb.m("MULTIPLY", fade, nb.mr(dcam, PETAL_NEAR[0], PETAL_NEAR[1], 0.0, 1.0, interp="SMOOTHSTEP"))
     sp = nb.n("GeometryNodeSetPosition")
     nb.link(gi.outputs[0], sp.inputs["Geometry"])
-    nb.link(nb.xyz(wx, wy, wz), sp.inputs["Position"])
+    nb.link(wp, sp.inputs["Position"])
     # template: a cupped 1 × 0.6 grid
     grid = nb.n("GeometryNodeMeshGrid")
     for k, v in (("Size X", 1.0), ("Size Y", 0.6), ("Vertices X", 5), ("Vertices Y", 3)):

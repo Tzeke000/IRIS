@@ -28,10 +28,12 @@
 #   VERIFY_ARGS="--ground Terrain --grounded Props --ignore HazeBox"   (verify_saved.py options, word-split)
 #   optional: STILLS_DIR MP4 GRAIN(5; 0=off) CRF(17) CHUNK(60) WORKERS(2) PCT(100) SPP(0=scene) LOCK OVERLAY_DIR
 #             PARTS(3) PART_MB(7.5) PART_W(960) MEM(render.sh MemoryMax) BLENDER SHEET_PY
+#             ANIM(1: chunks render as ONE animation render per run of missing frames — frames.py --anim; spooky v3
+#             measured 6.5 → 2.9 s/frame, pixels equal. ANIM=0 = the old one-still-render-per-frame loop)
 #             RENDER_FLAGS (default "--factory-startup": no user add-ons in render runs, deterministic + quieter; set ""
 #             if the scene needs an add-on at render time)  BUILD_FLAGS (e.g. --disable-autoexec)
 # Command-line env overrides win over scene.env for: PCT SPP CHUNK WORKERS LOCK FORCE GRAIN CRF MP4 STILLS_DIR
-#   STILL_AT CAM_PROPS PATCH MEM OUT_DIR FG — and are forwarded into the units with -E (units start in $HOME with a bare env).
+#   STILL_AT CAM_PROPS PATCH MEM OUT_DIR FG ANIM — and are forwarded into the units with -E (units start in $HOME with a bare env).
 # Every Blender launch runs inside a scripts/server/render.sh unit (iris-render.slice, MemoryMax, OOMScoreAdjust)
 # and under `flock $LOCK nice -n 15`.
 set -euo pipefail
@@ -41,10 +43,10 @@ LIBR="$(dirname "$SELF")"
 LIB="$(dirname "$LIBR")"
 REPO="$(cd "$LIB/../../.." && pwd)"
 RENDER_SH="$REPO/scripts/server/render.sh"
-OVERRIDABLE="PCT SPP CHUNK WORKERS LOCK FORCE GRAIN CRF MP4 STILLS_DIR STILL_AT CAM_PROPS PATCH MEM OUT_DIR FG"
+OVERRIDABLE="PCT SPP CHUNK WORKERS LOCK FORCE GRAIN CRF MP4 STILLS_DIR STILL_AT CAM_PROPS PATCH MEM OUT_DIR FG ANIM"
 
 die() { echo "[scene] $*" >&2; exit 2; }
-[[ $# -ge 2 ]] || { sed -n '2,36p' "$SELF"; exit 1; }
+[[ $# -ge 2 ]] || { sed -n '2,38p' "$SELF"; exit 1; }
 SCENE_ENV="$(readlink -f "$1")"; shift
 VERB=$1; shift
 [[ -f "$SCENE_ENV" ]] || die "no scene.env at $SCENE_ENV"
@@ -65,7 +67,7 @@ done
 BLENDER="${BLENDER:-$HOME/.local/bin/blender}"
 SHEET_PY="${SHEET_PY:-$HOME/venvs/iris-v100/bin/python}"
 FPS="${FPS:-30}"; CHUNK="${CHUNK:-60}"; WORKERS="${WORKERS:-2}"; PCT="${PCT:-100}"; SPP="${SPP:-0}"
-GRAIN="${GRAIN:-5}"; CRF="${CRF:-17}"; LOCK="${LOCK:-/tmp/iris_gpu_render.lock}"
+GRAIN="${GRAIN:-5}"; CRF="${CRF:-17}"; LOCK="${LOCK:-/tmp/iris_gpu_render.lock}"; ANIM="${ANIM:-1}"
 STILLS_DIR="${STILLS_DIR:-$OUT_DIR/stills}"; FRAMES_DIR="$OUT_DIR/frames"; MP4="${MP4:-$OUT_DIR/$NAME.mp4}"
 RENDER_FLAGS="${RENDER_FLAGS---factory-startup}"
 PARTS="${PARTS:-3}"; PART_MB="${PART_MB:-7.5}"; PART_W="${PART_W:-960}"
@@ -154,6 +156,7 @@ _chunks() {   # S E W IDX  — worker IDX of W takes chunks IDX, IDX+W, ...
     [[ "$(missing_count "$c" "$ce")" == 0 ]] && continue          # complete chunk: no Blender launch at all
     echo "[scene] $NAME frames $c..$ce $(date +%H:%M:%S)"
     local p=(); [[ -n "${PATCH:-}" ]] && p=(--patch "$PATCH")
+    [[ "$ANIM" == 1 ]] && p+=(--anim)
     # shellcheck disable=SC2086
     gpu_filtered "$BLENDER" -b $RENDER_FLAGS "$BLEND" --python-exit-code 1 --python "$LIBR/frames.py" -- --out "$FRAMES_DIR" \
       --start "$c" --end "$ce" --pct "$PCT" --samples "$SPP" --times "$OUT_DIR/frame_times.tsv" "${p[@]}" \
@@ -239,5 +242,5 @@ case "$VERB" in
   full) if [[ $# -lt 2 ]]; then need_nf; fi; launch "$NAME-full" detach _full "${1:-1}" "${2:-$NF}" ;;
   parts) "$LIBR/discord_parts.sh" "${1:-$MP4}" "$OUT_DIR/discord" "$PARTS" "$PART_MB" "$PART_W" ;;
   sheet) d=${1:-$STILLS_DIR}; "$SHEET_PY" -I "$LIB/qa/sheet.py" "$d/sheet.jpg" --dir "$d" --glob '*.png' ;;
-  *) sed -n '2,36p' "$SELF"; exit 1 ;;
+  *) sed -n '2,38p' "$SELF"; exit 1 ;;
 esac

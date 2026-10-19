@@ -41,12 +41,14 @@ def _resample(prof, n):
     return np.stack([np.interp(t, seg, p[:, 0]), np.interp(t, seg, p[:, 1])], 1)
 
 
-def ghost_mesh(name, trail=(0.0, 1.0, 0.1), n_wisps=5, seed=0, nt=64, nz=34, wisp_len=1.0, wisp_w=1.0):
-    """→ (verts, faces, face_material_index, point attrs dict)"""
+def ghost_mesh(name, trail=(0.0, 1.0, 0.1), n_wisps=5, seed=0, nt=64, nz=34, wisp_len=1.0, wisp_w=1.0, spread=1.3,
+               lift=(-0.15, 0.55), curl=0.30, alpha=1.0):
+    """→ (verts, faces, face_material_index, point attrs dict). spread = ± angle (rad) of the wisp roots around the back
+    of the hem, lift = range of the upward fan, curl = spiral radius (× length), alpha = wisp opacity (attr `wa`)"""
     rng = np.random.default_rng(seed)
     prof = _resample(PROFILE, nz)
     V, F, MI = [], [], []
-    A = {k: [] for k in ("h", "u", "part", "side", "wk")}
+    A = {k: [] for k in ("h", "u", "part", "side", "wk", "wa")}
     rest, perp = [], []
     tr = np.asarray(trail, float)
     tr = tr / np.linalg.norm(tr)
@@ -62,13 +64,13 @@ def ghost_mesh(name, trail=(0.0, 1.0, 0.1), n_wisps=5, seed=0, nt=64, nz=34, wis
             rr *= 1 + 0.05 * max(0.0, 0.7 - z) ** 1.3 * math.sin(9 * th + 0.8 * math.sin(3 * th))   # sheet folds
             x, y = rr * math.sin(th), -rr * math.cos(th)                   # th = 0 → front (−Y)
             V.append((x, y, zz))
-            for k, v in (("h", z), ("u", 0.0), ("part", 0.0), ("side", 0.0), ("wk", 0.0)):
+            for k, v in (("h", z), ("u", 0.0), ("part", 0.0), ("side", 0.0), ("wk", 0.0), ("wa", alpha)):
                 A[k].append(v)
             rest.append((x, y, zz))
             perp.append((0, 0, 1))
     top = len(V)
     V.append((0, 0, 1.0))
-    for k, v in (("h", 1.0), ("u", 0.0), ("part", 0.0), ("side", 0.0), ("wk", 0.0)):
+    for k, v in (("h", 1.0), ("u", 0.0), ("part", 0.0), ("side", 0.0), ("wk", 0.0), ("wa", alpha)):
         A[k].append(v)
     rest.append((0, 0, 1.0))
     perp.append((0, 0, 1))
@@ -84,13 +86,13 @@ def ghost_mesh(name, trail=(0.0, 1.0, 0.1), n_wisps=5, seed=0, nt=64, nz=34, wis
     back_th = math.atan2(trxy[0], -trxy[1])           # angle on the body whose outward normal = trail
     nu = 44
     for k in range(n_wisps):
-        th0 = back_th + rng.uniform(-1.3, 1.3)
+        th0 = back_th + rng.uniform(-spread, spread)
         z0 = rng.uniform(0.04, 0.32)
         r0 = np.interp(z0, prof[:, 1], prof[:, 0]) * 0.92
         b0 = np.array([r0 * math.sin(th0), -r0 * math.cos(th0), z0])
         out = np.array([math.sin(th0), -math.cos(th0), 0.0])
         d = 0.55 * tr + 0.45 * out
-        d[2] += rng.uniform(-0.15, 0.55)                               # v2: fan up and back, not one flat sheet
+        d[2] += rng.uniform(*lift)                                     # v2: fan up and back, not one flat sheet
         d /= np.linalg.norm(d)
         L = rng.uniform(0.75, 1.5) * wisp_len
         w0 = rng.uniform(0.07, 0.13) * wisp_w
@@ -105,7 +107,7 @@ def ghost_mesh(name, trail=(0.0, 1.0, 0.1), n_wisps=5, seed=0, nt=64, nz=34, wis
             u = j / (nu - 1)
             c = b0 + d * L * u
             psi = curl_ph + curl_n * u
-            amp = 0.30 * L * u ** 1.25
+            amp = curl * L * u ** 1.25
             c = c + amp * (side_dir * math.cos(psi) + np.array([0, 0, 1.0]) * math.sin(psi)) + np.array([0, 0, 0.22 * L * u * u])
             w = w0 * (1 - u) ** 0.65 * (1 + 0.35 * math.sin(math.pi * u)) + 0.006
             for s in (-1.0, 1.0):
@@ -116,6 +118,7 @@ def ghost_mesh(name, trail=(0.0, 1.0, 0.1), n_wisps=5, seed=0, nt=64, nz=34, wis
                 A["part"].append(1.0)
                 A["side"].append(s)
                 A["wk"].append(float(k))
+                A["wa"].append(alpha)
                 rest.append(tuple(p))
                 perp.append(tuple(side_dir))
         for j in range(nu - 1):
@@ -246,6 +249,7 @@ def materials():
                  scale=2.2, detail=3.0, rough=0.55)
     a = wb.m("MULTIPLY", a, wb.mr(sn.outputs["Fac"], 0.3, 0.6, 0.15, 1.0))
     col = wb.mix(u, (0.90, 0.50, 1.0), (0.50, 0.24, 1.0))
+    a = wb.m("MULTIPLY", a, wb.sattr("wa").outputs["Fac"])                   # v3: per-ghost wisp opacity (big ghost thinner)
     st = wb.m("MULTIPLY", wb.m("MULTIPLY", a, K2["ghost_glow"]), 1.25)       # v2: ADDITIVE glow (glowing smoke, not grey)
     sh = C.add_shader(wb, C.transparent(wb), C.emission(wb, col, st))
     wb.link(sh, wo.inputs["Surface"])
@@ -257,7 +261,10 @@ def materials():
 # v2: the big ghost sits on the ledge (no drift, big kick squash); the small ones are placed by SCREEN ANCHOR
 # (common.SMALL_GHOST_ANCHORS) and wander (drift m, rate Hz-equivalent on drift_t, lag s-equivalent along the tail).
 GHOSTS = [
-    dict(C.BIG_GHOST, wisps=10, wlen=1.75, wwid=2.0, light=450.0, bob=0.035, sway=0.03, speed=0.42, drag=0.35, wisp=0.13,
+    # v3 (Zeke 10-19: the big ghost's tail fan was "too heavy" — a big white streaky fan): 10 → 5 strands, ~0.6× the
+    # width, a narrower root arc and fan, less curl, 55 % opacity. Still waves on g_sway / the music clock.
+    dict(C.BIG_GHOST, wisps=5, wlen=1.55, wwid=1.15, wshape=dict(spread=0.75, lift=(-0.05, 0.35), curl=0.22, alpha=0.55),
+         light=450.0, bob=0.035, sway=0.03, speed=0.42, drag=0.35, wisp=0.13,
          squash=0.10, kickbob=0.04, drift=(0.0, 0.0, 0.0), drate=0.0, dlag=0.0),
     dict(name="Ghost_S1", yaw=55.0, trail=(-1, 0.3, 0.2), phase=1.7, wisps=5, wlen=1.7, light=0.0, bob=0.06, sway=0.05,
          speed=0.55, drag=0.4, wisp=0.17, squash=0.06, kickbob=0.05, drift=(1.4, 0.8, 0.6), drate=0.045, dlag=2.2),
@@ -287,13 +294,13 @@ def build(coll, R):
         c, s = math.cos(-yaw), math.sin(-yaw)
         tl = np.array([c * tw[0] - s * tw[1], s * tw[0] + c * tw[1], tw[2]])
         V, F, MI, A = ghost_mesh(g["name"], trail=tl, n_wisps=g["wisps"], seed=10 + k, wisp_len=g.get("wlen", 1.0),
-                                 wisp_w=g.get("wwid", 1.0))
+                                 wisp_w=g.get("wwid", 1.0), **g.get("wshape", {}))
         ob = X.mesh_obj(g["name"], V, F, coll=coll, smooth=True)
         me = ob.data
         me.materials.append(mb)
         me.materials.append(mw)
         me.polygons.foreach_set("material_index", np.asarray(MI, np.int32))
-        for nm in ("h", "u", "part", "side", "wk"):
+        for nm in ("h", "u", "part", "side", "wk", "wa"):
             me.attributes.new(nm, "FLOAT", "POINT").data.foreach_set("value", np.asarray(A[nm], np.float32))
         for nm in ("rest", "perp"):
             me.attributes.new(nm, "FLOAT_VECTOR", "POINT").data.foreach_set("vector", A[nm].ravel())

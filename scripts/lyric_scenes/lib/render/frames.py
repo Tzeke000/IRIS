@@ -8,6 +8,8 @@ Launched by lib/render/scene.sh (always inside a scripts/server/render.sh unit):
         [--cam-props JSON|FILE]      {"c_hall": {"exposure_offset": 0.3, "hide_collections": ["FX_haze"]}} — merged OVER the
                                      camera object's own custom props (exposure_offset, hide_collections, patch=JSON)
         [--hook FILE.py]             scene-only still setup: `def setup(scene, name) -> list[callable]` (undo callables)
+        [--anim]                     frames only: render each CONTIGUOUS run of missing frames as ONE animation render
+                                     (render.render(animation=True)) instead of one still render per frame
 
 * Frames → DIR/f_####.png (Blender frames, 1-based). Cams → DIR/<cam>.png (at --at, else the file's current frame).
 * ATOMIC: each image renders to DIR/.tmp_<name>.<pid>.png, is checked to be a complete PNG, then os.replace()d.
@@ -16,6 +18,12 @@ Launched by lib/render/scene.sh (always inside a scripts/server/render.sh unit):
 * Per-frame scene props if the build stored them (one value per frame, index = frame-1): vol_start, vol_end,
   vol_dist, vol_tile, spp (spp ignored when --samples is given — look-dev override).
 * Forces PNG output (the completeness check and the mux expect it).
+* --anim (spooky v3, 10-19 — MEASURED): a still render rebuilds the render depsgraph, re-evaluates every modifier/GN tree
+  and re-uploads every mesh to the GPU for EACH frame; an animation render keeps the depsgraph and only re-evaluates
+  what is time-dependent. Spooky v2, 15 consecutive frames: 6.5 s/frame (stills) → 2.9 s/frame (anim), pixels equal
+  (max 1–3/255, 0 px over 8/255). render.use_persistent_data gave nothing in either mode. Same atomic contract: Blender
+  writes DIR/.tmp_f_####.<pid>.png, a render_write handler checks + os.replace()s it; per-frame props are applied by
+  a frame_change_pre handler; any frame that did not land complete → exit 1.
 Prints 'TIME <name> <seconds>' per image and a final '[frames] rendered N, skipped M' line; exit 1 if anything failed.
 """
 import argparse
@@ -97,6 +105,75 @@ def render_one(bpy, sc, out_dir, name, times_file=None, vram=False):
     return dt
 
 
+def contiguous_runs(frames):
+    """[1,2,3,7,8,10] → [[1,2,3],[7,8],[10]] (sorted, de-duplicated) — one animation render per run"""
+    runs = []
+    for f in sorted(set(frames)):
+        if runs and f == runs[-1][-1] + 1:
+            runs[-1].append(f)
+        else:
+            runs.append([f])
+    return runs
+
+
+def render_anim(bpy, sc, out_dir, frames, prefix="f_", times_file=None, vram=False, override_samples=0):
+    """Render `frames` (sorted ints) as one animation render per contiguous run. Returns the number rendered."""
+    runs = contiguous_runs(frames)
+    r = sc.render
+    saved = dict(frame_start=sc.frame_start, frame_end=sc.frame_end, frame_step=sc.frame_step, filepath=r.filepath,
+                 use_overwrite=r.use_overwrite, use_placeholder=r.use_placeholder,
+                 use_file_extension=r.use_file_extension)
+    state = {"t": time.time(), "errors": []}
+    pid = os.getpid()
+
+    def on_frame(scene, *_):
+        per_frame_props(scene, scene.frame_current, override_samples)
+
+    def on_write(scene, *_):
+        f = scene.frame_current
+        name = f"{prefix}{f:04d}"
+        tmp = scene.render.frame_path(frame=f)
+        try:
+            if not pngcheck.is_complete_png(tmp):
+                raise RuntimeError(f"render of {name} did not produce a complete PNG ({tmp})")
+            os.replace(tmp, os.path.join(out_dir, name + ".png"))
+        except Exception as e:  # noqa: BLE001 — a handler exception does not fail the render: record it, fail after
+            state["errors"].append(str(e))
+            return
+        now = time.time()
+        dt, state["t"] = now - state["t"], now
+        print(f"TIME {name} {dt:.2f}", flush=True)
+        if vram:
+            vram_line(name)
+        if times_file:
+            with open(times_file, "a") as fh:
+                fh.write(f"{name}\t{dt:.2f}\n")
+
+    bpy.app.handlers.frame_change_pre.append(on_frame)
+    bpy.app.handlers.render_write.append(on_write)
+    try:
+        r.filepath = os.path.join(out_dir, f".tmp_{prefix}####.{pid}")
+        r.use_overwrite, r.use_placeholder, r.use_file_extension = True, False, True
+        sc.frame_step = 1
+        for run in runs:
+            for old in glob.glob(os.path.join(out_dir, f".tmp_{prefix}*.png")):    # leftovers of a killed run
+                fn = os.path.basename(old)
+                if any(fn.startswith(f".tmp_{prefix}{f:04d}.") for f in run):
+                    os.remove(old)
+            sc.frame_start, sc.frame_end = run[0], run[-1]
+            state["t"] = time.time()
+            bpy.ops.render.render(animation=True)
+    finally:
+        bpy.app.handlers.frame_change_pre.remove(on_frame)
+        bpy.app.handlers.render_write.remove(on_write)
+        for k, v in saved.items():
+            setattr(sc if k.startswith("frame_") else r, k, v)
+    bad = [f for f in frames if not pngcheck.is_complete_png(os.path.join(out_dir, f"{prefix}{f:04d}.png"))]
+    if state["errors"] or bad:
+        raise RuntimeError(f"[frames] anim render: {len(bad)} frame(s) not complete {bad[:10]}; errors {state['errors'][:3]}")
+    return len(frames)
+
+
 def load_hook(path):
     spec = importlib.util.spec_from_file_location("scene_render_hook", path)
     mod = importlib.util.module_from_spec(spec)
@@ -124,6 +201,7 @@ def main(argv):
     ap.add_argument("--patch", default="")
     ap.add_argument("--cam-props", default="")
     ap.add_argument("--hook", default="")
+    ap.add_argument("--anim", action="store_true")
     a = ap.parse_args(argv)
     sc = bpy.context.scene
     out = os.path.abspath(a.out)
@@ -170,6 +248,13 @@ def main(argv):
                 u()
     else:
         frames = parse_frames(a.frames) or list(range(a.start or sc.frame_start, (a.end or sc.frame_end) + 1))
+        if a.anim:
+            todo = sorted({f for f in frames
+                           if a.overwrite or not pngcheck.is_complete_png(os.path.join(out, f"{a.prefix}{f:04d}.png"))})
+            skipped = len(set(frames)) - len(todo)
+            if todo:
+                done = render_anim(bpy, sc, out, todo, a.prefix, a.times or None, a.vram, a.samples)
+            frames = []
         for f in frames:
             name = f"{a.prefix}{f:04d}"
             if not a.overwrite and pngcheck.is_complete_png(os.path.join(out, name + ".png")):

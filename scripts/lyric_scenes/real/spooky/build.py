@@ -194,6 +194,21 @@ def main():
         for o, n in ((pet, len(pet.data.vertices)), (ff, len(ff.data.vertices)), (ss, len(ss.data.vertices))):
             vals = {counts[f][o.name] for f in counts}
             R.assert_(vals == {n}, f"count_{o.name}", f"{o.name} instances per frame {sorted(vals)} == {n} (gotcha 10)")
+        # -- v3: no petal near the lens (the pink blur blobs): every instance closer than PETAL_NEAR[0] is scaled to 0
+        vis_min, n_close = 1e9, 0
+        for f in (961, 1921, 2400, 3841, 4897, 5761, 7400):
+            sc.frame_set(f)
+            d = bpy.context.evaluated_depsgraph_get()
+            for i in d.object_instances:
+                if i.is_instance and i.parent and i.parent.original == pet:
+                    m = i.matrix_world
+                    dist = float(np.linalg.norm(np.asarray(m.translation) - C.CAM_LOC))
+                    n_close += dist < fx.PETAL_NEAR[1]
+                    if m.to_scale().length > 1e-6:
+                        vis_min = min(vis_min, dist)
+        R.add("petals_near_cam", dict(inside_fade_zone=n_close, nearest_visible_m=round(vis_min, 3), zone_m=fx.PETAL_NEAR))
+        R.assert_(vis_min >= fx.PETAL_NEAR[0] - 1e-3, "petals_near_cam",
+                  f"nearest visible petal {vis_min:.2f} m from the lens over 7 frames ({n_close} inside the fade zone)")
         # -- shooting stars: fire on the hits only (scale 0 otherwise) → check one is live right after a hit
         tf = ss["fire_times"]
         R.assert_(len(tf) >= 6 and all(0 < t < S.duration - 2 for t in tf), "stars_on_hits", f"fire at {tf}")
