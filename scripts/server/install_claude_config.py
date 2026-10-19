@@ -40,7 +40,9 @@ def main() -> int:
         return 2
     mcp = {"mcpServers": {"iris": {"type": "stdio", "command": PY,
                                    "args": [str(ROOT / "iris_runtime.py")],
-                                   "env": {"AVA_STT_STREAMING": "1"}}}}
+                                   # MALLOC_ARENA_MAX=4 (Zeke OK 10-19): ~600 threads made ~300 glibc
+                                   # arenas whose freed space fragmented (in_use flat, RSS creeping).
+                                   "env": {"AVA_STT_STREAMING": "1", "MALLOC_ARENA_MAX": "4"}}}}
     write_json(ROOT / ".mcp.json", mcp)
     subprocess.run(["git", "-C", str(ROOT), "update-index", "--skip-worktree", ".mcp.json"], check=False)
     print("  .mcp.json marked skip-worktree (never commit the Linux copy over the tower's)")
