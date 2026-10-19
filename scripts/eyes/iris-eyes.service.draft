@@ -1,0 +1,30 @@
+# DRAFT — NOT INSTALLED. ~/.config/systemd/user/iris-eyes.service for the eyes process
+# (docs/eyes_process_design.md §4.5). Deliberately named .draft and kept out of
+# scripts/server/systemd/ so install_supervision.sh can never pick it up before the
+# cut-over session. Needs: iris_eyes.py --camera, scripts/eyes/flag_on.py, sd_notify.
+[Unit]
+Description=Iris eyes (camera capture + vision workers on the V100)
+After=iris-mouth.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+WorkingDirectory=%h/IRIS
+# Measured 2026-10-19: arena cap removes the MediaPipe-driven free-held growth (§9.3).
+Environment=MALLOC_ARENA_MAX=2
+Environment=OMP_NUM_THREADS=2
+# Runs only when state/eyes_process.json says {"enabled": true} — the ONE flag both sides read.
+ExecCondition=%h/venvs/iris-v100/bin/python %h/IRIS/scripts/eyes/flag_on.py
+ExecStart=%h/venvs/iris-v100/bin/python %h/IRIS/scripts/eyes/iris_eyes.py --camera
+# WATCHDOG=1 only while frames advance or the eyes are parked on purpose: a hung
+# VIDIOC_DQBUF gets the eyes (not me) killed and restarted.
+WatchdogSec=20
+Restart=always
+RestartSec=5
+TimeoutStartSec=90
+# The eyes are the restartable part: capped, and NOT in iris-oom-protect's -1000 list.
+MemoryHigh=3G
+MemoryMax=4G
+
+[Install]
+WantedBy=default.target
