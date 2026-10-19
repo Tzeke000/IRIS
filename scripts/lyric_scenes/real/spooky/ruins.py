@@ -17,7 +17,7 @@ def haze_wrap(nb, shader, strength=0.7, near=80.0, far=1400.0):
     """aerial perspective inside the material: mix toward the violet haze by camera distance (clamped, no exp)"""
     cd = nb.n("ShaderNodeCameraData")
     f = nb.m("MULTIPLY", nb.m("POWER", nb.mr(cd.outputs["View Distance"], near, far), 0.8), strength)
-    return C.mix_shader(nb, f, shader, C.emission(nb, (0.22, 0.11, 0.42), 0.6))
+    return C.mix_shader(nb, f, shader, C.emission(nb, C.HAZE_FAR, 0.8))
 
 
 def stylise(mat, tint_dark=C.STONE_DARK, tint_lit=C.STONE_LIT, rim=0.35, haze=0.85):
@@ -46,7 +46,7 @@ def stylise(mat, tint_dark=C.STONE_DARK, tint_lit=C.STONE_LIT, rim=0.35, haze=0.
         nt.links.remove(l)
     bsdf.inputs["Emission Strength"].default_value = 0.0
     r = nb.m("MULTIPLY", nb.m("POWER", C.facing(nb, 0.3), 3.0), rim)
-    sh = C.add_shader(nb, bsdf.outputs[0], C.emission(nb, (0.5, 0.25, 0.9), r))
+    sh = C.add_shader(nb, bsdf.outputs[0], C.emission(nb, C.RIM_VIOLET, r))
     sh = haze_wrap(nb, sh, haze)
     for l in list(out.inputs["Surface"].links):
         nt.links.remove(l)
@@ -70,7 +70,7 @@ def proc_stone(name="LedgeStone"):
     nb.link(nb.m("ADD", nz.outputs["Fac"], cracks), bump.inputs["Height"])
     nb.link(bump.outputs["Normal"], b.inputs["Normal"])
     r = nb.m("MULTIPLY", nb.m("POWER", C.facing(nb, 0.3), 3.0), 0.3)
-    sh = haze_wrap(nb, C.add_shader(nb, b.outputs[0], C.emission(nb, (0.5, 0.25, 0.9), r)))
+    sh = haze_wrap(nb, C.add_shader(nb, b.outputs[0], C.emission(nb, C.RIM_VIOLET, r)))
     nb.link(sh, out.inputs["Surface"])
     return m
 
@@ -148,11 +148,12 @@ def build(coll, R):
     out["arch_a"] = _place(arch_me[part], "Ruin_ArchA", (2.0, 46.0, -0.6), rot_z=4, coll=coll, scale=1.5)
     out["arch_b"] = _place(arch_me[dest], "Ruin_ArchB", (14.0, 58.0, -0.8), rot_z=-8, coll=coll, scale=1.6)
     out["arch_c"] = _place(arch_me[full], "Ruin_ArchC", (-12.0, 52.0, -0.6), rot_z=12, coll=coll, scale=1.7)
-    out["arch_d"] = _place(arch_me[part], "Ruin_ArchD", (30.0, 70.0, -0.8), rot_z=-20, coll=coll, scale=1.8)
+    out["arch_d"] = _place(arch_me[part], "Ruin_ArchD", (-1.0, 70.0, -0.8), rot_z=-10, coll=coll, scale=1.8)
     # right foreground: the brick arch (aqueduct-like pair)
     br, o2 = _kit(A + "/sf_ancient_arch/model.glb", "ArchBrick", 8.5, tmp)
-    out["brick_a"] = _place(br, "Ruin_BrickA", (17.0, 15.0, -0.8), rot_z=-14, coll=coll)
-    out["brick_b"] = _place(br, "Ruin_BrickB", (26.0, 30.0, -0.8), rot_z=-22, coll=coll, scale=1.15)
+    # v2: the cover's right arch sits low at the frame's right edge (ndc ≈ 0.86–1.0); the castle window stays clear
+    out["brick_a"] = _place(br, "Ruin_BrickA", (23.5, 20.7, -0.8), rot_z=58, coll=coll, scale=0.78)     # side-on to the camera
+    out["brick_b"] = _place(br, "Ruin_BrickB", (37.0, 31.0, -0.8), rot_z=50, coll=coll, scale=0.95)
     out["brick_c"] = _place(br, "Ruin_BrickC", (5.5, 24.0, -1.2), rot_z=6, coll=coll, scale=0.95)      # mid-ground bridge
     out["brick_d"] = _place(br, "Ruin_BrickD", (-1.5, 30.0, -2.4), rot_z=-4, coll=coll, scale=0.9, tilt=(0, 4))
     # overgrown arch remnant close to the ledge, in the shallows
@@ -183,8 +184,8 @@ def build(coll, R):
                                           (-72, 220, 12, 45, dmg)]):
         out[f"fort_{i}"] = _place(tw[k], f"Ruin_Fort{i}", (x, y, hill_z(x, y) - 1.0), rot_z=rz, coll=coll, scale=s)
     # the castle on the cliff (centimetre model → metres via normalize)
-    cm, o5 = _kit(A + "/sf_fantasy_castle/model.glb", "Castle", 60.0, tmp,
-                  stylise_kw=dict(tint_dark=(0.015, 0.01, 0.035), tint_lit=(0.14, 0.08, 0.26), haze=0.9))
+    cm, o5 = _kit(A + "/sf_fantasy_castle/model.glb", "Castle", 70.0, tmp,          # v2: taller + less hazed (cover)
+                  stylise_kw=dict(tint_dark=(0.006, 0.007, 0.03), tint_lit=(0.05, 0.05, 0.20), haze=0.45))
     cx, cy, _ = C.CASTLE_POS
     out["castle"] = _place(cm, "Castle", (cx + 4, cy + 4, C.CASTLE_CLIFF_H - 7.0), rot_z=200, coll=coll)
     _remove(list(tmp.objects))
@@ -217,38 +218,76 @@ def hill_mesh(coll):
 
 
 def ledge(coll):
-    """broken stone wall: rows of jittered blocks, a gap (old doorway) and a ragged top; the ghost sits at x≈-2.2"""
+    """broken stone wall the big ghost sits on (x≈-2.2). v2: less regular — every block draws its own height, width,
+    depth, setback, tilt and wear; courses wander (each block sits on the skyline of the blocks below it, not on a
+    straight row line); some blocks are missing (a recessed core fills the hole), some slump, the top is ragged and
+    stepped. A doorway gap + lintel and a broken pillar stump stay."""
+    from mathutils import Euler
     rng = np.random.default_rng(7)
     mb = X.MB()
     x0, x1 = -9.0, 1.6
     y0, depth = 0.2, 1.5
-    z = -0.6
-    row = 0
-    while z < C.LEDGE_TOP - 1e-3:
-        h = min(0.5 + rng.uniform(-0.08, 0.1), C.LEDGE_TOP - z)
-        x = x0 - rng.uniform(0, 0.5)
-        while x < x1:
-            w = rng.uniform(0.6, 1.4)
-            xe = min(x + w, x1 + (0.0 if row % 2 else 0.25))
-            door = (-6.4 < (x + xe) / 2 < -5.0) and z < 1.9                 # old doorway
-            top_rows = z > C.LEDGE_TOP - 1.0
-            ragged = top_rows and ((x + xe) / 2 > 0.4 or (x + xe) / 2 < -7.2) and rng.random() < 0.6
-            if not door and not ragged:
-                jit = rng.uniform(-0.07, 0.07, 3)
-                from mathutils import Euler
-                rot = Euler((rng.uniform(-0.04, 0.04), rng.uniform(-0.05, 0.05), rng.uniform(-0.05, 0.05))).to_matrix()
-                mb.box(((x + xe) / 2 + jit[0], y0 + depth / 2 + jit[1], z + h / 2),
-                       (xe - x - 0.05 - rng.uniform(0, 0.06), depth + jit[2], h - 0.05 - rng.uniform(0, 0.05)), rot)
-            x = xe
-        z += h
-        row += 1
-    # lintel over the doorway + a broken pillar stump at the right end
-    mb.box((-5.7, y0 + depth / 2, 2.05), (1.9, depth, 0.3))
+    zb = -0.6
+    res = 0.05
+    xs = np.arange(x0 - 0.6, x1 + 0.6, res)
+    sky = np.full(len(xs), zb)                                     # current top of the wall along x
+    # target top per column: full height in the middle (the ghost's seat), ragged stepped ends
+    target = np.full(len(xs), C.LEDGE_TOP)
+    step = np.repeat(rng.uniform(0.25, 1.1, len(xs) // 12 + 1), 12)[:len(xs)]
+    ends = (xs < -7.2) | (xs > 0.4)
+    target[ends] -= step[ends]
+    top_at = lambda x: float(target[min(len(xs) - 1, max(0, int(np.searchsorted(xs, x))))])
+    door = lambda x, z: -6.4 < x < -5.0 and z < 1.9
+    for _ in range(4000):
+        if (sky >= target - 0.02).all():
+            break
+        i = int(np.argmin(sky - target + rng.uniform(0, 0.08, len(sky))))   # the column furthest below its top
+        x = xs[i]
+        w = float(np.clip(rng.lognormal(math.log(0.85), 0.35), 0.35, 1.7))
+        a = max(x0 - 0.5, x - rng.uniform(0.05, 0.4) * w)
+        b = min(x1 + (0.25 if rng.random() < 0.5 else 0.0), a + w)
+        if b - a < 0.2:
+            b = a + 0.2
+        ia, ib = np.searchsorted(xs, a), np.searchsorted(xs, b)
+        base = float(sky[ia:ib].max()) if ib > ia else float(sky[i])
+        h = float(np.clip(rng.normal(0.46, 0.09), 0.26, 0.7))
+        lim = top_at(0.5 * (a + b))
+        h = min(h, max(lim - base, 0.0))
+        if h <= 0.03:
+            sky[ia:ib] = np.maximum(sky[ia:ib], target[ia:ib])        # this span is done
+            continue
+        sky[ia:ib] = base + h
+        if h < 0.12 or door(0.5 * (a + b), base):
+            continue
+        if rng.random() < 0.05 and base > 0.3:                    # a missing block: the core shows through
+            continue
+        slump = rng.uniform(-0.04, 0.04) if rng.random() > 0.12 else rng.uniform(-0.15, 0.15)
+        rot = Euler((rng.uniform(-0.05, 0.05), rng.uniform(-0.07, 0.07) + slump * 0.6, rng.uniform(-0.06, 0.06))).to_matrix()
+        dz = rng.uniform(-0.03, 0.03)
+        set_back = rng.uniform(-0.12, 0.10)                         # some stick out, some sit back
+        dep = 0.55 + rng.uniform(-0.12, 0.2)
+        gap = rng.uniform(0.03, 0.09)
+        mb.box((0.5 * (a + b), y0 + set_back + dep / 2, base + h / 2 + dz),
+               (b - a - gap, dep, h - rng.uniform(0.03, 0.08)), rot)
+    # recessed core behind the front blocks (fills missing-block holes), its top follows the ragged skyline
+    for k in range(0, len(xs) - 8, 8):
+        zt = float(sky[k:k + 8].min()) - 0.08
+        if zt > zb + 0.2 and not (-6.4 < xs[k] + 0.2 < -5.0):
+            mb.box((xs[k] + 0.2, y0 + 0.55 + (depth - 0.55) / 2, (zb + zt) / 2), (0.42, depth - 0.6, zt - zb))
+    # lintel over the doorway (cracked in two, one half dropped) + a broken pillar stump at the right end
+    mb.box((-6.15, y0 + depth / 2, 2.05), (0.95, depth, 0.3), Euler((0, 0.04, 0.02)).to_matrix())
+    mb.box((-5.2, y0 + depth / 2, 1.98), (0.95, depth, 0.3), Euler((0, -0.09, -0.03)).to_matrix())
     for k in range(3):
-        mb.box((2.6, 1.0, -0.4 + 0.5 * k + 0.25), (0.8 - 0.05 * k, 0.8 - 0.05 * k, 0.48))
+        mb.box((2.6 + rng.uniform(-0.05, 0.05), 1.0, -0.4 + 0.5 * k + 0.25),
+               (0.8 - 0.07 * k, 0.8 - 0.06 * k, 0.48), Euler((0, 0, rng.uniform(-0.15, 0.15))).to_matrix())
+    # fallen blocks at the foot
+    for k in range(7):
+        mb.box((rng.uniform(x0, x1), y0 - rng.uniform(0.3, 1.4), -0.45 + rng.uniform(0, 0.2)),
+               (rng.uniform(0.35, 0.8), rng.uniform(0.3, 0.6), rng.uniform(0.25, 0.45)),
+               Euler(tuple(rng.uniform(-0.4, 0.4, 3))).to_matrix())
     ob = mb.obj("Ledge", mat=proc_stone(), coll=coll)
     bev = ob.modifiers.new("Bevel", "BEVEL")
-    bev.width = 0.05
+    bev.width = 0.045
     bev.segments = 2
     return ob
 
@@ -325,14 +364,16 @@ def add_ivy(objs, R, density=22.0, dense=("Ledge",), dense_k=2.6):
 
 # ---------------------------------------------------------------- foreground foliage (Quaternius CC0)
 
-FOLIAGE = [  # (file, name, height m, [(x, y, z, rot°, scale)])
-    ("Fern_1", "Fern", 1.1, [(-4.2, -5.6, 0.0, 20, 1.3), (-6.5, -3.8, 0.2, 140, 1.6), (-2.6, -6.6, -0.2, 75, 1.0),
-                             (-8.8, -5.0, 0.0, 210, 1.8), (1.2, -6.4, -0.3, -30, 0.9)]),
-    ("Plant_7_Big", "Plant7", 0.5, [(-5.5, -6.8, -0.1, 0, 1.3), (-9.8, -7.5, 0.0, 90, 1.5), (-1.0, -7.6, -0.2, 200, 1.0)]),
-    ("Bush_Common", "Bush", 1.8, [(-11.0, -2.0, 0.2, 30, 1.6), (-7.6, 0.0, 0.4, 110, 1.2), (-12.5, 4.0, 0.3, 250, 1.8),
-                                  (-4.6, -4.4, 0.3, 75, 1.5), (-6.4, -2.6, 0.4, 160, 1.8), (2.4, -4.2, -0.2, 300, 1.2)]),
-    ("Plant_1_Big", "Plant1", 1.3, [(-3.4, -4.8, 0.1, 160, 1.2), (-0.5, -5.4, -0.2, 20, 0.9)]),
-    ("TwistedTree_3", "TwistTree", 9.0, [(-16.5, 1.5, 0.3, 40, 1.0)]),
+FOLIAGE = [  # (file, name, height m, [(x, y, z, rot°, scale)]) — v2: on the near bank (bottom-left) + the ledge foot;
+    # nothing tall between the camera and the ledge face (v1's bushes there walled it off from the new camera)
+    ("Fern_1", "Fern", 1.1, [(-4.2, -6.4, 0.2, 20, 1.2), (-6.6, -5.6, 0.3, 140, 1.5), (-2.6, -7.4, 0.1, 75, 1.0),
+                             (-8.4, -7.0, 0.1, 210, 1.6), (-1.2, -6.2, 0.0, -30, 0.8), (-6.8, 0.0, 0.5, 60, 1.0),
+                             (0.6, 0.0, 0.3, 200, 0.8)]),
+    ("Plant_7_Big", "Plant7", 0.5, [(-5.5, -7.6, 0.2, 0, 1.3), (-8.8, -8.4, 0.1, 90, 1.5), (-3.0, -8.4, 0.0, 200, 1.0)]),
+    ("Bush_Common", "Bush", 1.8, [(-11.0, -2.0, 0.6, 30, 1.6), (-12.5, 4.0, 0.6, 250, 1.8), (-9.4, -0.6, 0.6, 110, 1.0),
+                                  (-7.0, -7.4, 0.2, 75, 0.85)]),
+    ("Plant_1_Big", "Plant1", 1.3, [(-3.6, -6.0, 0.2, 160, 0.9), (-5.2, -0.4, 0.4, 20, 0.8)]),
+    ("TwistedTree_3", "TwistTree", 9.0, [(-16.5, 1.5, 0.6, 40, 1.0)]),
 ]
 
 

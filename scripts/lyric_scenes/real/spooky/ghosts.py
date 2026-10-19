@@ -7,7 +7,14 @@ Mesh (local units, height 1, face toward −Y, built per ghost so its trail dire
   body  : lathe of a dome→skirt profile with a scalloped hem. attrs h (0 hem → 1 crown), part 0, rest (eyes in the shader)
   wisps : K ribbons from the back of the hem, streaming along `trail`, tapering. attrs u (0 root → 1 tip), part 1,
           side (−1..1 across), wk (ribbon index), perp (wave direction)
-Motion (GhostMotion tree, per-ghost modifier inputs Phase / Bob / Sway / Speed / Trail / Drag / Wisp):
+Motion (GhostMotion tree, per-ghost modifier inputs Phase / Bob / Sway / Speed / Trail / Drag / Wisp / Squash / KickBob /
+Drift / DriftRate / DriftLag; the music arrives through CTRL_GN — v2 "live picture"):
+  clock      every periodic term runs on CTRL_GN.g_clock (∫ rate: ~1.8× in the drops) instead of Scene Time
+  squash     on each kick (CTRL_GN.g_kick, a damped spring): crown drops, skirt widens (z −sq·h, xy +sq/2·r), anchored at
+             the hem; the hem uses g_kick_late (3 frames later) → follow-through. KickBob sinks the whole body a little
+  energy     sway / hem ripple / wisp waves × CTRL_GN.g_sway (bigger in the drops)
+  drift      small ghosts wander a Lissajous loop on CTRL_GN.drift_t; wisp point u samples it at drift_t − DriftLag·u,
+             so the tail follows the path the body flew (analytic, no history buffer)
   bob        dz = Bob·sin(ωt + φ − 1.2·lag)             lag = 1 − h → the crown leads, the hem follows (follow-through,
                                                          and squash/stretch falls out of the phase difference)
   sway       lateral, slower, amplitude grows toward the hem
@@ -75,7 +82,7 @@ def ghost_mesh(name, trail=(0.0, 1.0, 0.1), n_wisps=5, seed=0, nt=64, nz=34, wis
         MI.append(0)
     # wisps: from the back half of the hem (where the trail points), streaming along the trail
     back_th = math.atan2(trxy[0], -trxy[1])           # angle on the body whose outward normal = trail
-    nu = 28
+    nu = 44
     for k in range(n_wisps):
         th0 = back_th + rng.uniform(-1.3, 1.3)
         z0 = rng.uniform(0.04, 0.32)
@@ -83,21 +90,24 @@ def ghost_mesh(name, trail=(0.0, 1.0, 0.1), n_wisps=5, seed=0, nt=64, nz=34, wis
         b0 = np.array([r0 * math.sin(th0), -r0 * math.cos(th0), z0])
         out = np.array([math.sin(th0), -math.cos(th0), 0.0])
         d = 0.55 * tr + 0.45 * out
-        d[2] += rng.uniform(-0.05, 0.25)
+        d[2] += rng.uniform(-0.15, 0.55)                               # v2: fan up and back, not one flat sheet
         d /= np.linalg.norm(d)
-        L = rng.uniform(0.9, 1.6) * wisp_len
+        L = rng.uniform(0.75, 1.5) * wisp_len
         w0 = rng.uniform(0.07, 0.13) * wisp_w
         side_dir = np.cross(d, [0, 0, 1.0])
         side_dir /= np.linalg.norm(side_dir)
         ang = rng.uniform(0.2, 1.2)
         wdir = side_dir * math.cos(ang) + np.array([0, 0, 1.0]) * math.sin(ang)
         curl_ph = rng.uniform(0, 6.28)
+        curl_n = rng.uniform(2.2, 3.6) * (1 if k % 2 else -1)      # v2: each wisp spirals (radians over its length)
         base = len(V)
         for j in range(nu):
             u = j / (nu - 1)
             c = b0 + d * L * u
-            c = c + side_dir * 0.18 * u * math.sin(2.4 * math.pi * u + curl_ph) + np.array([0, 0, 0.10 * math.sin(math.pi * u) * (1 if k % 2 else -0.6)])
-            w = w0 * (1 - u) ** 0.8 + 0.008
+            psi = curl_ph + curl_n * u
+            amp = 0.30 * L * u ** 1.25
+            c = c + amp * (side_dir * math.cos(psi) + np.array([0, 0, 1.0]) * math.sin(psi)) + np.array([0, 0, 0.22 * L * u * u])
+            w = w0 * (1 - u) ** 0.65 * (1 + 0.35 * math.sin(math.pi * u)) + 0.006
             for s in (-1.0, 1.0):
                 p = c + wdir * w * s
                 V.append(tuple(p))
@@ -118,20 +128,26 @@ def ghost_mesh(name, trail=(0.0, 1.0, 0.1), n_wisps=5, seed=0, nt=64, nz=34, wis
 
 
 def motion_tree():
-    """GhostMotion: one tree shared by every ghost; per-ghost values are modifier inputs."""
+    """GhostMotion: one tree shared by every ghost; per-ghost values are modifier inputs, music via CTRL_GN."""
     ng, nb, gi, go = X.gn_tree("GhostMotion", inputs=[("Phase", "NodeSocketFloat"), ("Bob", "NodeSocketFloat"),
                                                       ("Sway", "NodeSocketFloat"), ("Speed", "NodeSocketFloat"),
                                                       ("Trail", "NodeSocketVector"), ("Drag", "NodeSocketFloat"),
-                                                      ("Wisp", "NodeSocketFloat")])
-    T = nb.n("GeometryNodeInputSceneTime").outputs["Seconds"]
+                                                      ("Wisp", "NodeSocketFloat"), ("Squash", "NodeSocketFloat"),
+                                                      ("KickBob", "NodeSocketFloat"), ("Drift", "NodeSocketVector"),
+                                                      ("DriftRate", "NodeSocketFloat"), ("DriftLag", "NodeSocketFloat")])
+    K = C.ctrl_gn(nb)
+    clk = K["g_clock"]
+    en = K["g_sway"]
     ph, bob, sway, spd = gi.outputs["Phase"], gi.outputs["Bob"], gi.outputs["Sway"], gi.outputs["Speed"]
     trail, drag, wisp = gi.outputs["Trail"], gi.outputs["Drag"], gi.outputs["Wisp"]
-    wt = nb.m("MULTIPLY", nb.m("MULTIPLY", T, spd), 2 * math.pi)            # ω t
+    sway = nb.m("MULTIPLY", sway, en)
+    wisp = nb.m("MULTIPLY", wisp, nb.m("ADD", 0.4, nb.m("MULTIPLY", en, 0.6)))
+    wt = nb.m("MULTIPLY", nb.m("MULTIPLY", clk, spd), 2 * math.pi)          # ω t on the music clock
     h, u, part = nb.attr("h"), nb.attr("u"), nb.attr("part")
     wk = nb.attr("wk")
     perp = nb.attr("perp", "FLOAT_VECTOR")
     rest = nb.attr("rest", "FLOAT_VECTOR")
-    rx, ry, _ = nb.sep(rest)
+    rx, ry, rz = nb.sep(rest)
     lag = nb.m("SUBTRACT", 1.0, h)
     body = nb.m("SUBTRACT", 1.0, part)
     # -- shared: bob with lag (wisps add a further delay along u)
@@ -142,24 +158,42 @@ def motion_tree():
     sarg = nb.m("SUBTRACT", nb.m("ADD", nb.m("MULTIPLY", wt, 0.5), nb.m("MULTIPLY", ph, 1.3)), nb.m("MULTIPLY", delay, 1.3))
     dx = nb.m("MULTIPLY", nb.m("MULTIPLY", sway, nb.m("SINE", sarg)), grow)
     dy = nb.m("MULTIPLY", nb.m("MULTIPLY", nb.m("MULTIPLY", sway, 0.4), nb.m("COSINE", sarg)), grow)
+    # -- kick squash (+ hem follow-through) and a small sink
+    kl = nb.m("MINIMUM", nb.m("ADD", lag, nb.m("MULTIPLY", u, 2.0)), 1.0)    # 0 crown → 1 hem / wisps
+    kk = nb.mix(kl, K["g_kick"], K["g_kick_late"], dtype="FLOAT")
+    sq = nb.m("MULTIPLY", gi.outputs["Squash"], kk)
+    half = nb.m("MULTIPLY", sq, 0.5)
+    off_sq = nb.xyz(nb.m("MULTIPLY", rx, half), nb.m("MULTIPLY", ry, half),
+                    nb.m("SUBTRACT", nb.m("MULTIPLY", nb.m("MULTIPLY", rz, sq), -1.0), nb.m("MULTIPLY", gi.outputs["KickBob"], kk)))
     # -- body: hem ripple (radial) + drag along the trail on the back of the skirt
     th = nb.m("ARCTAN2", rx, nb.m("MULTIPLY", ry, -1.0))
     radial = nb.v("NORMALIZE", nb.xyz(rx, ry, 0.0))
     lag3 = nb.m("POWER", lag, 3.0)
-    rip = nb.m("MULTIPLY", nb.m("MULTIPLY", lag3, 0.035),
+    rip = nb.m("MULTIPLY", nb.m("MULTIPLY", nb.m("MULTIPLY", lag3, 0.035), en),
                nb.m("SINE", nb.m("ADD", nb.m("SUBTRACT", nb.m("MULTIPLY", th, 6.0), nb.m("MULTIPLY", wt, 2.2)), ph)))
     back = nb.m("MAXIMUM", nb.v("DOT_PRODUCT", radial, nb.v("NORMALIZE", trail)), 0.0)
     flutter = nb.m("ADD", 1.0, nb.m("MULTIPLY", 0.2, nb.m("SINE", nb.m("SUBTRACT", nb.m("MULTIPLY", wt, 0.7), nb.m("MULTIPLY", lag, 3.0)))))
     dr = nb.m("MULTIPLY", nb.m("MULTIPLY", nb.m("MULTIPLY", lag, lag), back), nb.m("MULTIPLY", drag, flutter))
     off_body = nb.v("ADD", nb.v("SCALE", radial, rip), nb.v("SCALE", nb.v("NORMALIZE", trail), dr))
-    # -- wisps: travelling waves (vertical + sideways), amplitude grows toward the tip
+    # -- wisps: travelling waves (vertical + sideways), amplitude grows toward the tip; a third, slower curl wave
     u13 = nb.m("POWER", u, 1.3)
-    a1 = nb.m("SUBTRACT", nb.m("MULTIPLY", u, 2 * math.pi * 1.2), nb.m("MULTIPLY", wt, 1.6))
+    a1 = nb.m("SUBTRACT", nb.m("MULTIPLY", u, 2 * math.pi * 1.4), nb.m("MULTIPLY", wt, 1.6))
     w1 = nb.m("MULTIPLY", nb.m("MULTIPLY", wisp, u13), nb.m("SINE", nb.m("ADD", a1, wk)))
-    a2 = nb.m("SUBTRACT", nb.m("MULTIPLY", u, 2 * math.pi * 0.9), nb.m("MULTIPLY", wt, 1.3))
-    w2 = nb.m("MULTIPLY", nb.m("MULTIPLY", nb.m("MULTIPLY", wisp, 0.6), u13), nb.m("SINE", nb.m("ADD", a2, nb.m("MULTIPLY", wk, 2.0))))
-    off_wisp = nb.v("ADD", nb.xyz(0, 0, w1), nb.v("SCALE", perp, w2))
+    a2 = nb.m("SUBTRACT", nb.m("MULTIPLY", u, 2 * math.pi * 1.0), nb.m("MULTIPLY", wt, 1.3))
+    w2 = nb.m("MULTIPLY", nb.m("MULTIPLY", nb.m("MULTIPLY", wisp, 0.75), u13), nb.m("SINE", nb.m("ADD", a2, nb.m("MULTIPLY", wk, 2.0))))
+    a3 = nb.m("SUBTRACT", nb.m("MULTIPLY", u, 2 * math.pi * 0.55), nb.m("MULTIPLY", wt, 0.6))
+    w3 = nb.m("MULTIPLY", nb.m("MULTIPLY", nb.m("MULTIPLY", wisp, 0.9), nb.m("POWER", u, 2.0)),
+              nb.m("COSINE", nb.m("ADD", a3, nb.m("MULTIPLY", wk, 1.3))))
+    off_wisp = nb.v("ADD", nb.xyz(0, 0, nb.m("ADD", w1, nb.m("MULTIPLY", w3, 0.6))), nb.v("SCALE", perp, nb.m("ADD", w2, w3)))
+    # -- drift: Lissajous wander on drift_t; the wisp at u samples where the body was DriftLag·u ago
+    dt_ = nb.m("SUBTRACT", K["drift_t"], nb.m("MULTIPLY", gi.outputs["DriftLag"], u))
+    da = nb.m("ADD", nb.m("MULTIPLY", dt_, nb.m("MULTIPLY", gi.outputs["DriftRate"], 2 * math.pi)), ph)
+    Dx, Dy, Dz = nb.sep(gi.outputs["Drift"])
+    off_drift = nb.xyz(nb.m("MULTIPLY", Dx, nb.m("SINE", da)),
+                       nb.m("MULTIPLY", Dy, nb.m("SINE", nb.m("ADD", nb.m("MULTIPLY", da, 0.73), 1.1))),
+                       nb.m("MULTIPLY", Dz, nb.m("SINE", nb.m("ADD", nb.m("MULTIPLY", da, 1.37), 2.0))))
     off = nb.v("ADD", nb.xyz(dx, dy, dz), nb.v("ADD", nb.v("SCALE", off_body, body), nb.v("SCALE", off_wisp, part)))
+    off = nb.v("ADD", off, nb.v("ADD", off_sq, off_drift))
     sp = nb.n("GeometryNodeSetPosition")
     nb.link(gi.outputs["Geometry"], sp.inputs["Geometry"])
     nb.link(off, sp.inputs["Offset"])
@@ -211,26 +245,34 @@ def materials():
                             wb.m("ADD", wb.m("MULTIPLY", side, 2.2), wb.m("MULTIPLY", wk, 3.7)), 0.0),
                  scale=2.2, detail=3.0, rough=0.55)
     a = wb.m("MULTIPLY", a, wb.mr(sn.outputs["Fac"], 0.3, 0.6, 0.15, 1.0))
-    col = wb.mix(u, (0.90, 0.62, 1.0), (0.60, 0.20, 1.0))
-    st = wb.m("MULTIPLY", wb.m("MULTIPLY", a, K2["ghost_glow"]), 3.4)
-    sh = C.mix_shader(wb, wb.m("MINIMUM", wb.m("MULTIPLY", a, 0.9), 0.85), C.transparent(wb), C.emission(wb, col, st))
+    col = wb.mix(u, (0.90, 0.50, 1.0), (0.50, 0.24, 1.0))
+    st = wb.m("MULTIPLY", wb.m("MULTIPLY", a, K2["ghost_glow"]), 1.25)       # v2: ADDITIVE glow (glowing smoke, not grey)
+    sh = C.add_shader(wb, C.transparent(wb), C.emission(wb, col, st))
     wb.link(sh, wo.inputs["Surface"])
     C.blended(w)
     return m, w
 
 
-# name, location, height (m), yaw (deg: 0 = face toward −Y), world trail direction, phase, n_wisps, light W
+# name, location, height (m), yaw (deg: 0 = face toward −Y), world trail direction, phase, n_wisps, light W.
+# v2: the big ghost sits on the ledge (no drift, big kick squash); the small ones are placed by SCREEN ANCHOR
+# (common.SMALL_GHOST_ANCHORS) and wander (drift m, rate Hz-equivalent on drift_t, lag s-equivalent along the tail).
 GHOSTS = [
-    dict(C.BIG_GHOST, wisps=9, wlen=1.6, wwid=2.4, light=450.0, bob=0.035, sway=0.03, speed=0.42, drag=0.35, wisp=0.10),
-    dict(name="Ghost_S1", loc=(-9.5, 15.0, 9.8), height=1.25, yaw=55.0, trail=(-1, 0.3, 0.2), phase=1.7, wisps=4,
-         light=0.0, bob=0.06, sway=0.05, speed=0.55, drag=0.4, wisp=0.14),
-    dict(name="Ghost_S2", loc=(15.0, 46.0, 16.5), height=1.6, yaw=-20.0, trail=(1, 0.4, 0.3), phase=3.1, wisps=4,
-         light=0.0, bob=0.06, sway=0.05, speed=0.5, drag=0.4, wisp=0.14),
-    dict(name="Ghost_S3", loc=(44.0, 150.0, 22.0), height=3.2, yaw=-30.0, trail=(1, 0.5, 0.1), phase=4.4, wisps=3,
-         light=0.0, bob=0.05, sway=0.04, speed=0.47, drag=0.35, wisp=0.12),
-    dict(name="Ghost_S4", loc=(9.0, 23.0, 4.6), height=1.0, yaw=-10.0, trail=(-0.6, 1, 0.3), phase=5.2, wisps=4,
-         light=0.0, bob=0.07, sway=0.06, speed=0.6, drag=0.45, wisp=0.15),
+    dict(C.BIG_GHOST, wisps=10, wlen=1.75, wwid=2.0, light=450.0, bob=0.035, sway=0.03, speed=0.42, drag=0.35, wisp=0.13,
+         squash=0.10, kickbob=0.04, drift=(0.0, 0.0, 0.0), drate=0.0, dlag=0.0),
+    dict(name="Ghost_S1", yaw=55.0, trail=(-1, 0.3, 0.2), phase=1.7, wisps=5, wlen=1.7, light=0.0, bob=0.06, sway=0.05,
+         speed=0.55, drag=0.4, wisp=0.17, squash=0.06, kickbob=0.05, drift=(1.4, 0.8, 0.6), drate=0.045, dlag=2.2),
+    dict(name="Ghost_S2", yaw=-20.0, trail=(1, 0.4, 0.3), phase=3.1, wisps=5, wlen=1.7, light=0.0, bob=0.06, sway=0.05,
+         speed=0.5, drag=0.4, wisp=0.17, squash=0.06, kickbob=0.05, drift=(2.6, 1.5, 1.2), drate=0.04, dlag=2.4),
+    dict(name="Ghost_S3", yaw=-30.0, trail=(1, 0.5, 0.1), phase=4.4, wisps=4, wlen=1.6, light=0.0, bob=0.05, sway=0.04,
+         speed=0.47, drag=0.35, wisp=0.15, squash=0.05, kickbob=0.04, drift=(5.0, 3.0, 2.0), drate=0.035, dlag=2.6),
+    dict(name="Ghost_S4", yaw=-10.0, trail=(-0.6, 1, 0.3), phase=5.2, wisps=5, wlen=1.7, light=0.0, bob=0.07, sway=0.06,
+         speed=0.6, drag=0.45, wisp=0.18, squash=0.06, kickbob=0.05, drift=(1.6, 1.0, 0.5), drate=0.05, dlag=2.0),
 ]
+for _g in GHOSTS:
+    if _g["name"] in C.SMALL_GHOST_ANCHORS:
+        _x, _y, _d, _h = C.SMALL_GHOST_ANCHORS[_g["name"]]
+        _p = C.at_range(_x, _y, _d)
+        _g["loc"], _g["height"] = (float(_p[0]), float(_p[1]), float(_p[2] - 0.5 * _h)), _h
 
 
 def build(coll, R):
@@ -260,8 +302,14 @@ def build(coll, R):
         ob.rotation_euler = (0, 0, yaw)
         ob.scale = (g["height"],) * 3
         mod = X.add_gn(ob, tree, name="GhostMotion")
+        hgt = g["height"]
+        dl = tuple(float(x) / hgt for x in g["drift"])            # metres → local units (object scale = height)
+        c2, s2 = math.cos(-yaw), math.sin(-yaw)
+        dl = (abs(c2 * dl[0] - s2 * dl[1]), abs(s2 * dl[0] + c2 * dl[1]), dl[2])
         for nm, val in (("Phase", g["phase"]), ("Bob", g["bob"]), ("Sway", g["sway"]), ("Speed", g["speed"]),
-                        ("Trail", tuple(float(x) for x in tl)), ("Drag", g["drag"]), ("Wisp", g["wisp"])):
+                        ("Trail", tuple(float(x) for x in tl)), ("Drag", g["drag"]), ("Wisp", g["wisp"]),
+                        ("Squash", g["squash"]), ("KickBob", g["kickbob"]), ("Drift", dl), ("DriftRate", g["drate"]),
+                        ("DriftLag", g["dlag"])):
             C.set_mod_input(mod, nm, val)
         sub = ob.modifiers.new("Sub", "SUBSURF")
         sub.levels = sub.render_levels = 1
