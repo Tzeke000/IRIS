@@ -53,6 +53,10 @@ class TestPngCheck(unittest.TestCase):
         self.assertEqual(frames.parse_frames("1-3, 7,10-11"), [1, 2, 3, 7, 10, 11])
         self.assertEqual(frames.parse_frames(""), [])
 
+    def test_contiguous_runs(self):          # --anim: one animation render per run of missing frames
+        self.assertEqual(frames.contiguous_runs([7, 1, 2, 3, 8, 10, 2]), [[1, 2, 3], [7, 8], [10]])
+        self.assertEqual(frames.contiguous_runs([]), [])
+
 
 if __name__ == "__main__":
     unittest.main()

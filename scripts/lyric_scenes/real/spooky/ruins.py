@@ -20,8 +20,10 @@ def haze_wrap(nb, shader, strength=0.7, near=80.0, far=1400.0):
     return C.mix_shader(nb, f, shader, C.emission(nb, C.HAZE_FAR, 0.8))
 
 
-def stylise(mat, tint_dark=C.STONE_DARK, tint_lit=C.STONE_LIT, rim=0.35, haze=0.85):
-    """In place: the scan's albedo → luminance → violet ramp; rough, non-metal; violet rim; distance haze."""
+def stylise(mat, tint_dark=C.STONE_DARK, tint_lit=C.STONE_LIT, rim=0.35, haze=0.85, moon_rim=None):
+    """In place: the scan's albedo → luminance → violet ramp; rough, non-metal; violet rim; distance haze.
+    moon_rim = (strength, rgb, origin): an extra back-light rim on the faces turned toward the moon (silhouette edges
+    against the sky glow), measured from `origin` (the object's position) so it is a constant world direction."""
     nt = mat.node_tree
     nb = NB(nt)
     bsdf = next((n for n in nt.nodes if n.type == "BSDF_PRINCIPLED"), None)
@@ -47,6 +49,13 @@ def stylise(mat, tint_dark=C.STONE_DARK, tint_lit=C.STONE_LIT, rim=0.35, haze=0.
     bsdf.inputs["Emission Strength"].default_value = 0.0
     r = nb.m("MULTIPLY", nb.m("POWER", C.facing(nb, 0.3), 3.0), rim)
     sh = C.add_shader(nb, bsdf.outputs[0], C.emission(nb, C.RIM_VIOLET, r))
+    if moon_rim:
+        k, rgb, origin = moon_rim
+        md = tuple(float(x) for x in C.dir_to(origin, C.MOON_POS))
+        nrm = nb.n("ShaderNodeNewGeometry").outputs["Normal"]
+        toward = nb.mr(nb.v("DOT_PRODUCT", nrm, md), -0.15, 0.6)                # faces turned to the moon
+        edge = nb.m("POWER", C.facing(nb, 0.5), 1.2)                             # grazing → silhouette edges
+        sh = C.add_shader(nb, sh, C.emission(nb, rgb, nb.m("MULTIPLY", nb.m("MULTIPLY", toward, edge), k)))
     sh = haze_wrap(nb, sh, haze)
     for l in list(out.inputs["Surface"].links):
         nt.links.remove(l)
@@ -184,9 +193,13 @@ def build(coll, R):
                                           (-72, 220, 12, 45, dmg)]):
         out[f"fort_{i}"] = _place(tw[k], f"Ruin_Fort{i}", (x, y, hill_z(x, y) - 1.0), rot_z=rz, coll=coll, scale=s)
     # the castle on the cliff (centimetre model → metres via normalize)
-    cm, o5 = _kit(A + "/sf_fantasy_castle/model.glb", "Castle", 70.0, tmp,          # v2: taller + less hazed (cover)
-                  stylise_kw=dict(tint_dark=(0.006, 0.007, 0.03), tint_lit=(0.05, 0.05, 0.20), haze=0.45))
+    # v2: taller + less hazed (cover). v3 (Zeke 10-19: "the castle is faint in the haze"): darker stone and about half
+    # the aerial haze so the silhouette separates from the lit ridge behind it, plus a pink moon-side rim on the
+    # spires; still hazier than anything in the foreground (it must stay 430 m away)
     cx, cy, _ = C.CASTLE_POS
+    cm, o5 = _kit(A + "/sf_fantasy_castle/model.glb", "Castle", 70.0, tmp,
+                  stylise_kw=dict(tint_dark=(0.002, 0.002, 0.010), tint_lit=(0.016, 0.015, 0.075), haze=0.22, rim=0.15,
+                                  moon_rim=(3.0, (1.0, 0.50, 0.92), (cx, cy, C.CASTLE_CLIFF_H + 30.0))))
     out["castle"] = _place(cm, "Castle", (cx + 4, cy + 4, C.CASTLE_CLIFF_H - 7.0), rot_z=200, coll=coll)
     _remove(list(tmp.objects))
     bpy.data.collections.remove(tmp)

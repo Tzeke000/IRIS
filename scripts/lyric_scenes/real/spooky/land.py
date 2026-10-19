@@ -377,6 +377,15 @@ def haze_box(coll):
     tc = nb.n("ShaderNodeTexCoord")
     _, _, gz = nb.sep(tc.outputs["Generated"])
     dens = nb.m("MULTIPLY", nb.m("POWER", nb.mr(gz, 0.0, 1.0, 1.0, 0.0), 2.5), 0.0009)      # thick at the water, thin at the top
+    # v3 (Zeke 10-19: "the castle is faint in the haze"): a soft clearing along the camera's line of sight to the castle
+    # (screen ndc ≈ (0.77, 0.50), castle ≈ 4.4° × 7.8° on screen) — 60 % less haze inside 5°, back to full by 9°.
+    # MEASURED on f1985 (castle mask from a castle on/off diff): the box added +0.048 luminance on the castle vs +0.027
+    # on the ridge behind it — it was the main veil (bloom the rest). The castle still sits in 40 % of it (distance).
+    axis = tuple(float(x) for x in C.ndc_dir(0.77, 0.50))
+    pos = nb.n("ShaderNodeNewGeometry").outputs["Position"]
+    look = nb.v("DOT_PRODUCT", nb.v("NORMALIZE", nb.v("SUBTRACT", pos, tuple(float(x) for x in C.CAM_LOC))), axis)
+    clear = nb.mr(look, math.cos(math.radians(9.0)), math.cos(math.radians(5.0)), 0.0, 1.0, interp="SMOOTHSTEP")
+    dens = nb.m("MULTIPLY", dens, nb.m("SUBTRACT", 1.0, nb.m("MULTIPLY", clear, 0.6)))
     pv = nb.n("ShaderNodeVolumePrincipled")
     pv.inputs["Color"].default_value = (*C.HAZE, 1)
     nb.link(dens, pv.inputs["Density"])
