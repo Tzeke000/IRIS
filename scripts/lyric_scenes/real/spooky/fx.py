@@ -1,6 +1,9 @@
 """Petals + fireflies: analytic GN on Scene Time. Constant point counts (gotcha 10: EEVEE motion blur pairs instances
 by index), positions clamped/wrapped with a fade at the wrap so a teleport is invisible and never smears.
-Petal density is a SHADER gate (instancer attr pid < CTRL.petal_density) → the music pass keys one CTRL curve."""
+v2: positions run on the music CLOCKS in CTRL_GN (wind_t for petals, ff_t for fireflies — faster in the drops, a gust
+on every big hit) instead of Scene Time. Density is a SOFT shader gate per instance (smoothstep of CTRL.petal_density /
+CTRL.ff_density − the instance's hash), so a rising density fades petals in instead of popping them, and the instance
+count never changes."""
 import math
 
 import numpy as np
@@ -24,12 +27,12 @@ def petal_material():
     K = C.ctrl(nb)
     pid = nb.sattr("pid", "INSTANCER").outputs["Fac"]
     pg = nb.sattr("pglow", "INSTANCER").outputs["Fac"]
-    on = nb.m("LESS_THAN", pid, K["petal_density"])
+    on = nb.mr(nb.m("SUBTRACT", K["petal_density"], pid), 0.0, 0.08, 0.0, 1.0, interp="SMOOTHSTEP")    # soft gate
     u, v, _ = nb.sep(nb.sattr("puv").outputs["Vector"])
     du, dv = nb.m("SUBTRACT", u, 0.5), nb.m("SUBTRACT", v, 0.5)
     ov = nb.mr(nb.m("ADD", nb.m("MULTIPLY", du, du), nb.m("MULTIPLY", dv, dv)), 0.25, 0.12)   # soft oval
     col = nb.mix(ov, (1.0, 0.45, 0.85), C.PETAL_PINK)
-    st = nb.m("MULTIPLY", nb.m("MULTIPLY", nb.m("ADD", 1.5, nb.m("MULTIPLY", pg, 3.0)), K["glow"]), ov)
+    st = nb.m("MULTIPLY", nb.m("MULTIPLY", nb.m("ADD", 1.2, nb.m("MULTIPLY", pg, 2.4)), nb.m("MULTIPLY", K["glow"], K["petal_glow"])), ov)
     a = nb.m("MULTIPLY", ov, on)
     sh = C.mix_shader(nb, a, C.transparent(nb), C.emission(nb, col, st))
     nb.link(sh, out.inputs["Surface"])
@@ -43,15 +46,19 @@ def firefly_material():
     fph = nb.sattr("fph", "INSTANCER").outputs["Fac"]
     frt = nb.sattr("frt", "INSTANCER").outputs["Fac"]
     fl = nb.m("ADD", 0.25, nb.m("MULTIPLY", 0.75, nb.m("POWER", nb.m("ADD", 0.5, nb.m("MULTIPLY", 0.5, nb.m("SINE", nb.m("ADD", nb.m("MULTIPLY", K["T"], frt), fph)))), 2.0)))
-    st = nb.m("MULTIPLY", nb.m("MULTIPLY", fl, K["firefly"]), nb.m("MULTIPLY", K["glow"], 14.0))
-    nb.link(C.emission(nb, C.FIREFLY, st), out.inputs["Surface"])
+    fid = nb.sattr("fid", "INSTANCER").outputs["Fac"]
+    on = nb.mr(nb.m("SUBTRACT", K["ff_density"], fid), 0.0, 0.1, 0.0, 1.0, interp="SMOOTHSTEP")
+    st = nb.m("MULTIPLY", nb.m("MULTIPLY", fl, K["firefly"]), nb.m("MULTIPLY", K["glow"], 7.0))
+    sh = C.mix_shader(nb, on, C.transparent(nb), C.emission(nb, (1.0, 0.42, 0.85), st))
+    nb.link(sh, out.inputs["Surface"])
+    C.blended(m)
     return m
 
 
-def petals(coll, n=900, seed=5):
+def petals(coll, n=500, seed=5):
     rng = np.random.default_rng(seed)
-    lo = np.array([-14.0, -8.0, 0.0])
-    size = np.array([36.0, 50.0, 12.0])
+    lo = np.array([-13.0, -10.5, 0.0])                                # v2: near the camera (soft, big), fewer far dots
+    size = np.array([30.0, 34.0, 9.0])
     y = lo[1] + size[1] * rng.random(n) ** 1.6                       # denser near the camera
     base = np.stack([lo[0] + size[0] * rng.random(n), y, lo[2] + size[2] * rng.random(n)], 1)
     attrs = {"pid": rng.random(n), "pglow": rng.random(n),
@@ -60,7 +67,7 @@ def petals(coll, n=900, seed=5):
     pts = X.points_obj("Petals", base, attrs=attrs, coll=coll)
     m = petal_material()
     ng, nb, gi, go = X.gn_tree("PetalsGN")
-    T = nb.n("GeometryNodeInputSceneTime").outputs["Seconds"]
+    T = C.ctrl_gn(nb)["wind_t"]                                           # music clock (gusts on the drops)
     P = nb.n("GeometryNodeInputPosition").outputs[0]
     wind = (0.55, 0.18, -0.28)
     px, py, pz = nb.sep(nb.v("ADD", P, nb.v("SCALE", wind, T)))
@@ -91,7 +98,7 @@ def petals(coll, n=900, seed=5):
     nb.link(sp.outputs[0], inst.inputs["Points"])
     nb.link(smt.outputs[0], inst.inputs["Instance"])
     nb.link(er.outputs[0], inst.inputs["Rotation"])
-    nb.link(nb.m("MULTIPLY", nb.m("MULTIPLY", nb.attr("psz"), 0.13), fade), inst.inputs["Scale"])
+    nb.link(nb.m("MULTIPLY", nb.m("MULTIPLY", nb.attr("psz"), 0.17), fade), inst.inputs["Scale"])
     nb.link(inst.outputs[0], go.inputs[0])
     X.add_gn(pts, ng)
     C.hide_shadow(pts)
@@ -104,12 +111,12 @@ def fireflies(coll, n=200, seed=9):
     size = np.array([40.0, 40.0, 6.0])
     base = lo + size * rng.random((n, 3))
     base[:, 2] = lo[2] + size[2] * rng.random(n) ** 1.8               # most hover low over the water
-    attrs = {"fph": rng.uniform(0, 6.28, n), "frt": rng.uniform(1.5, 5.0, n),
+    attrs = {"fph": rng.uniform(0, 6.28, n), "frt": rng.uniform(1.5, 5.0, n), "fid": rng.random(n),
              "wf": rng.uniform(0.15, 0.45, (n, 3)), "wp": rng.uniform(0, 6.28, (n, 3)), "fsz": rng.uniform(0.6, 1.3, n)}
     pts = X.points_obj("Fireflies", base, attrs=attrs, coll=coll)
     m = firefly_material()
     ng, nb, gi, go = X.gn_tree("FirefliesGN")
-    T = nb.n("GeometryNodeInputSceneTime").outputs["Seconds"]
+    T = C.ctrl_gn(nb)["ff_t"]
     P = nb.n("GeometryNodeInputPosition").outputs[0]
     wf, wp = nb.attr("wf", "FLOAT_VECTOR"), nb.attr("wp", "FLOAT_VECTOR")
     ang = nb.v("ADD", nb.v("SCALE", wf, T), wp)
