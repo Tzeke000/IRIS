@@ -62,12 +62,17 @@ check("unwritable-store -> down", p["state"], "down")
 tf.unlink(missing_ok=True)
 
 print("\n== ADVERSARIAL 6: voice ports dead ==")
-p = h.probe_voice(mouth_port=9998, daemon_port=9999)
+p = h.probe_voice(mouth_port=9998, daemon_port=9999, host="127.0.0.1", off_flag=Path("/nonexistent/voice_off.json"))
 check("dead-voice-ports -> down", p["state"], "down")
 
 print("\n== ADVERSARIAL 7: voice only one port up (degraded) ==")
-# real mouth 8769 is up; pair it with a dead daemon port.
-p = h.probe_voice(mouth_port=8769, daemon_port=9999)
+# a throwaway listener stands in for the mouth (the real 8769 sleeps in quiet hours); pair it
+# with a dead daemon port.
+import socket as _sock
+_ls = _sock.socket(); _ls.bind(("127.0.0.1", 0)); _ls.listen(1)
+p = h.probe_voice(mouth_port=_ls.getsockname()[1], daemon_port=9999, host="127.0.0.1",
+                  off_flag=Path("/nonexistent/voice_off.json"))
+_ls.close()
 check("half-voice -> degraded", p["state"], "degraded")
 
 print("\n== ADVERSARIAL 8: tick loop stalled (old timestamp) ==")
