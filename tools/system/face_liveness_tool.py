@@ -253,6 +253,8 @@ def _handler(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
                 kw["probe_full_frame"] = bool(params["probe_full_frame"])
             if "probe_thresh" in params:
                 kw["probe_thresh"] = float(params["probe_thresh"])
+            if "gate" in params:   # 2026-10-20: LIVE gate (brain/liveness_gate.py) - quiets confirmed fakes
+                kw["gate"] = bool(params["gate"])
             return {"ok": True, "flag": _write_flag(**kw)}
         if action == "reload_code":
             # Safe ONLY while no shadow thread runs: the module's globals are the runner
