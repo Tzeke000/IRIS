@@ -1502,6 +1502,18 @@ async def perception_reader(queue, loop, start_ts):
                                  " verdict teaches nothing.]")
                 except Exception as _e:
                     sal = None  # fail-open: the wake proceeds exactly as before
+            # LIVENESS GATE (Zeke 2026-10-20 "it should definitely be ... actually wired in"):
+            # an unnamed face that the liveness runner has CONFIRMED is a photo / screen / decoy
+            # is not a visitor. Only fires when EVERY unnamed face in view is fake; fail-open.
+            if wake and not person:
+                try:
+                    from brain import liveness_gate as _lg
+                    _lv = _lg.judge_unknown_wake()
+                    if _lv.get("suppress"):
+                        wake = False
+                        reason = "liveness: " + str(_lv.get("reason") or "")
+                except Exception:
+                    pass
             # OWNERSHIP CLAIM (Iris_fixes #6): the host's eyes are the PRIMARY owner of
             # presence. Record the sighting (and whether it woke me) so the fallback owners
             # (wifi watcher, runtime camera channel) can see it was handled and stay quiet.

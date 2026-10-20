@@ -179,6 +179,14 @@ class UnknownCaptureWatcher:
                 continue
             pid = str(r.get("person_id") or "unknown")
             if pid == "unknown" or pid.startswith("_"):
+                # 2026-10-20 live liveness gate (Zeke: "wire it in"): a face the liveness runner
+                # has CONFIRMED fake (photo/screen/helmet) is not an unknown person. Fail-open.
+                try:
+                    from brain import liveness_gate as _lg
+                    if _lg.is_fake_face(r.get("bbox")):
+                        continue
+                except Exception:
+                    pass
                 unknowns.append(r)
             else:
                 knowns.append(r)

@@ -56,6 +56,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DECOY_DIR = ROOT / "state" / "faces_decoys"
 SHADOW_LOG = ROOT / "state" / "face_liveness_shadow.jsonl"
 FLAG_PATH = ROOT / "state" / "face_liveness_shadow.json"
+NOW_PATH = ROOT / "state" / "face_liveness_now.json"   # live per-track verdicts (brain/liveness_gate.py)
 MODEL_DIR = ROOT / "models" / "antispoof"
 INSIGHT_DIR = Path(os.path.expanduser("~/.insightface/models/buffalo_l"))
 
@@ -593,6 +594,7 @@ class ShadowRunner:
         live_pid = str(face.get("person_id") or "unknown") if source == "live" else "unknown"
         would = fuse(live_pid, sig.get("decoy_name"), bool(sig.get("decoy_hit")), state)
         actual = actual_verdict(live_pid) if source == "live" else "not_detected_live"
+        t["would"], t["state"], t["live_pid"] = would, state, live_pid   # read by write_now()
         self.stats["scored"] += 1
         ms = sig.get("ms")
         self.stats["last_ms"] = ms
@@ -611,6 +613,21 @@ class ShadowRunner:
             self.log.write(rec)
             self.stats["logged"] += 1
             t["last_log"], t["last_would"] = now, would
+
+    def _write_now(self, now: float) -> None:
+        """2026-10-20 (live gate): publish the current per-track verdicts for brain/liveness_gate.
+        Written every tick while tracks exist, once more when they empty, then quiet."""
+        if not self.tracks and not getattr(self, "_now_had_tracks", False):
+            return
+        snap = {"ts": round(now, 3), "tracks": [
+            {"id": t["id"], "source": t["source"], "bbox": [int(v) for v in t["bbox"]],
+             "live_pid": t.get("live_pid"), "would": t.get("would"), "state": t.get("state"),
+             "last_ts": round(float(t.get("last_ts") or now), 3)}
+            for t in self.tracks if t.get("would") is not None]}
+        tmp = NOW_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(snap), encoding="utf-8")
+        os.replace(tmp, NOW_PATH)
+        self._now_had_tracks = bool(self.tracks)
 
     def _run(self) -> None:
         if self.scorer is None:
@@ -650,6 +667,7 @@ class ShadowRunner:
                                     continue   # already scored as a live face
                                 self._score_face(frame, d, t0, age, "probe")
                 self.tracks = [t for t in self.tracks if t0 - t.get("last_ts", t0) <= TRACK_TTL_S]
+                self._write_now(t0)
             except Exception as e:  # never let the shadow die silently
                 self.stats["errors"] += 1
                 self.stats["last_error"] = repr(e)[:300]
