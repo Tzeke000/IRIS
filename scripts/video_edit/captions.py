@@ -65,8 +65,15 @@ def build(tr: dict, t0: float, t1: float, style: str = "tiktok_gaming", W: int =
     """ASS text for the words inside [t0, t1], timed relative to t0 (÷speed). Also returns emoji
     events [{t, dur, code}] relative to the clip."""
     st = STYLES[style]
-    words = [w for s in tr.get("segments", []) for w in s.get("words", [])
+    words = [dict(w, spk=s.get("speaker")) for s in tr.get("segments", []) for w in s.get("words", [])
              if w["end"] > t0 and w["start"] < t1 and w["word"].strip()]
+    # per-speaker colours (speakers.py tagged the segments): Zeke always yellow, friends in order
+    spk_order = [x for x in dict.fromkeys(w["spk"] for w in words) if x]
+    spk_col = {}
+    others = [CYAN, PINK, GREEN, WHITE]
+    for sp in spk_order:
+        spk_col[sp] = YELLOW if sp == "zeke" else others[len([k for k in spk_col if k != "zeke"]) % len(others)]
+    by_speaker = len(spk_col) >= 2
     rel = lambda t: (min(max(t, t0), t1) - t0) / speed  # noqa: E731
     x, y = W // 2, int(H * st["pos_y"])
     out, emo = [header(st, W, H)], []
@@ -78,21 +85,27 @@ def build(tr: dict, t0: float, t1: float, style: str = "tiktok_gaming", W: int =
         return "".join(out), emo
     groups, cur = [], []
     for w in words:   # break groups on size or on a pause > 0.45 s
-        if cur and (len(cur) >= st["group"] or w["start"] - cur[-1]["end"] > 0.45):
+        if cur and (len(cur) >= st["group"] or w["start"] - cur[-1]["end"] > 0.45 or w["spk"] != cur[-1]["spk"]):
             groups.append(cur); cur = []
         cur.append(w)
     if cur:
         groups.append(cur)
     k = 0
-    for g in groups:
+    for gi, g in enumerate(groups):
+        nxt_start = rel(groups[gi + 1][0]["start"]) if gi + 1 < len(groups) else None
         texts = [_clean(w["word"].upper() if st["upper"] else w["word"]) for w in g]
         for i, w in enumerate(g):
             a = rel(w["start"])
             b = rel(g[i + 1]["start"]) if i + 1 < len(g) else rel(max(w["end"], w["start"] + 0.25))
+            if nxt_start is not None:   # never overlap the next group (two caption lines on screen at once)
+                b = min(b, nxt_start)
             if b <= a:
                 continue
             hype = bool(HYPE_RE.search(w["word"]))
-            col = st["hype_color"] if hype else st["palette"][k % len(st["palette"])]
+            if by_speaker:   # who's talking decides the colour; hype only makes it bigger
+                col = spk_col.get(w["spk"], WHITE)
+            else:
+                col = st["hype_color"] if hype else st["palette"][k % len(st["palette"])]
             parts = []
             for j, t in enumerate(texts):
                 if j == i:
