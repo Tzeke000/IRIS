@@ -1,0 +1,4 @@
+# third-party add-ons (MIT) are fetched, not committed — see README.md
+addons/
+.godot/
+build/
