@@ -1,0 +1,477 @@
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://addons/godot-xr-tools/xr/start_xr.tscn" id="1_gqmmt"]
+[ext_resource type="Script" path="res://addons/godot-xr-tools/xr/start_xr.gd" id="2_yc10j"]
+[ext_resource type="PackedScene" path="res://addons/godot-xr-tools/hands/scenes/lowpoly/left_hand_low.tscn" id="3_jscy8"]
+[ext_resource type="Script" path="res://addons/godot-xr-tools/hands/hand.gd" id="4_pm3ni"]
+[ext_resource type="AnimationNodeBlendTree" path="res://addons/godot-xr-tools/hands/animations/left/hand_blend_tree.tres" id="5_y6deb"]
+[ext_resource type="Resource" path="res://addons/godot-xr-tools/hands/poses/pose_default_left.tres" id="6_og1vs"]
+[ext_resource type="PackedScene" path="res://addons/godot-xr-tools/functions/function_pickup.tscn" id="7_2wyq8"]
+[ext_resource type="Script" path="res://addons/godot-xr-tools/functions/function_pickup.gd" id="8_vxglm"]
+[ext_resource type="PackedScene" path="res://addons/godot-xr-tools/functions/movement_direct.tscn" id="9_2f3dj"]
+[ext_resource type="Script" path="res://addons/godot-xr-tools/functions/movement_direct.gd" id="10_yq6so"]
+[ext_resource type="PackedScene" path="res://addons/godot-xr-tools/hands/scenes/lowpoly/right_hand_low.tscn" id="11_fv21b"]
+[ext_resource type="AnimationNodeBlendTree" path="res://addons/godot-xr-tools/hands/animations/right/hand_blend_tree.tres" id="12_tel4y"]
+[ext_resource type="Resource" path="res://addons/godot-xr-tools/hands/poses/pose_default_right.tres" id="13_qkpxi"]
+[ext_resource type="PackedScene" path="res://addons/godot-xr-tools/functions/movement_turn.tscn" id="14_5q0nq"]
+[ext_resource type="Script" path="res://addons/godot-xr-tools/functions/movement_turn.gd" id="15_dgi5k"]
+[ext_resource type="PackedScene" path="res://addons/godot-xr-tools/player/player_body.tscn" id="16_j8jky"]
+[ext_resource type="Script" path="res://addons/godot-xr-tools/player/player_body.gd" id="17_kmb1v"]
+[ext_resource type="PackedScene" path="res://addons/godot-xr-tools/objects/pickable.tscn" id="18_fuf3a"]
+[ext_resource type="Script" path="res://addons/godot-xr-tools/objects/pickable.gd" id="19_pibwh"]
+[ext_resource type="Script" path="res://scripts/iris_presence.gd" id="20_c6pm6"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_5he1u"]
+sky_top_color = Color(0.2, 0.16, 0.38, 1)
+sky_horizon_color = Color(0.85, 0.62, 0.7, 1)
+ground_horizon_color = Color(0.85, 0.62, 0.7, 1)
+
+[sub_resource type="Sky" id="Sky_5poiv"]
+sky_material = SubResource("ProceduralSkyMaterial_5he1u")
+
+[sub_resource type="Environment" id="Environment_2cjbq"]
+background_mode = 2
+sky = SubResource("Sky_5poiv")
+ambient_light_source = 3
+tonemap_mode = 4
+glow_enabled = true
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_chjal"]
+albedo_color = Color(0.82, 0.78, 0.72, 1)
+roughness = 0.85
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_cjqg0"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 24.0
+bottom_radius = 25.92
+height = 0.6
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_vchkt"]
+height = 0.6
+radius = 24.0
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_txyw0"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_vc5cj"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_nvyfr"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_ty1g6"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_j2jfr"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_bjg73"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_bu4jf"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_o7ddy"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_0loja"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_ids8r"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_dnhof"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_1v6qk"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_augu2"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_tm6hj"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_kf5aa"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_t5ykj"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_e755i"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_ro3en"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_od4ux"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_xhfw6"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_1epgm"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_152kg"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_r4e17"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_y57op"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_mlv25"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_a82wo"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_gdvew"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_kjtvk"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_xrs0c"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_xljpf"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_j4bwh"]
+material = SubResource("StandardMaterial3D_chjal")
+top_radius = 0.7
+bottom_radius = 0.756
+height = 9.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_ksmap"]
+height = 9.0
+radius = 0.7
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ygd8o"]
+albedo_color = Color(0.65, 0.6, 0.75, 1)
+roughness = 0.85
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_2s0kr"]
+material = SubResource("StandardMaterial3D_ygd8o")
+top_radius = 3.0
+bottom_radius = 3.24
+height = 0.4
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_xaipn"]
+height = 0.4
+radius = 3.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ndrjj"]
+albedo_color = Color(0.62, 0.42, 1, 1)
+roughness = 0.2
+emission_enabled = true
+emission = Color(0.62, 0.42, 1, 1)
+emission_energy_multiplier = 2.5
+
+[sub_resource type="SphereMesh" id="SphereMesh_ih3m7"]
+material = SubResource("StandardMaterial3D_ndrjj")
+radius = 0.35
+height = 0.7
+
+[node name="IrisHome" type="Node3D" unique_id=1977917554]
+
+[node name="@WorldEnvironment@2" type="WorldEnvironment" parent="." unique_id=1221849271]
+environment = SubResource("Environment_2cjbq")
+
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=1364087678]
+transform = Transform3D(0.76604444, -0.3686878, 0.52654076, 0, 0.81915206, 0.57357645, -0.6427876, -0.43938506, 0.62750685, 0, 0, 0)
+light_color = Color(1, 0.85, 0.7, 1)
+shadow_enabled = true
+
+[node name="Floor" type="StaticBody3D" parent="." unique_id=2014390126]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.3, 0)
+
+[node name="@MeshInstance3D@3" type="MeshInstance3D" parent="Floor" unique_id=1863231156]
+mesh = SubResource("CylinderMesh_cjqg0")
+
+[node name="@CollisionShape3D@4" type="CollisionShape3D" parent="Floor" unique_id=762098633]
+shape = SubResource("CylinderShape3D_vchkt")
+
+[node name="Column0" type="StaticBody3D" parent="." unique_id=247275040]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 20, 4.5, 0)
+
+[node name="@MeshInstance3D@5" type="MeshInstance3D" parent="Column0" unique_id=1376887142]
+mesh = SubResource("CylinderMesh_txyw0")
+
+[node name="@CollisionShape3D@6" type="CollisionShape3D" parent="Column0" unique_id=277022813]
+shape = SubResource("CylinderShape3D_vc5cj")
+
+[node name="Column1" type="StaticBody3D" parent="." unique_id=405091658]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 18.47759, 4.5, 7.653669)
+
+[node name="@MeshInstance3D@7" type="MeshInstance3D" parent="Column1" unique_id=145445621]
+mesh = SubResource("CylinderMesh_nvyfr")
+
+[node name="@CollisionShape3D@8" type="CollisionShape3D" parent="Column1" unique_id=1600347307]
+shape = SubResource("CylinderShape3D_ty1g6")
+
+[node name="Column2" type="StaticBody3D" parent="." unique_id=1601320567]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 14.142136, 4.5, 14.142136)
+
+[node name="@MeshInstance3D@9" type="MeshInstance3D" parent="Column2" unique_id=847626871]
+mesh = SubResource("CylinderMesh_j2jfr")
+
+[node name="@CollisionShape3D@10" type="CollisionShape3D" parent="Column2" unique_id=951481784]
+shape = SubResource("CylinderShape3D_bjg73")
+
+[node name="Column3" type="StaticBody3D" parent="." unique_id=343919491]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7.653669, 4.5, 18.47759)
+
+[node name="@MeshInstance3D@11" type="MeshInstance3D" parent="Column3" unique_id=1539448886]
+mesh = SubResource("CylinderMesh_bu4jf")
+
+[node name="@CollisionShape3D@12" type="CollisionShape3D" parent="Column3" unique_id=1625949756]
+shape = SubResource("CylinderShape3D_o7ddy")
+
+[node name="Column4" type="StaticBody3D" parent="." unique_id=329175064]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.2246468e-15, 4.5, 20)
+
+[node name="@MeshInstance3D@13" type="MeshInstance3D" parent="Column4" unique_id=1102028079]
+mesh = SubResource("CylinderMesh_0loja")
+
+[node name="@CollisionShape3D@14" type="CollisionShape3D" parent="Column4" unique_id=1784118984]
+shape = SubResource("CylinderShape3D_ids8r")
+
+[node name="Column5" type="StaticBody3D" parent="." unique_id=1094783672]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -7.653669, 4.5, 18.47759)
+
+[node name="@MeshInstance3D@15" type="MeshInstance3D" parent="Column5" unique_id=861160656]
+mesh = SubResource("CylinderMesh_dnhof")
+
+[node name="@CollisionShape3D@16" type="CollisionShape3D" parent="Column5" unique_id=1024997319]
+shape = SubResource("CylinderShape3D_1v6qk")
+
+[node name="Column6" type="StaticBody3D" parent="." unique_id=1211299823]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -14.142136, 4.5, 14.142136)
+
+[node name="@MeshInstance3D@17" type="MeshInstance3D" parent="Column6" unique_id=2090484312]
+mesh = SubResource("CylinderMesh_augu2")
+
+[node name="@CollisionShape3D@18" type="CollisionShape3D" parent="Column6" unique_id=1951712238]
+shape = SubResource("CylinderShape3D_tm6hj")
+
+[node name="Column7" type="StaticBody3D" parent="." unique_id=1316339607]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -18.47759, 4.5, 7.653669)
+
+[node name="@MeshInstance3D@19" type="MeshInstance3D" parent="Column7" unique_id=943879480]
+mesh = SubResource("CylinderMesh_kf5aa")
+
+[node name="@CollisionShape3D@20" type="CollisionShape3D" parent="Column7" unique_id=32910748]
+shape = SubResource("CylinderShape3D_t5ykj")
+
+[node name="Column8" type="StaticBody3D" parent="." unique_id=1904163108]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -20, 4.5, 2.4492936e-15)
+
+[node name="@MeshInstance3D@21" type="MeshInstance3D" parent="Column8" unique_id=1822864623]
+mesh = SubResource("CylinderMesh_e755i")
+
+[node name="@CollisionShape3D@22" type="CollisionShape3D" parent="Column8" unique_id=741843276]
+shape = SubResource("CylinderShape3D_ro3en")
+
+[node name="Column9" type="StaticBody3D" parent="." unique_id=128034056]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -18.47759, 4.5, -7.653669)
+
+[node name="@MeshInstance3D@23" type="MeshInstance3D" parent="Column9" unique_id=1415163517]
+mesh = SubResource("CylinderMesh_od4ux")
+
+[node name="@CollisionShape3D@24" type="CollisionShape3D" parent="Column9" unique_id=323719107]
+shape = SubResource("CylinderShape3D_xhfw6")
+
+[node name="Column10" type="StaticBody3D" parent="." unique_id=1437652833]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -14.142136, 4.5, -14.142136)
+
+[node name="@MeshInstance3D@25" type="MeshInstance3D" parent="Column10" unique_id=2130186204]
+mesh = SubResource("CylinderMesh_1epgm")
+
+[node name="@CollisionShape3D@26" type="CollisionShape3D" parent="Column10" unique_id=1749185832]
+shape = SubResource("CylinderShape3D_152kg")
+
+[node name="Column11" type="StaticBody3D" parent="." unique_id=812725368]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -7.653669, 4.5, -18.47759)
+
+[node name="@MeshInstance3D@27" type="MeshInstance3D" parent="Column11" unique_id=595762130]
+mesh = SubResource("CylinderMesh_r4e17")
+
+[node name="@CollisionShape3D@28" type="CollisionShape3D" parent="Column11" unique_id=2043306055]
+shape = SubResource("CylinderShape3D_y57op")
+
+[node name="Column12" type="StaticBody3D" parent="." unique_id=924131295]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3.67394e-15, 4.5, -20)
+
+[node name="@MeshInstance3D@29" type="MeshInstance3D" parent="Column12" unique_id=35635305]
+mesh = SubResource("CylinderMesh_mlv25")
+
+[node name="@CollisionShape3D@30" type="CollisionShape3D" parent="Column12" unique_id=1043210147]
+shape = SubResource("CylinderShape3D_a82wo")
+
+[node name="Column13" type="StaticBody3D" parent="." unique_id=196429663]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7.653669, 4.5, -18.47759)
+
+[node name="@MeshInstance3D@31" type="MeshInstance3D" parent="Column13" unique_id=804379446]
+mesh = SubResource("CylinderMesh_gdvew")
+
+[node name="@CollisionShape3D@32" type="CollisionShape3D" parent="Column13" unique_id=1601241610]
+shape = SubResource("CylinderShape3D_kjtvk")
+
+[node name="Column14" type="StaticBody3D" parent="." unique_id=534254844]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 14.142136, 4.5, -14.142136)
+
+[node name="@MeshInstance3D@33" type="MeshInstance3D" parent="Column14" unique_id=754019949]
+mesh = SubResource("CylinderMesh_xrs0c")
+
+[node name="@CollisionShape3D@34" type="CollisionShape3D" parent="Column14" unique_id=1035699039]
+shape = SubResource("CylinderShape3D_xljpf")
+
+[node name="Column15" type="StaticBody3D" parent="." unique_id=1779465234]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 18.47759, 4.5, -7.653669)
+
+[node name="@MeshInstance3D@35" type="MeshInstance3D" parent="Column15" unique_id=1389752127]
+mesh = SubResource("CylinderMesh_j4bwh")
+
+[node name="@CollisionShape3D@36" type="CollisionShape3D" parent="Column15" unique_id=1481305413]
+shape = SubResource("CylinderShape3D_ksmap")
+
+[node name="Dais" type="StaticBody3D" parent="." unique_id=1765457777]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.2, -6)
+
+[node name="@MeshInstance3D@37" type="MeshInstance3D" parent="Dais" unique_id=989061649]
+mesh = SubResource("CylinderMesh_2s0kr")
+
+[node name="@CollisionShape3D@38" type="CollisionShape3D" parent="Dais" unique_id=1560836090]
+shape = SubResource("CylinderShape3D_xaipn")
+
+[node name="StartXR" type="Node" parent="." unique_id=752243310 instance=ExtResource("1_gqmmt")]
+script = ExtResource("2_yc10j")
+
+[node name="XROrigin3D" type="XROrigin3D" parent="." unique_id=512631179]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 4)
+
+[node name="XRCamera3D" type="XRCamera3D" parent="XROrigin3D" unique_id=3865650]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.7, 0)
+
+[node name="LeftHand" type="XRController3D" parent="XROrigin3D" unique_id=401906523]
+tracker = &"left_hand"
+pose = &"aim"
+
+[node name="LeftHand" type="Node3D" parent="XROrigin3D/LeftHand" unique_id=1035899834 instance=ExtResource("3_jscy8")]
+script = ExtResource("4_pm3ni")
+hand_blend_tree = ExtResource("5_y6deb")
+default_pose = ExtResource("6_og1vs")
+
+[node name="FunctionPickup" type="Node3D" parent="XROrigin3D/LeftHand" unique_id=1026214321 instance=ExtResource("7_2wyq8")]
+script = ExtResource("8_vxglm")
+grab_collision_mask = 327684
+
+[node name="MovementDirect" type="Node3D" parent="XROrigin3D/LeftHand" unique_id=1170265486 groups=["movement_providers"] instance=ExtResource("9_2f3dj")]
+script = ExtResource("10_yq6so")
+
+[node name="RightHand" type="XRController3D" parent="XROrigin3D" unique_id=815025194]
+tracker = &"right_hand"
+pose = &"aim"
+
+[node name="RightHand" type="Node3D" parent="XROrigin3D/RightHand" unique_id=1169259621 instance=ExtResource("11_fv21b")]
+script = ExtResource("4_pm3ni")
+hand_blend_tree = ExtResource("12_tel4y")
+default_pose = ExtResource("13_qkpxi")
+
+[node name="FunctionPickup" type="Node3D" parent="XROrigin3D/RightHand" unique_id=1955050561 instance=ExtResource("7_2wyq8")]
+script = ExtResource("8_vxglm")
+grab_collision_mask = 327684
+
+[node name="MovementTurn" type="Node3D" parent="XROrigin3D/RightHand" unique_id=619715341 groups=["movement_providers"] instance=ExtResource("14_5q0nq")]
+script = ExtResource("15_dgi5k")
+
+[node name="PlayerBody" type="CharacterBody3D" parent="XROrigin3D" unique_id=2083973909 groups=["player_body"] instance=ExtResource("16_j8jky")]
+process_priority = -100
+process_physics_priority = -100
+collision_layer = 524288
+collision_mask = 1023
+script = ExtResource("17_kmb1v")
+
+[node name="Ball" type="RigidBody3D" parent="." unique_id=89056570 instance=ExtResource("18_fuf3a")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.4, 1.2, 2.5)
+collision_layer = 4
+collision_mask = 196615
+mass = 0.4
+freeze_mode = 1
+script = ExtResource("19_pibwh")
+
+[node name="Iris" type="Node3D" parent="." unique_id=1551901999]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, -6)
+script = ExtResource("20_c6pm6")
+
+[node name="@MeshInstance3D@40" type="MeshInstance3D" parent="Iris" unique_id=1432008116]
+mesh = SubResource("SphereMesh_ih3m7")
+
+[node name="@OmniLight3D@41" type="OmniLight3D" parent="Iris" unique_id=1309217588]
+light_color = Color(0.7, 0.5, 1, 1)
+light_energy = 2.0
+omni_range = 6.0
