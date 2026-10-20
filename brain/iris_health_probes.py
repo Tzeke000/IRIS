@@ -122,6 +122,19 @@ def probe_camera(peek_fn=None, fresh_s: float = 5.0, degraded_s: float = 12.0,
     (204 otherwise) — real freshness, the exact endpoint CORE says to trust.
     peek_fn is injectable so the adversarial test can simulate a frozen camera."""
     injected = peek_fn is not None
+    # 2026-10-20: the eyes REST at night by design (Zeke 10-17; eyes_quiet_hours parks them
+    # 22:30-05:10). A parked camera has a stale buffer and used to read 'down', turning the
+    # whole iris_health verdict red and making self_claim_check call CLAUDE.md's "Eyes are
+    # BACK" a drift every night. Deliberate rest = 'disabled', like the voice off-flag.
+    if not injected:
+        try:
+            _rest = json.loads((_repo_root() / "state" / "eyes_quiet_hours.json").read_text(encoding="utf-8"))
+            if _rest.get("auto_parked_active"):
+                return _mk("camera", "disabled",
+                           f"eyes resting by design (quiet hours, parked {_rest.get('last_action_ts', '?')})",
+                           "eyes_quiet_hours flag")
+        except Exception:
+            pass
     if peek_fn is None:
         try:
             from brain.frame_store import peek_buffer_age_sec as peek_fn  # type: ignore

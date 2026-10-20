@@ -55,7 +55,7 @@ def _reality_camera() -> str:
         st = hp.probe_camera()["state"]
     except Exception:
         return "unknown"
-    return {"ok": "on", "degraded": "on", "down": "off"}.get(st, "unknown")
+    return {"ok": "on", "degraded": "on", "down": "off", "disabled": "disabled"}.get(st, "unknown")
 
 
 def _reality_wake() -> str:
