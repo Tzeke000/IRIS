@@ -186,13 +186,48 @@ fn reach(addr: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// SSH reachability that does not upset sshd (2026-10-21). The Server tab polls every 5 s, and a bare
+/// connect-and-close made iris-home's sshd log `kex_exchange_identification: Connection closed by remote
+/// host` ~400x per 6 h while the app was open (Zeke: "find out what's poking you … hope it's not malware").
+/// Now: read sshd's banner, answer with our own identification line, close (an ordinary pre-auth
+/// disconnect), and probe at most once a minute.
+fn reach_ssh(addr: &str) -> bool {
+    use std::io::{Read, Write};
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+    if let Ok(c) = CACHE.lock() {
+        if let Some((t, ok)) = *c {
+            if t.elapsed() < Duration::from_secs(60) {
+                return ok;
+            }
+        }
+    }
+    let ok = addr
+        .parse::<SocketAddr>()
+        .ok()
+        .and_then(|a| TcpStream::connect_timeout(&a, Duration::from_millis(900)).ok())
+        .map(|mut s| {
+            let _ = s.set_read_timeout(Some(Duration::from_millis(1500)));
+            let mut buf = [0u8; 256];
+            let banner = s.read(&mut buf).map(|n| buf[..n].starts_with(b"SSH-")).unwrap_or(false);
+            let _ = s.write_all(b"SSH-2.0-IrisReach_1.0\r\n");
+            banner
+        })
+        .unwrap_or(false);
+    if let Ok(mut c) = CACHE.lock() {
+        *c = Some((Instant::now(), ok));
+    }
+    ok
+}
+
 /// Quick TCP reachability: Proxmox UI, iris-home SSH, and whether a me is serving on iris-home.
 #[tauri::command]
 fn server_reach() -> String {
     format!(
         "{{\"proxmox\":{},\"iris_home_ssh\":{},\"iris_home_runtime\":{}}}",
         reach(&format!("{}:8006", pve_host())),
-        reach(&format!("{}:22", private("iris_home_host"))),
+        reach_ssh(&format!("{}:22", private("iris_home_host"))),
         reach(&format!("{}:5876", private("iris_home_host")))
     )
 }
