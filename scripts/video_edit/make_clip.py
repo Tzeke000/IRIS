@@ -50,6 +50,8 @@ def main() -> None:
     ap.add_argument("--speed", type=float, default=1.0)
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--crf", type=int, default=20)
+    ap.add_argument("--bleep", default="", help="comma list of word stems to censor: caption shows p**** and the audio "
+                    "gets a 1 kHz bleep over exactly that word (Zeke 10-21, for TikTok)")
     a = ap.parse_args()
 
     st = captions.STYLES[a.style]
@@ -59,6 +61,24 @@ def main() -> None:
     tp = video.with_suffix(video.suffix + ".transcript.json")
     tr = json.loads(tp.read_text()) if tp.exists() else {"segments": []}
     dur = (a.end - a.start) / a.speed
+    bleeps = []
+    if a.bleep:
+        import copy
+        import re
+        stems = [x.strip().lower() for x in a.bleep.split(",") if x.strip()]
+        stems += [x[:-1] + "ie" for x in stems if x.endswith("y")]   # pussy -> pussies (10-21: missed plural)
+        tr = copy.deepcopy(tr)
+        for seg in tr.get("segments", []):
+            for w in seg.get("words", []):
+                m = re.match(r"^(\W*)([A-Za-z']+)(.*)$", w["word"].strip())
+                if not m or not any(m.group(2).lower().startswith(st_) for st_ in stems):
+                    continue
+                core = m.group(2)
+                w["word"] = " " + m.group(1) + core[0] + "*" * (len(core) - 1) + m.group(3)
+                if w["end"] > a.start and w["start"] < a.end:
+                    b0 = max(0.0, (w["start"] - a.start - 0.05) / a.speed)
+                    b1 = min(dur, (w["end"] - a.start + 0.05) / a.speed)
+                    bleeps.append((round(b0, 3), round(b1, 3)))
     tmp = Path(tempfile.mkdtemp(prefix="clip_"))
     ass_text, emo = captions.build(tr, a.start, a.end, a.style, W, H, speed=a.speed)
     if a.hook:   # big top hook for the first 2.2 s (the scroll-stopper)
@@ -94,7 +114,14 @@ def main() -> None:
               f"[{last}][e{i}]overlay=(W-w)/2:{y}:enable='between(t,{e['t']},{e['t'] + e['dur']:.2f})'[ve{i}]")
         last = f"ve{i}"
     at = f"atempo={a.speed}," if a.speed != 1.0 else ""
-    af = f"[0:a]{at}loudnorm=I=-14:TP=-1.5:LRA=11,afade=t=in:d=0.08,afade=t=out:st={max(0, dur - 0.25):.2f}:d=0.25[aout]"
+    if bleeps:
+        ex = "+".join(f"between(t,{b0},{b1})" for b0, b1 in bleeps)
+        af = (f"[0:a]{at}volume=0:enable='{ex}'[amut];"
+              f"sine=frequency=1000:sample_rate=48000:duration={dur:.3f},volume=0.35,"
+              f"volume=0:enable='not({ex})'[bp];[amut][bp]amix=inputs=2:duration=first,volume=2,")
+        at = ""
+    af_pre = af if bleeps else "[0:a]"
+    af = f"{af_pre}{at}loudnorm=I=-14:TP=-1.5:LRA=11,afade=t=in:d=0.08,afade=t=out:st={max(0, dur - 0.25):.2f}:d=0.25[aout]"
     cmd = ["ffmpeg", "-v", "error", "-y", *inputs, "-filter_complex", v + ";" + af, "-map", f"[{last}]",
            "-map", "[aout]", "-t", f"{dur:.3f}", "-c:v", "libx264", "-preset", "medium", "-crf", str(a.crf),
            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", a.out]
