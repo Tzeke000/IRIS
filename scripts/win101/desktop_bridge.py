@@ -30,6 +30,12 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if not self._auth(): return
+        try:
+            self._get()
+        except Exception as e:   # e.g. secure desktop (UAC prompt) blocks capture -> say so instead of dropping the socket
+            import traceback; self._json({"ok": False, "error": repr(e), "trace": traceback.format_exc()[-600:]}, 500)
+
+    def _get(self):
         u = urlparse(self.path); q = parse_qs(u.query)
         if u.path == "/health":
             return self._json({"ok": True, "size": list(pyautogui.size())})
