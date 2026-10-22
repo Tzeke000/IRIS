@@ -73,6 +73,34 @@ def _is_parked(g: dict[str, Any]) -> bool:
     return bool(_verify(g, want_parked=True)["ok"])
 
 
+def _flag_paused_at() -> float | None:
+    """epoch when body_pause.flag was written, or None if absent/unreadable."""
+    try:
+        from brain.iris_paths import paths
+        for line in paths.body_pause_flag.read_text(encoding="utf-8").splitlines():
+            if line.startswith("paused_at:"):
+                return float(line.split(":", 1)[1].strip())
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _stale_night_flag(now: _dt.datetime) -> bool:
+    """True if a body_pause.flag exists that was set before this morning's window-end — i.e. a
+    night park that outlived the morning. A flag set AFTER window-end is a deliberate daytime
+    park and is NOT stale. Guards the 2026-10-22 'camera blind all day' bug."""
+    pa = _flag_paused_at()
+    if pa is None:
+        return False
+    end = str(_read(_WINDOW_CFG, {"end": "05:10"}).get("end", "05:10"))
+    try:
+        eh, em = int(end[:2]), int(end[3:5])
+    except Exception:  # noqa: BLE001
+        eh, em = 5, 10
+    end_today = now.replace(hour=eh, minute=em, second=0, microsecond=0)
+    return pa < end_today.timestamp()
+
+
 def _enforce(g: dict[str, Any]) -> dict[str, Any]:
     from tools.system.gpu_park_tool import _gpu_park
     with _LOCK:
@@ -99,12 +127,20 @@ def _enforce(g: dict[str, Any]) -> dict[str, Any]:
             else:
                 act = "already_parked_not_mine"
         else:
-            if st.get("auto_parked_active"):
+            # Out of window (morning/day): open the eyes if I auto-parked them OR if a stale
+            # body_pause.flag outlived the night. The stale case is the 2026-10-22 bug: a false
+            # "override" (parked verify disagreed with the on-disk flag) left auto_parked_active
+            # False while the flag persisted, so the camera stayed blind all day. A flag set
+            # before this morning's window-end is a leftover night park; clear it. A flag set
+            # AFTER window-end is a deliberate daytime park — leave it alone.
+            was_auto = bool(st.get("auto_parked_active"))
+            stale = _stale_night_flag(_dt.datetime.now())
+            if was_auto or stale:
                 r = _gpu_park({"action": "unpark", "servo": False}, g)
                 st.update(auto_parked_active=not bool(r.get("ok")), last_action="auto_unpark",
                           last_action_ts=time.strftime("%Y-%m-%dT%H:%M:%S"), last_result=r.get("note"))
-                act = "auto_unpark"
-                _log(f"window closed: eyes un-parked ({r.get('note')})")
+                act = "auto_unpark" if was_auto else "auto_unpark_stale"
+                _log(f"window closed: eyes un-parked ({'stale night flag; ' if stale and not was_auto else ''}{r.get('note')})")
         st["last_check_action"] = act
         _write_state(st)
         return {"ok": True, "action": act, "in_window": in_win, "night": night,
