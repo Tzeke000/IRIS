@@ -5,7 +5,8 @@ GET  /health                     -> {"ok":true,"size":[w,h]}
 GET  /screenshot?max=900&q=70    -> JPEG, downscaled so the long side <= max
 POST /click   {"x","y","button":"left","clicks":1}     (x,y in REAL screen pixels)
 POST /move    {"x","y"}  POST /drag {"x","y","x2","y2","button"}
-POST /type    {"text"}   POST /key {"keys":["ctrl","s"]}   POST /scroll {"x","y","amount"}
+POST /type    {"text"}   POST /key {"keys":["ctrl","s"]}   POST /scroll {"x","y","amount","mods":["ctrl"]}
+  (scroll amount is in Windows wheel units: one notch = 120)
 """
 import io, json, os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -61,7 +62,9 @@ class H(BaseHTTPRequestHandler):
                 pyautogui.moveTo(d["x"], d["y"]); pyautogui.dragTo(d["x2"], d["y2"], duration=float(d.get("duration", 0.4)), button=d.get("button", "left"))
             elif p == "/type": pyautogui.write(d["text"], interval=float(d.get("interval", 0.02)))
             elif p == "/key": pyautogui.hotkey(*d["keys"])
-            elif p == "/scroll": pyautogui.moveTo(d["x"], d["y"]); pyautogui.scroll(int(d["amount"]))
+            elif p == "/scroll":
+                pyautogui.moveTo(d["x"], d["y"])
+                with pyautogui.hold(list(d.get("mods", []))): pyautogui.scroll(int(d["amount"]))
             else: return self._json({"error": "not found"}, 404)
             self._json({"ok": True})
         except Exception as e:

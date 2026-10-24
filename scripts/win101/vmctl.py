@@ -1,5 +1,5 @@
 """CLI for the win101 desktop bridge. usage: vmctl.py STEP [STEP...]
-STEP: shot:PATH[:MAX] | click:X,Y[,N] | rclick:X,Y | key:k1+k2 | type:TEXT | drag:X,Y,X2,Y2 | wait:SECONDS | scroll:X,Y,AMT
+STEP: shot:PATH[:MAX] | click:X,Y[,N] | rclick:X,Y | key:k1+k2 | type:TEXT | drag:X,Y,X2,Y2 | wait:SECONDS | scroll:X,Y,AMT[,mod+mod]  (AMT: one wheel notch = 120)
 Coordinates are REAL screen pixels (1920x1080)."""
 import json, os, sys, time, urllib.request
 
@@ -25,6 +25,6 @@ for step in sys.argv[1:]:
     elif k == "drag":
         v = [int(x) for x in a.split(",")]; post("/drag", {"x": v[0], "y": v[1], "x2": v[2], "y2": v[3], "duration": 1.0})
     elif k == "scroll":
-        v = [int(x) for x in a.split(",")]; post("/scroll", {"x": v[0], "y": v[1], "amount": v[2]})
+        v = a.split(","); post("/scroll", {"x": int(v[0]), "y": int(v[1]), "amount": int(v[2]), "mods": v[3].split("+") if len(v) > 3 else []})
     elif k == "wait": time.sleep(float(a))
     time.sleep(0.4)
