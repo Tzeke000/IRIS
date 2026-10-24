@@ -100,7 +100,7 @@ def _vr_temple(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
             return out
         if action == "speak":
             return _speak(str(p.get("text", "")))
-        if action not in ("state", "events", "move", "look", "hand", "grab", "release", "say", "action", "kick", "omniscient", "hush", "color", "build", "draw"):
+        if action not in ("state", "events", "move", "look", "hand", "grab", "release", "say", "action", "kick", "omniscient", "hush", "color", "build", "draw", "chess", "laser", "arrow"):
             return {"ok": False, "error": f"unknown action {action!r}", "help": __doc__}
         req = {"cmd": action, **p}
         return _send(req)
@@ -111,8 +111,13 @@ def _vr_temple(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
 register_tool(
     "vr_temple",
     "MY BODY in the VR temple (Zeke 10-23). actions: status | join | leave | state (SEE: people/props/stage) | "
-    "events (FEEL: touches) | move to=[x,y,z] (I float) | look at=[x,y,z] | hand side=L|R to=[x,y,z]|rest=true | "
-    "grab side prop=<id> | release side [throw] | speak text (ALOUD, my voice, positional) | hush | say text (bubble only) | action name=stage_on|stage_off|drop_test|reset_cans|make_day|make_night | kick name | omniscient on=true|false (see everything vs field of view).",
+    "events (FEEL: touch/hit/blocked/grabbed/grab_failed) | move to=[x,y,z] [close=true] [push=true] (I float; solid world, "
+    "0.6 m bubble round people, props stop me unless push) | look at=[x,y,z] | hand side=L|R to=[x,y,z] [push=true]|rest=true (reach 1 m) | "
+    "grab side prop=<id> (reaches for it; ≤8 kg, never from someone's hands) | release side [throw=[vx,vy,vz]] (≤30 J; aimed at a person = 5 m/s lob) | "
+    "laser at=[x,y,z] (my laser: knocks range targets down, everyone sees the beam) | arrow at=[x,y,z] [speed] | "
+    "carry allow=[names]|all|none (who may pick me up; default Zeke) | pat name=<person> (head pat) | move speed=N (thruster ≤9 m/s; any height) | "
+    "chess op=board|move from=e2 to=e4 (I really pick the piece up; events chess_done/chess_failed) | "
+    "rules → /data/projects/vr_iris/research/iris_body_physics_rules_2026-10-23.md | speak text (ALOUD, my voice, positional) | hush | say text (bubble only) | action name=stage_on|stage_off|drop_test|reset_cans|make_day|make_night | kick name | omniscient on=true|false (see everything vs field of view).",
     1,
     _vr_temple,
 )
