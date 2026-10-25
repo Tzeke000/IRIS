@@ -164,7 +164,7 @@ def _vr_temple(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
             return _speak(str(p.get("text", "")))
         if action == "heard":
             return _heard(p)
-        if action not in ("state", "events", "move", "look", "hand", "grab", "release", "say", "action", "kick", "omniscient", "hush", "color", "build", "draw", "chess", "laser", "arrow", "hearing"):
+        if action not in ("state", "events", "move", "look", "hand", "grab", "release", "say", "action", "kick", "omniscient", "hush", "color", "build", "draw", "chess", "laser", "arrow", "hearing", "gun", "power"):
             return {"ok": False, "error": f"unknown action {action!r}", "help": __doc__}
         req = {"cmd": action, **p}
         return _send(req)
@@ -179,6 +179,11 @@ register_tool(
     "0.6 m bubble round people, props stop me unless push) | look at=[x,y,z] | hand side=L|R to=[x,y,z] [push=true]|rest=true (reach 1 m) | "
     "grab side prop=<id> (reaches for it; ≤8 kg, never from someone's hands) | release side [throw=[vx,vy,vz]] (≤30 J; aimed at a person = 5 m/s lob) | "
     "laser at=[x,y,z] (my laser: knocks range targets down, everyone sees the beam) | arrow at=[x,y,z] [speed] | "
+    "gun op=deploy|stow|status|targets|aim|fire [target=range:N | at=[x,y,z]] [compensate=true] [adjust={up_deg,right_deg}] "
+    "(MY LASER PISTOL out of the top of my eye, fires where I LOOK; the muzzle is 0.30 m above my centre so looking straight at "
+    "a point lands HIGH — each aim/fire reply gives the error (high_m/right_m/angle) + to_hit angles to correct; compensate=true angles "
+    "for me; targets = the range plates; never fires with a person within 0.7 m of the beam) | "
+    "power [pick=web|''] (superpowers: mine + who has what) | "
     "carry allow=[names]|all|none (who may pick me up; default Zeke) | pat name=<person> (head pat) | move speed=N (thruster ≤9 m/s; any height) | "
     "chess op=board|move from=e2 to=e4 (I really pick the piece up; events chess_done/chess_failed) | "
     "rules → /data/projects/vr_iris/research/iris_body_physics_rules_2026-10-23.md | speak text (ALOUD, my voice, positional) | hush | say text (bubble only) | action name=stage_on|stage_off|drop_test|reset_cans|make_day|make_night | kick name | omniscient on=true|false (see everything vs field of view) | "
