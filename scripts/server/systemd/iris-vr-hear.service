@@ -1,0 +1,22 @@
+# ~/.config/systemd/user/iris-vr-hear.service - my ears in the VR temple (Zeke 2026-10-25: understand people,
+# per speaker, with times; only pay attention once they say my name). Reads the spool my VR bot writes
+# (game repo scripts/iris_hearing.gd), writes state/vr_temple/heard.jsonl; iris_body_host.py wakes me on
+# lines where someone is talking TO me. Install: cp to ~/.config/systemd/user/ && systemctl --user enable --now.
+[Unit]
+Description=Iris VR-temple ears (per-speaker speech-to-text: bot spool -> faster-whisper on the V100 -> state/vr_temple/heard.jsonl)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/IRIS
+Environment=PYTHONUNBUFFERED=1
+Environment=HF_HOME=%h/IRIS/.cache/huggingface
+Environment=IRIS_VR_HEAR_DIR=/tmp/iris_vr_hear
+ExecStart=%h/venvs/iris-v100/bin/python %h/IRIS/scripts/vr/vr_hear.py
+Restart=on-failure
+RestartSec=10
+Nice=5
+MemoryMax=4G
+
+[Install]
+WantedBy=default.target

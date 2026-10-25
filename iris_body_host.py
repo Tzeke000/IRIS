@@ -268,6 +268,7 @@ _SOURCE_PRIORITY = {
     "perception": 4,
     "letter": 5,
     "llm": 6,          # 2026-09-08: idle nudge for pending brain/* LLM requests (lowest)
+    "vr": 2,           # 2026-10-25: someone in the VR temple talking TO me (said my name) - a live person, like the orb
 }
 _enqueue_seq = [0]   # monotonic tiebreaker => stable FIFO *within* a priority band
 
@@ -1039,6 +1040,74 @@ def _prior_handoff_block():
     except Exception as e:
         print("[host] prior handoff read failed (non-fatal): " + repr(e), file=sys.stderr)
         return ""
+
+
+# ----------------------------------------------------------------- VR temple inbound (my ears in the temple)
+# scripts/vr/vr_hear.py transcribes every player's voice per speaker into state/vr_temple/heard.jsonl. Lines
+# with attending=true (that speaker said my name within 90 s) wake me here; everything else just sits in the
+# log for `vr_temple action=heard`. Tail-only: never replays lines written before this task started.
+VR_HEARD_PATH = os.path.join(REPO_ROOT, "state", "vr_temple", "heard.jsonl")
+VR_HEARD_POLL_S = 1.0
+VR_HEARD_DEBOUNCE_S = 1.2       # a second sentence right behind the first rides the same turn
+VR_HEARD_ON = os.environ.get("IRIS_VR_HEAR", "1") != "0"
+
+
+def _vr_heard_read(pos):
+    """(new_pos, [line dicts]) of COMPLETE lines appended since byte `pos`. Rotation/truncation => from 0."""
+    try:
+        size = os.path.getsize(VR_HEARD_PATH)
+    except OSError:
+        return 0, []
+    if size < pos:
+        pos = 0
+    if size == pos:
+        return pos, []
+    with open(VR_HEARD_PATH, "rb") as f:
+        f.seek(pos)
+        chunk = f.read(size - pos)
+    end = chunk.rfind(b"\n")
+    if end < 0:
+        return pos, []
+    out = []
+    for ln in chunk[:end].split(b"\n"):
+        try:
+            d = json.loads(ln.decode("utf-8", "replace"))
+            if isinstance(d, dict):
+                out.append(d)
+        except ValueError:
+            pass
+    return pos + end + 1, out
+
+
+def _vr_heard_prompt(lines):
+    head = ("[VR TEMPLE - my ears in the temple heard this: speech-to-text of what a player said into their mic "
+            "(the name comes from their invite; the words can be slightly off). They are talking TO me - they said "
+            "my name within the last 90 s. This is a SILENT text turn: to answer them out loud IN the temple use "
+            "vr_temple action=speak text=...; vr_temple action=heard has the full log, including what others said "
+            "that wasn't to me.]")
+    body = []
+    for d in lines:
+        ts = str(d.get("t_start", ""))
+        hhmmss = ts[11:19] if len(ts) >= 19 else "?"
+        body.append("[VR TEMPLE - " + str(d.get("speaker", "someone")) + " said, " + hhmmss + "] "
+                    + str(d.get("text", "")).strip())
+    return head + "\n" + "\n".join(body)
+
+
+async def vr_heard_reader(queue, loop):
+    pos = os.path.getsize(VR_HEARD_PATH) if os.path.exists(VR_HEARD_PATH) else 0
+    while True:
+        await asyncio.sleep(VR_HEARD_POLL_S)
+        pos, lines = await loop.run_in_executor(None, _vr_heard_read, pos)
+        lines = [d for d in lines if d.get("attending")]
+        if not lines:
+            continue
+        await asyncio.sleep(VR_HEARD_DEBOUNCE_S)
+        pos, more = await loop.run_in_executor(None, _vr_heard_read, pos)
+        lines += [d for d in more if d.get("attending")]
+        text = _vr_heard_prompt(lines)
+        print("\n[vr <- temple] " + text.split("\n", 1)[1], flush=True)
+        await _enqueue(queue, ("vr", text, lines[-1].get("id")))
 
 
 async def _supervised(name, factory, *, backoff_s=5.0):
@@ -2169,6 +2238,11 @@ async def main():
                 print("[host] letter inbound: OFF - no ~/.iris_sibling_secret found.", file=sys.stderr)
             tasks.append(asyncio.create_task(_supervised(
                 "llm_pending_poller", lambda: llm_pending_poller(queue, loop, turn))))
+            if VR_HEARD_ON:
+                tasks.append(asyncio.create_task(_supervised(
+                    "vr_heard_reader", lambda: vr_heard_reader(queue, loop))))
+                print("[host] VR temple ears: ON - waking on lines in state/vr_temple/heard.jsonl where someone "
+                      "said my name (attending).")
             if turn.hold is not None:
                 tasks.append(asyncio.create_task(_supervised("hold_sentinel", lambda: hold_sentinel(turn, loop))))
                 print("[host] hold sentinel: ON - an active turn silent " + str(int(_hh.HOLD_AFTER_S))

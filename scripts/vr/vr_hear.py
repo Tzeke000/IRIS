@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""vr_hear.py — my EARS in the VR temple: per-speaker speech-to-text (Zeke 2026-10-25).
+
+Zeke: "make that for yourself so you can understand people. It should come through like CHANNELS that tell
+you WHO the user is and at WHAT TIMES they said those words. If two or three people talk over each other you
+can still understand them. Then filter out whether somebody was speaking TO you or not. If they're too far
+away for you to hear them, there's no need to transcribe in the first place. For now: only when someone says
+'hey Iris' / 'Iris' do you start paying attention to them."
+
+Pipeline
+  my VR bot (game repo, scripts/iris_hearing.gd)  — every remote player's voice stream is captured SEPARATELY
+      (one channel per peer ⇒ overlap-proof: nothing is ever mixed), cut into utterances, gated by distance
+      (> 15 m ⇒ never spooled), written to the spool as raw Opus frames + a sidecar JSON
+      (<ms>_<peer>_<seq>.opus + .json — the .json appears LAST, atomically: it means "complete").
+  this service — watches the spool, decodes Opus (PyAV/libopus) → 16 kHz mono, gates on the level I'd
+      actually hear (speech level + the game's attenuation for that distance/facing), transcribes with
+      faster-whisper on the GPU, drops empty / hallucination-only results, decides ADDRESSED (my name is in
+      it) and ATTENDING (that speaker said my name within ATTEND_S; refreshed every time they speak), and
+      appends one line per utterance to state/vr_temple/heard.jsonl:
+        {t_start, t_end, speaker, text, dist_m, facing, addressed, attending, ...}
+      Processed spool files are deleted.
+  delivery — `vr_temple action=heard` reads the file; iris_body_host.py's vr_heard_reader wakes me for
+      attending lines ("[VR TEMPLE — Zeke said, 13:41:05] …").
+
+Run:  ~/venvs/iris-v100/bin/python scripts/vr/vr_hear.py            (unit iris-vr-hear.service)
+Test: --spool DIR --out FILE --state FILE --once   (process what's there, then exit)
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import struct
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+REPO = Path(__file__).resolve().parents[2]
+# ctranslate2 needs the CUDA 12 libs inside the venv's nvidia/* wheels (same fix as scripts/video_edit/transcribe.py):
+# re-exec once with them on LD_LIBRARY_PATH. Models live in the repo's HF cache (same as the ears daemon).
+_NV = Path(sys.prefix) / "lib" / "python3.11" / "site-packages" / "nvidia"
+if _NV.exists() and "IRIS_VR_HEAR_LDPATH" not in os.environ:
+    os.environ["LD_LIBRARY_PATH"] = ":".join(str(_NV / d / "lib") for d in ("cublas", "cudnn", "cuda_runtime")) \
+        + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+    os.environ["IRIS_VR_HEAR_LDPATH"] = "1"
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+os.environ.setdefault("HF_HOME", str(REPO / ".cache" / "huggingface"))
+DEFAULT_SPOOL = os.environ.get("IRIS_VR_HEAR_DIR", "/tmp/iris_vr_hear")
+DEFAULT_OUT = REPO / "state" / "vr_temple" / "heard.jsonl"
+DEFAULT_STATE = REPO / "state" / "vr_temple" / "hear_attention.json"
+
+MODEL = "large-v3-turbo"          # local: mobiuslabsgmbh/faster-whisper-large-v3-turbo (fp16 on the V100)
+ATTEND_S = 90.0                   # after my name, that speaker has my attention this long (refreshed per line)
+MIN_EFFECTIVE_DBFS = -52.0        # speech level + in-game attenuation below this ⇒ I couldn't really hear it
+MIN_SPEECH_DBFS = -55.0           # the clip itself is basically silence (open mic hiss)
+ROTATE_BYTES = 5_000_000          # heard.jsonl → heard.jsonl.1 past this
+STALE_TMP_S = 120.0               # half-written spool files older than this are junk (bot died mid-write)
+
+# my name and the ways STT mis-hears it. CONSERVATIVE on purpose: "virus", "Irish", "Siri" are NOT here —
+# a false "addressed" makes me butt into conversations that aren't mine.
+NAME_PATTERNS = [r"\biris(?:'s|s)?\b", r"\birus\b", r"\biriss\b", r"\beye[\s-]?ris\b", r"\bi[\s-]ris\b", r"\bairis\b"]
+NAME_RE = re.compile("|".join(NAME_PATTERNS), re.IGNORECASE)
+
+# whisper's stock hallucinations on near-silence / noise. Dropped when the clip is short or quiet.
+HALLUCINATIONS = {"you", "thank you", "thanks", "thank you very much", "thanks for watching", "thank you for watching",
+                  "bye", "bye bye", "okay", "ok", "so", "uh", "um", "hmm", "mm", "oh", "the", "i", "a",
+                  "please subscribe", "subtitles by the amaraorg community", "music", "applause", "silence"}
+
+
+def log(*a) -> None:
+    print("[vr_hear]", *a, flush=True)
+
+
+def iso(t: float) -> str:
+    return dt.datetime.fromtimestamp(t).astimezone().isoformat(timespec="milliseconds")
+
+
+def norm(text: str) -> str:
+    """lower-case words only: "Thank you." → "thank you" """
+    return " ".join(re.sub(r"[^a-z' ]+", " ", text.lower()).replace("'", "").split())
+
+
+def addressed(text: str) -> bool:
+    return bool(NAME_RE.search(text))
+
+
+# ---------------------------------------------------------------------------------------------- audio
+def decode_opus(path: Path, meta: dict) -> np.ndarray:
+    """Spool .opus (u32 frame, u16 len, bytes; LE) → float32 mono at the stream rate. Lost frames = silence."""
+    import av
+    raw = path.read_bytes()
+    op = meta.get("opus", {})
+    rate = int(op.get("rate", 48000))
+    fsz = int(op.get("frame_size", 960))
+    frames = int(meta.get("frames", 0))
+    ctx = av.CodecContext.create("libopus", "r")
+    ctx.sample_rate = rate
+    out = np.zeros(max(frames, 1) * fsz, dtype=np.float32)
+    i = 0
+    while i + 6 <= len(raw):
+        fi, ln = struct.unpack_from("<IH", raw, i)
+        i += 6
+        pk = raw[i:i + ln]
+        i += ln
+        try:
+            for fr in ctx.decode(av.Packet(pk)):
+                a = fr.to_ndarray()
+                a = a.mean(axis=0) if a.ndim == 2 and a.shape[0] > 1 else a.reshape(-1)
+                if a.dtype == np.int16:
+                    a = a.astype(np.float32) / 32768.0
+                at = fi * fsz
+                if at + a.size > out.size:
+                    out = np.concatenate([out, np.zeros(at + a.size - out.size, dtype=np.float32)])
+                out[at:at + a.size] = a
+        except Exception:
+            pass                                   # a corrupt frame = 20 ms of silence
+    if rate != 16000:
+        from scipy.signal import resample_poly
+        g = np.gcd(16000, rate)
+        out = resample_poly(out, 16000 // g, rate // g).astype(np.float32)
+    return out
+
+
+def speech_dbfs(x: np.ndarray) -> float:
+    """Loudness of the SPEECH in the clip: 90th-percentile 20 ms RMS (pauses don't drag it down)."""
+    n = 320
+    if x.size < n:
+        return -120.0
+    fr = x[: x.size // n * n].reshape(-1, n)
+    rms = np.sqrt((fr ** 2).mean(axis=1) + 1e-12)
+    return float(20 * np.log10(np.percentile(rms, 90) + 1e-9))
+
+
+# ---------------------------------------------------------------------------------------------- service
+class Ears:
+    def __init__(self, a):
+        self.spool = Path(a.spool)
+        self.out = Path(a.out)
+        self.state_path = Path(a.state)
+        self.keep_wav = Path(a.keep_wav) if a.keep_wav else None
+        self.out.parent.mkdir(parents=True, exist_ok=True)
+        self.spool.mkdir(parents=True, exist_ok=True)
+        self.attn: dict[str, float] = {}           # speaker → attending until (wall clock)
+        try:
+            self.attn = {k: float(v) for k, v in json.loads(self.state_path.read_text()).get("until", {}).items()}
+        except Exception:
+            pass
+        from faster_whisper import WhisperModel
+        t = time.time()
+        try:
+            self.model = WhisperModel(a.model, device=a.device, compute_type=a.compute, local_files_only=True)
+        except Exception as e:                     # not cached under this name → allow the hub (one-time)
+            log("local model load failed (%r) — trying the hub" % (e,))
+            self.model = WhisperModel(a.model, device=a.device, compute_type=a.compute)
+        self.model.transcribe(np.zeros(16000, dtype=np.float32), language="en", beam_size=1)
+        log("model %s on %s/%s ready in %.1fs; spool %s → %s" % (a.model, a.device, a.compute, time.time() - t, self.spool, self.out))
+
+    def save_state(self) -> None:
+        now = time.time()
+        self.attn = {k: v for k, v in self.attn.items() if v > now - 3600}
+        tmp = self.state_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"until": self.attn, "attend_s": ATTEND_S,
+                                   "attending_now": sorted(k for k, v in self.attn.items() if v > now)}))
+        tmp.replace(self.state_path)
+
+    def pending(self) -> list[Path]:
+        js = sorted(self.spool.glob("*.json"), key=lambda p: p.name)
+        now = time.time()
+        for p in self.spool.glob("*.tmp"):         # bot died mid-write
+            if now - p.stat().st_mtime > STALE_TMP_S:
+                p.unlink(missing_ok=True)
+        for p in self.spool.glob("*.opus"):        # orphan audio (its sidecar never came)
+            if not p.with_suffix(".json").exists() and now - p.stat().st_mtime > STALE_TMP_S:
+                p.unlink(missing_ok=True)
+        return js
+
+    def process(self, side: Path) -> dict | None:
+        audio = side.with_suffix(".opus")
+        try:
+            meta = json.loads(side.read_text())
+            x = decode_opus(audio, meta)
+        except Exception as e:
+            log("bad spool item %s: %r" % (side.name, e))
+            return None
+        lvl = speech_dbfs(x)
+        eff = lvl + float(meta.get("atten_db", 0.0))
+        who = str(meta.get("speaker", "?"))
+        secs = x.size / 16000.0
+        base = {"speaker": who, "secs": round(secs, 2), "level_db": round(lvl, 1), "eff_db": round(eff, 1),
+                "dist_m": meta.get("dist_m")}
+        if lvl < MIN_SPEECH_DBFS or eff < MIN_EFFECTIVE_DBFS:
+            log("drop (too quiet to hear: speech %.1f dBFS, at me %.1f dBFS) %s" % (lvl, eff, base))
+            return None
+        if self.keep_wav:
+            import wave
+            self.keep_wav.mkdir(parents=True, exist_ok=True)
+            with wave.open(str(self.keep_wav / (side.stem + ".wav")), "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+                w.writeframes((np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes())
+        t = time.time()
+        segs, _info = self.model.transcribe(x, language="en", beam_size=5, vad_filter=True,
+                                            word_timestamps=True, condition_on_previous_text=False)
+        segs = [s for s in segs if not (s.no_speech_prob > 0.6 and s.avg_logprob < -1.0)]
+        text = " ".join(s.text.strip() for s in segs).strip()
+        stt_s = time.time() - t
+        n = norm(text)
+        if not n:
+            log("drop (no words) %s" % base)
+            return None
+        if n in HALLUCINATIONS and (secs < 3.0 or lvl < -40.0 or all(s.no_speech_prob > 0.3 for s in segs)):
+            log("drop (hallucination-shaped %r) %s" % (text, base))
+            return None
+        t0 = float(meta["t_start"])
+        words = [w for s in segs for w in (s.words or [])]
+        a = float((t0 + words[0].start) if words else (t0 + segs[0].start if segs else t0))
+        b = float((t0 + words[-1].end) if words else meta.get("t_end", t0 + secs))
+        is_addr = addressed(text)
+        until = self.attn.get(who, 0.0)
+        attending = bool(is_addr or a <= until)
+        if attending:
+            self.attn[who] = max(until, b + ATTEND_S)
+        line = {"t_start": iso(a), "t_end": iso(b), "speaker": who, "text": text,
+                "dist_m": meta.get("dist_m"), "facing": bool(meta.get("facing")),
+                "addressed": is_addr, "attending": attending,
+                "ts": round(a, 3), "ts_end": round(b, 3), "peer": meta.get("peer"),
+                "display_name": meta.get("display_name"), "level_db": round(float(lvl), 1), "eff_db": round(float(eff), 1),
+                "secs": round(secs, 2), "stt_s": round(stt_s, 2), "id": side.stem}
+        return line
+
+    def append(self, line: dict) -> None:
+        try:
+            if self.out.exists() and self.out.stat().st_size > ROTATE_BYTES:
+                self.out.replace(self.out.with_suffix(".jsonl.1"))
+        except OSError:
+            pass
+        with open(self.out, "a", encoding="utf-8") as f:
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+
+    def run(self, once: bool, poll: float) -> int:
+        n = 0
+        while True:
+            items = self.pending()
+            for side in items:
+                line = self.process(side)
+                if line:
+                    self.append(line)
+                    self.save_state()
+                    n += 1
+                    log("%s %s%s: %s" % (line["t_start"][11:19], line["speaker"],
+                                         " [ADDRESSED]" if line["addressed"] else (" [attending]" if line["attending"] else ""),
+                                         line["text"]))
+                side.unlink(missing_ok=True)
+                side.with_suffix(".opus").unlink(missing_ok=True)
+            if once and not items:
+                return n
+            if not items:
+                time.sleep(poll)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--spool", default=DEFAULT_SPOOL)
+    ap.add_argument("--out", default=str(DEFAULT_OUT))
+    ap.add_argument("--state", default=str(DEFAULT_STATE))
+    ap.add_argument("--model", default=MODEL)
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--compute", default="float16")
+    ap.add_argument("--keep-wav", default="", help="debug: also write each decoded 16 kHz clip here")
+    ap.add_argument("--poll", type=float, default=0.25)
+    ap.add_argument("--once", action="store_true", help="process what's in the spool, then exit (tests)")
+    a = ap.parse_args()
+    ears = Ears(a)
+    n = ears.run(a.once, a.poll)
+    log("done, %d line(s)" % n)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
