@@ -114,7 +114,15 @@ def decode_opus(path: Path, meta: dict) -> np.ndarray:
         try:
             for fr in ctx.decode(av.Packet(pk)):
                 a = fr.to_ndarray()
-                a = a.mean(axis=0) if a.ndim == 2 and a.shape[0] > 1 else a.reshape(-1)
+                # PyAV's libopus decoder hands back STEREO even for a mono stream, as PACKED s16 of shape (1, 2·N):
+                # flattening that interleaved L,R,L,R… as mono made every 20 ms frame 40 ms long → the write below
+                # kept only its first half = 10 ms of audio stretched over 20 ms (an octave down, half the speech
+                # lost). Found 10-25 by the mic-path unit test (a 440 Hz tone decoded as 220 Hz).
+                ch = len(fr.layout.channels)
+                if fr.format.is_planar:
+                    a = a.mean(axis=0) if a.shape[0] > 1 else a.reshape(-1)
+                else:
+                    a = a.reshape(-1, ch).mean(axis=1) if ch > 1 else a.reshape(-1)
                 if a.dtype == np.int16:
                     a = a.astype(np.float32) / 32768.0
                 at = fi * fsz
