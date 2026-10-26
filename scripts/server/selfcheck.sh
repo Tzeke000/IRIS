@@ -26,6 +26,7 @@ ports=$(ss -ltn | awk '{print $4}' | grep -E ":(5876|8769|8770|5877)$" | tr '\n'
 code=$(curl -sk -m 5 -o /dev/null -w "%{http_code}" http://127.0.0.1:5876/api/v1/vision/latest_frame)
 [ "$code" = 200 ] && ok "orb :5876 frame 200" || warn "orb :5876 → $code (204 at night = eyes resting; listener lost ⇒ restart_orb_http FIRST)"
 po=$(curl -s -m 5 -o /dev/null -w "%{http_code}" http://127.0.0.1:5877/health); [ "$po" = 200 ] && ok "post-office 200" || warn "post-office $po (Wren's lifeline — never bounce unilaterally)"
+sk=$(grep -h "^IRIS_AUDIO_SINK=" ~/.config/iris/voice.env 2>/dev/null | cut -d= -f2 | tr -d '"'); if [ -n "$sk" ] && timeout 3 bash -c "</dev/tcp/${sk%:*}/${sk#*:}" 2>/dev/null; then ok "tower audio sink reachable (my voice can play)"; else warn "tower audio sink :8775 UNREACHABLE — my voice plays NOWHERE (the orb app owns the sink: is it open on the tower?) (10-26)"; fi
 ts=$(tailscale ip -4 2>&1 | head -1); [ -n "$ts" ] && [[ "$ts" != *NoState* ]] && ok "ssh $(systemctl is-active ssh), tailscale up" || warn "tailscale: $ts (his re-auth)"
 kex=$(journalctl -u ssh --since -6h --no-pager 2>/dev/null | grep -c kex_exchange_identification); echo "  kex noise last 6h: $kex"
 # PRESENCE

@@ -77,6 +77,19 @@ def _sink_sessions(lines: int = 200) -> tuple[list[tuple[float, float | None]], 
     return sessions, None
 
 
+def _sink_reachable() -> bool:
+    """a real TCP connect to the tower sink the mouth is configured for (IRIS_AUDIO_SINK in ~/.config/iris/voice.env)"""
+    import socket
+    try:
+        env = (Path.home() / ".config" / "iris" / "voice.env").read_text()
+        hp = [l.split("=", 1)[1].strip().strip('"') for l in env.splitlines() if l.startswith("IRIS_AUDIO_SINK=")][0]
+        host, port = hp.rsplit(":", 1)
+        with socket.create_connection((host, int(port)), timeout=3):
+            return True
+    except Exception:
+        return False
+
+
 def _voice_delivery_check(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     since_min = max(5, min(24 * 60, int(params.get("since_min") or 30)))
     t0 = time.time() - since_min * 60
@@ -107,8 +120,16 @@ def _voice_delivery_check(params: dict[str, Any], g: dict[str, Any]) -> dict[str
     unplayed = [t for t in spoke if sessions and not covered(t)]
     hhmm = lambda xs: [time.strftime("%H:%M:%S", time.localtime(x)) for x in xs[:8]]   # noqa: E731
     issues = []
+    # (10-26) the mouth DID get them if it logged a sink timeout → the TOWER SINK is down (the orb app owns it), not the mouth
+    sink_dead = _journal_times("iris-mouth", since_min, "progressive failed (TimeoutError")
     if unspoken:
-        issues.append(f"{len(unspoken)} of {len(meant)} voice line(s) never reached the mouth (e.g. {', '.join(hhmm(unspoken))})")
+        got = [t for t in unspoken if any(t - 5 <= s <= t + 60 for s in sink_dead)]
+        if got:
+            issues.append(f"{len(got)} of {len(meant)} voice line(s) reached the mouth but the TOWER SINK :8775 timed out — "
+                          f"nothing played (is the orb app open on the tower? it owns the sink) (e.g. {', '.join(hhmm(got))})")
+        rest = [t for t in unspoken if t not in got]
+        if rest:
+            issues.append(f"{len(rest)} of {len(meant)} voice line(s) never reached the mouth (e.g. {', '.join(hhmm(rest))})")
     if unplayed:
         issues.append(f"{len(unplayed)} mouth reply(ies) with NO tower sink session open (e.g. {', '.join(hhmm(unplayed))})")
     if drops:
@@ -116,7 +137,8 @@ def _voice_delivery_check(params: dict[str, Any], g: dict[str, Any]) -> dict[str
     verdict = "warn" if issues else ("unknown" if sink_err and spoke else "ok")
     return {"ok": True, "verdict": verdict, "since_min": since_min,
             "meant": len(meant), "mouth_spoke": len(spoke), "sink_sessions": len(sessions),
-            "sink_open_now": bool(sessions and sessions[-1][1] is None), "issues": issues,
+            "sink_open_now": bool(sessions and sessions[-1][1] is None) and _sink_reachable(),   # (10-26: the log alone lied —
+            "issues": issues,                                                                    #  a 10-21 session never logged 'ended')
             "sink_error": sink_err,
             "note": "on-demand only (Zeke 10-08: no new always-on load on his PC). Silence with nothing meant is not a fault."}
 
