@@ -71,6 +71,11 @@ HALLUCINATIONS = {"you", "thank you", "thanks", "thank you very much", "thanks f
                   "please subscribe", "subtitles by the amaraorg community", "music", "applause", "silence"}
 
 
+MERGE_GAP_S = 1.2     # join same-speaker clips closer than this
+MERGE_WAIT_S = 1.3    # transcribe once the speaker has been quiet this long
+MERGE_MAX_S = 20.0    # never merge past this length
+
+
 def log(*a) -> None:
     print("[vr_hear]", *a, flush=True)
 
@@ -178,14 +183,20 @@ class Ears:
                 p.unlink(missing_ok=True)
         return js
 
-    def process(self, side: Path) -> dict | None:
+    def load(self, side: Path):
         audio = side.with_suffix(".opus")
         try:
             meta = json.loads(side.read_text())
-            x = decode_opus(audio, meta)
+            return meta, decode_opus(audio, meta)
         except Exception as e:
             log("bad spool item %s: %r" % (side.name, e))
             return None
+
+    def process(self, side: Path) -> dict | None:
+        got = self.load(side)
+        return self.transcribe(got[0], got[1], side.stem) if got else None
+
+    def transcribe(self, meta: dict, x: np.ndarray, stem: str) -> dict | None:
         lvl = speech_dbfs(x)
         eff = lvl + float(meta.get("atten_db", 0.0))
         who = str(meta.get("speaker", "?"))
@@ -198,7 +209,7 @@ class Ears:
         if self.keep_wav:
             import wave
             self.keep_wav.mkdir(parents=True, exist_ok=True)
-            with wave.open(str(self.keep_wav / (side.stem + ".wav")), "wb") as w:
+            with wave.open(str(self.keep_wav / (stem + ".wav")), "wb") as w:
                 w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
                 w.writeframes((np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes())
         t = time.time()
@@ -228,7 +239,7 @@ class Ears:
                 "addressed": is_addr, "attending": attending,
                 "ts": round(a, 3), "ts_end": round(b, 3), "peer": meta.get("peer"),
                 "display_name": meta.get("display_name"), "level_db": round(float(lvl), 1), "eff_db": round(float(eff), 1),
-                "secs": round(secs, 2), "stt_s": round(stt_s, 2), "id": side.stem}
+                "secs": round(secs, 2), "stt_s": round(stt_s, 2), "id": stem}
         return line
 
     def append(self, line: dict) -> None:
@@ -240,22 +251,58 @@ class Ears:
         with open(self.out, "a", encoding="utf-8") as f:
             f.write(json.dumps(line, ensure_ascii=False) + "\n")
 
+    # MERGE (10-25 live test): his voice-activated mic closes a stream on every short pause, so one sentence arrived
+    # as 1-2 s fragments → half-sentences + many "no words" drops. Consecutive clips from the SAME speaker with a gap
+    # under MERGE_GAP_S are joined (silence in the gap) and transcribed once the speaker has been quiet MERGE_WAIT_S.
+    def _emit(self, line: dict | None) -> int:
+        if not line:
+            return 0
+        self.append(line)
+        self.save_state()
+        log("%s %s%s: %s" % (line["t_start"][11:19], line["speaker"],
+                             " [ADDRESSED]" if line["addressed"] else (" [attending]" if line["attending"] else ""),
+                             line["text"]))
+        return 1
+
+    def _flush(self, who: str) -> int:
+        b = self.buf.pop(who, None)
+        if not b:
+            return 0
+        meta = dict(b["meta"]); meta["t_end"] = b["t_end"]
+        if b["n"] > 1:
+            log("merged %d clips from %s (%.1f s)" % (b["n"], who, b["x"].size / 16000.0))
+        return self._emit(self.transcribe(meta, b["x"], b["stem"]))
+
     def run(self, once: bool, poll: float) -> int:
         n = 0
+        self.buf: dict[str, dict] = {}
         while True:
             items = self.pending()
             for side in items:
-                line = self.process(side)
-                if line:
-                    self.append(line)
-                    self.save_state()
-                    n += 1
-                    log("%s %s%s: %s" % (line["t_start"][11:19], line["speaker"],
-                                         " [ADDRESSED]" if line["addressed"] else (" [attending]" if line["attending"] else ""),
-                                         line["text"]))
+                got = self.load(side)
                 side.unlink(missing_ok=True)
                 side.with_suffix(".opus").unlink(missing_ok=True)
-            if once and not items:
+                if not got:
+                    continue
+                meta, x = got
+                who = str(meta.get("speaker", "?"))
+                t0 = float(meta.get("t_start", time.time()))
+                t1 = float(meta.get("t_end", t0 + x.size / 16000.0))
+                b = self.buf.get(who)
+                gap = t0 - b["t_end"] if b else 1e9
+                if b and -0.5 <= gap <= MERGE_GAP_S and (b["x"].size + x.size) / 16000.0 <= MERGE_MAX_S:
+                    pad = np.zeros(int(max(0.0, gap) * 16000), dtype=np.float32)
+                    b["x"] = np.concatenate([b["x"], pad, x.astype(np.float32)])
+                    b["t_end"] = t1; b["n"] += 1
+                    for k in ("dist_m", "facing", "atten_db"):
+                        if k in meta: b["meta"][k] = meta[k]
+                else:
+                    n += self._flush(who)
+                    self.buf[who] = {"x": x.astype(np.float32), "meta": meta, "t_end": t1, "n": 1, "stem": side.stem}
+            now = time.time()
+            for who in [w for w, b in self.buf.items() if now - b["t_end"] >= MERGE_WAIT_S or once]:
+                n += self._flush(who)
+            if once and not items and not self.buf:
                 return n
             if not items:
                 time.sleep(poll)
