@@ -72,7 +72,7 @@ def _speak(text: str) -> dict[str, Any]:
             os.remove(fp)
     req = urllib.request.Request("http://localhost:8769/synth", data=json.dumps({"text": text, "rate": 48000}).encode(),
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=30) as r:
         wav = r.read()
     path = os.path.join(_VOICE_DIR, f"line_{int(time.time() * 1000)}.wav")
     with open(path, "wb") as f:

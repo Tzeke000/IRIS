@@ -2919,7 +2919,10 @@ def iris_tool_list(tier_max: int = 3) -> dict:
 # memory, even time_check). Robot/SDK tools now run in a worker thread via
 # anyio.to_thread: a hung body call can no longer freeze anything else.
 # Prefix-matched so future vector tools are covered automatically.
-_THREADED_TOOL_PREFIXES = ("body_", "vector_")
+# (2026-10-29) + "vr_temple": its speak blocks on the mouth's /synth (1.6–13 s, longer under GPU load) and the bot socket —
+# run inline it held the WHOLE runtime event loop, so later calls queued behind it and hit the 180 s MCP timeout
+# (7 "voice freezes" in one VR night while a direct /synth answered in 0.34 s)
+_THREADED_TOOL_PREFIXES = ("body_", "vector_", "vr_temple")
 
 
 @mcp.tool()
