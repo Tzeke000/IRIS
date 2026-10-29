@@ -1047,8 +1047,8 @@ def _prior_handoff_block():
 # with attending=true (that speaker said my name within 90 s) wake me here; everything else just sits in the
 # log for `vr_temple action=heard`. Tail-only: never replays lines written before this task started.
 VR_HEARD_PATH = os.path.join(REPO_ROOT, "state", "vr_temple", "heard.jsonl")
-VR_HEARD_POLL_S = 1.0
-VR_HEARD_DEBOUNCE_S = 1.2       # a second sentence right behind the first rides the same turn
+VR_HEARD_POLL_S = 0.4          # (10-29 latency pass: was 1.0)
+VR_HEARD_DEBOUNCE_S = 0.6       # a second sentence right behind the first rides the same turn (10-29: was 1.2 — vr_hear already merges a speaker's clips 1.2 s apart)
 VR_HEARD_ON = os.environ.get("IRIS_VR_HEAR", "1") != "0"
 
 
@@ -1092,6 +1092,35 @@ def _vr_heard_prompt(lines):
         body.append("[VR TEMPLE - " + str(d.get("speaker", "someone")) + " said, " + hhmmss + "] "
                     + str(d.get("text", "")).strip())
     return head + "\n" + "\n".join(body)
+
+
+def _vr_coalesce(queue, entry):
+    # ── VR coalesce (2026-10-29, Zeke: "we've got to fix that latency so we can have a normal
+    # conversation"): every VR heard-batch was its own queue item, so while I was mid-turn they
+    # stacked up and I answered lines 5-7 minutes old ONE TURN EACH. Now when a VR item comes off
+    # the queue, every other waiting VR item is folded into it: ONE turn, all the lines, newest last.
+    if entry[2][0] == "vr":
+        _held, _vr_more = [], []
+        while True:
+            try:
+                _e = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            (_vr_more if _e[2][0] == "vr" else _held).append(_e)
+        for _e in _held:
+            queue.put_nowait(_e)
+        if _vr_more:
+            _bodies = [entry[2][1].split("\n", 1)[1] if "\n" in entry[2][1] else entry[2][1]]
+            _bodies += [(_e[2][1].split("\n", 1)[1] if "\n" in _e[2][1] else _e[2][1]) for _e in _vr_more]
+            _head = entry[2][1].split("\n", 1)[0]
+            _merged = (_head + "\n[" + str(1 + len(_vr_more)) + " batches folded into this one turn while I "
+                       "was busy — answer the LATEST thing they said; older lines are context, not "
+                       "separate questions]\n" + "\n".join(_bodies))
+            _last = _vr_more[-1]
+            entry = (entry[0], entry[1], ("vr", _merged, _last[2][2]) + tuple(entry[2][3:]),
+                     *entry[3:])
+            print("[host] VR coalesce: folded " + str(len(_vr_more)) + " waiting VR batch(es) into one turn", flush=True)
+    return entry
 
 
 async def vr_heard_reader(queue, loop):
@@ -2256,6 +2285,7 @@ async def main():
             first_turn = True   # round-2 fix 3.3: prior-process handoff rides the first prompt only
             while True:
                 entry = await queue.get()
+                entry = _vr_coalesce(queue, entry)
                 _prio, _seq, item = entry[0], entry[1], entry[2]
                 enq_ts = entry[3] if len(entry) > 3 else None   # 2026-07-13 age stamp
                 source, text, msg_id = item[0], item[1], item[2]

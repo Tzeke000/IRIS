@@ -58,7 +58,24 @@ def _send(req: dict[str, Any], timeout: float = 4.0) -> dict[str, Any]:
 _VOICE_DIR = "/tmp/iris_vr_voice"
 
 
+def _sentences(text: str) -> list[str]:
+    """split into sentences; fold pieces under 12 chars into the next so a 'Yes!' doesn't get its own synth call"""
+    import re
+    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", text) if p.strip()]
+    out: list[str] = []
+    for p in parts:
+        if out and len(out[-1]) < 12:
+            out[-1] = out[-1] + " " + p
+        else:
+            out.append(p)
+    return out or [text]
+
+
 def _speak(text: str) -> dict[str, Any]:
+    """SAY IT, SENTENCE BY SENTENCE (2026-10-29, Zeke: "speed up your mouth — when you can finally start saying your
+    first words"): the mouth renders the FIRST sentence and my body starts playing it at once; the rest are rendered
+    while it plays and queue behind it (Voice.speak_wav appends to the playing feed). Time-to-first-word = one
+    sentence's synth, not the whole line's."""
     import os
     import time
     import urllib.request
@@ -68,17 +85,32 @@ def _speak(text: str) -> dict[str, Any]:
     os.makedirs(_VOICE_DIR, exist_ok=True)
     for f in os.listdir(_VOICE_DIR):                       # keep the folder small
         fp = os.path.join(_VOICE_DIR, f)
-        if time.time() - os.path.getmtime(fp) > 600:
+        if f.startswith("line_") and time.time() - os.path.getmtime(fp) > 600:
             os.remove(fp)
-    req = urllib.request.Request("http://localhost:8769/synth", data=json.dumps({"text": text, "rate": 48000}).encode(),
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        wav = r.read()
-    path = os.path.join(_VOICE_DIR, f"line_{int(time.time() * 1000)}.wav")
-    with open(path, "wb") as f:
-        f.write(wav)
-    out = _send({"cmd": "voice", "path": path})
-    out["wav_bytes"] = len(wav)
+    t0 = time.time()
+    first_s = None
+    total = 0.0
+    nbytes = 0
+    out: dict[str, Any] = {"ok": False}
+    for k, sent in enumerate(_sentences(text)):
+        req = urllib.request.Request("http://localhost:8769/synth", data=json.dumps({"text": sent, "rate": 48000}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            wav = r.read()
+        path = os.path.join(_VOICE_DIR, f"line_{int(time.time() * 1000)}_{k}.wav")
+        with open(path, "wb") as f:
+            f.write(wav)
+        out = _send({"cmd": "voice", "path": path})
+        if not out.get("ok"):
+            return out
+        if first_s is None:
+            first_s = round(time.time() - t0, 2)
+        total += float(out.get("seconds", 0.0))
+        nbytes += len(wav)
+    out["seconds"] = round(total, 2)
+    out["wav_bytes"] = nbytes
+    out["first_word_s"] = first_s
+    out["sentences"] = len(_sentences(text))
     return out
 
 
