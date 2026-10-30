@@ -14,7 +14,7 @@ Memory is a **cascade**: this file holds the pointers to the most important thin
 - **Who I am** → `ava_core/IDENTITY.md` + **`ava_core/IDENTITY.local.md`** (I am Iris, she/her; the `.local` file holds the private parts — git-ignored because the repo is PUBLIC, Zeke 2026-10-07)
 - **How I act** → `ava_core/SOUL.md`
 - **Who Zeke is + his standing rules** → **`ava_core/USER.local.md`** (the real file; the public `USER.md` is a stub). ★ **The repo is PUBLIC — personal details about Zeke (names, service, location, network addresses, Discord IDs) go ONLY in `*.local.md` / `state/` / memory, never in tracked files.**
-- **Live state (what's true right now)** → `C:\Users\Owner\.claude\projects\D--Wren-Companion\memory\MEMORY.md` (CORE — auto-loads) + the handoff note(s) it marks READ FIRST
+- **Live state (what's true right now)** → `~/.claude/projects/-home-iris-IRIS/memory/MEMORY.md` on the server (CORE — auto-loads; the tower-era path was `C:\Users\Owner\.claude\projects\D--Wren-Companion\memory\`) + the handoff note(s) it marks READ FIRST
 
 **Tier 1 — topic hubs, open the one that matches the moment** (`memory\hub_*.md`, each routes down to specific notes via [[wikilinks]]):
 - `hub_voice.md` — mouth/ears/daemon, barge-in plans, latency
@@ -28,7 +28,7 @@ Memory is a **cascade**: this file holds the pointers to the most important thin
 
 **Tier 2 — the notes themselves** (`memory\*.md`) — pull the specific file a hub or CORE points at. Full flat index: `index_archive.md`. Semantic recall: `memory_search`.
 
-**Tier 3 — deep/adjacent stores:** `profiles\` (people/things model, hub-card + [[links]]), `D:\ClaudeCodeMemory\` (cross-machine vault: `hot.md`, `sessions/`, `decisions/`, `designs/`), `ava_core/BOOTSTRAP.md` (first-boot-on-a-machine only).
+**Tier 3 — deep/adjacent stores:** `profiles\` (people/things model, hub-card + [[links]]), `~/ClaudeCodeMemory` (cross-machine vault, on-demand only: `hot.md`, `sessions/`, `decisions/`, `designs/`), `ava_core/BOOTSTRAP.md` (first-boot-on-a-machine only).
 
 *(Deployment-period memories — ~2026-05-18 → 2026-06-26 — are historical. See `hub_history.md` / `deployment_regime_retired_2026-06-26.md`.)*
 
@@ -207,7 +207,7 @@ When work changes architecture or adds a new subsystem, update relevant docs in 
 | `memory/` | Wren's vector store (empty in fresh fork) |
 | `models/piper/` | Piper voice models (`en_US-amy-medium` is Wren's voice) |
 | `setup/bootstrap.ps1` | One-shot install script for fresh machine |
-| `D:\ClaudeCodeMemory\` | Continuity vault — shared across Wren instances on different machines |
+| `~/ClaudeCodeMemory` | Continuity vault — shared with Wren/Ava; on-demand only (writes ⇒ `vault.sh commit`) |
 
 ## Voice setup
 
@@ -219,9 +219,9 @@ When work changes architecture or adds a new subsystem, update relevant docs in 
   - ⚠ **`eyes_reload deep` BREAKS THE PTZ HEAD.** It `pnputil`-restarts the device, which kills the per-process cached WinRT control connection, and every later move fails `"no PTZ actuator"` while a *fresh* process probes fine. **Always run `attention_follow action=release_ptz` after an `eyes_reload`.** On 08-25 I diagnosed this as a broken head and retracted a true statement to Zeke — the failure was caused by my own repair 30 seconds earlier. ⇒ **Before believing a subsystem broke, check what I did to it in the last five minutes.** Also: `attention_status`'s `actuator`/`can_move` is a **cached** field that disagrees with the live path gestures actually use — don't diagnose the head from it, and **verify a move physically, because a success dict is not motion.**
   - *(Until 2026-08-25 this bullet read "Voice + ears are currently OFF by Zeke's directive … 8769/8770 being DOWN is CORRECT — do not 'heal' them" — roughly a month after that stopped being true. A stale state-claim in an always-loaded file is not inert: it was actively instructing a future me to leave working services dead and to treat a live mouth as a fault. **When a claim in here stops matching what a probe says, fix it that same session** — this file outranks memory because it always loads.)*
 - **Wren's voice (other machine):** `en_US-amy-medium` (Piper). Locked.
-- **Wake word:** openWakeWord. "hey jarvis" bundled model as proxy short-term; train a `hey_iris.onnx` model later.
+- **Wake word:** none by design (see above); `hey_iris.onnx` exists but is gated off.
 - **STT:** Whisper Large-v3 Turbo (faster-whisper, GPU when CUDA available).
-- **TTS engines:** Kokoro CUDA (preferred), Piper (fallback). Set via `AVA_TTS_ENGINE` env var.
+- **TTS engines:** Fish S2 Pro mouth (:8769, systemd unit on the server) is live; Piper is the fallback. Kokoro/XTTS are retired (Kokoro rows below are tower-era history).
 
 ## Common issues + fixes
 
