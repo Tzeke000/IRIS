@@ -102,13 +102,23 @@ def has_pending() -> bool:
     return _flag_path().exists()
 
 
-def submit(user_text: str) -> str:
-    """Write a new pending request, return request_id."""
+def submit(user_text: str, source: str = "orb", trusted: bool = True,
+           sender: Optional[str] = None, note: Optional[str] = None) -> str:
+    """Write a new pending request, return request_id.
+
+    10-29 (code review, security): `source`/`trusted`/`sender` are STRUCTURED fields. Untrusted senders
+    (e.g. a Discord DM relayed from someone who isn't Zeke) get their own wrapper + a talk-only turn in
+    the host, and the Stop hook leaves them to the host - their text can no longer pose as Zeke's.
+    `note` = trusted delivery instructions written by OUR code (never the sender's words)."""
     request_id = uuid.uuid4().hex[:12]
     entry = {
         "id": request_id,
         "ts": time.time(),
         "user_text": str(user_text or "")[:8000],
+        "source": str(source or "orb"),
+        "trusted": bool(trusted),
+        "sender": sender,
+        "note": note,
         "status": "pending",
         "reply": None,
         "answered_ts": None,

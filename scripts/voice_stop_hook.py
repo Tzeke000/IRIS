@@ -439,6 +439,8 @@ def _next_pending_chat() -> dict | None:
             continue
         if data.get("status") != "pending":
             continue
+        if data.get("trusted") is False:
+            continue   # 10-29: untrusted senders are the HOST's (talk-only turn), never a full-tool rewake
         ts = float(data.get("ts") or 0.0)
         # Phase 41: TTL bumped 300→600s. Orb's HTTP long-poll is 60s; a
         # 5min cap meant a request could expire from the hook before the

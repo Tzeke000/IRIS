@@ -789,7 +789,9 @@ class Supervisor:
                             "open her card under profiles/ first; Zeke's whereabouts are HIS to share.]" + chr(10))
                 try:
                     from brain import iris_chat
-                    rid = iris_chat.submit(header + (m["text"] or "(no text — attachment only)"))
+                    rid = iris_chat.submit(m["text"] or "(no text — attachment only)", source="discord_relay",
+                                           trusted=False, sender=f"{names.get(uid, uid)} (user {uid})",
+                                           note=header.strip())
                     relayed.append({"uid": uid, "msg": m["id"], "request": rid})
                     _log("dm_relayed", uid=uid, msg=m["id"], request=rid)
                 except Exception as e:  # noqa: BLE001
