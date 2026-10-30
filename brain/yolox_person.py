@@ -129,7 +129,7 @@ def _ensure_model():
             _device = "cuda" if torch.cuda.is_available() else "cpu"
             with _logged_load(f"yolox-s:{_device}"):
                 m = YOLOX(YOLOPAFPN(0.33, 0.50), YOLOXHead(80, 0.50))   # -s config
-                ck = torch.load(_WEIGHTS, map_location="cpu", weights_only=False)
+                ck = torch.load(_WEIGHTS, map_location="cpu", weights_only=True)  # code review: never unpickle a writable-dir file
                 missing, unexpected = m.load_state_dict(ck["model"], strict=False)
                 if missing or unexpected:
                     # A partially-loaded detector produces confident nonsense.

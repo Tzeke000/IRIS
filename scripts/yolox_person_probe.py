@@ -34,7 +34,7 @@ NMS_THRESH = 0.45         # threshold so the comparison is like-for-like
 def build(weights: Path, device: str) -> torch.nn.Module:
     # YOLOX-s config, from exps/default/yolox_s.py
     model = YOLOX(YOLOPAFPN(0.33, 0.50), YOLOXHead(80, 0.50))
-    ck = torch.load(weights, map_location="cpu", weights_only=False)
+    ck = torch.load(weights, map_location="cpu", weights_only=True)
     missing, unexpected = model.load_state_dict(ck["model"], strict=False)
     if missing or unexpected:
         raise SystemExit(f"weight mismatch: {len(missing)} missing, "
