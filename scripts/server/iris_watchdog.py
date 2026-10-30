@@ -77,6 +77,37 @@ def proc_running(pattern: str) -> bool:
     return r.returncode == 0
 
 
+def unit_active_seconds(unit: str):
+    """Seconds since the unit last became active, or None when it isn't active (a deliberate stop is not a fault)."""
+    try:
+        r = subprocess.run(["systemctl", "--user", "show", unit, "-p", "ActiveState", "-p",
+                            "ActiveEnterTimestampMonotonic"], capture_output=True, text=True, timeout=10)
+        kv = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+        if kv.get("ActiveState") != "active":
+            return None
+        return time.monotonic() - int(kv.get("ActiveEnterTimestampMonotonic") or 0) / 1e6
+    except Exception:
+        return None
+
+
+def http_ok(url: str) -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def port_listening(port: int) -> bool:
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=3):
+            return True
+    except Exception:
+        return False
+
+
 def dm(text: str) -> bool:
     try:
         uid = load(ROOT / "config" / "private.local.json", {}).get("zeke_discord_user_id")
@@ -149,9 +180,24 @@ def main() -> int:
     if hb_age > STALE_ALERT_S and not in_grace:
         problems["heartbeat"] = f"no heartbeat from my runtime for {hb_age/60:.0f} min"
     for u in UNITS:
-        r = subprocess.run(["systemctl", "--user", "is-failed", u], capture_output=True, text=True)
+        try:
+            r = subprocess.run(["systemctl", "--user", "is-failed", u], capture_output=True, text=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            continue
         if r.stdout.strip() == "failed":
             problems[f"unit:{u}"] = f"service {u} has failed"
+    # 10-29 (code review): "running" is not "working". A mouth that has been up past its ~3 min warm-up but
+    # still answers /health=503 (or nothing), or ears whose daemon port never opened, are dead while
+    # systemd says active - and Restart=always loops never reach "failed". Probe the function.
+    for unit, url, port, grace in (("iris-mouth", "http://127.0.0.1:8769/health", None, 600.0),
+                                   ("iris-ears", None, 8770, 300.0)):
+        up_s = unit_active_seconds(unit)
+        if up_s is None or up_s < grace:
+            continue
+        if url and not http_ok(url):
+            problems[f"func:{unit}"] = f"{unit} has been running {up_s/60:.0f} min but isn't answering /health (stuck warming?)"
+        if port and not port_listening(port):
+            problems[f"func:{unit}"] = f"{unit} has been running {up_s/60:.0f} min but nothing listens on :{port}"
 
     for path, (cap, keep) in LOG_CAPS.items():
         try:

@@ -71,6 +71,35 @@ def _sentences(text: str) -> list[str]:
     return out or [text]
 
 
+def _mouth_ready() -> Any:
+    """NEVER WAIT ON A COLD MOUTH (Zeke 10-29: "ignore the warm-up and keep working"). True when Fish answers
+    /health=ok; otherwise a short reason string, returned in ~2 s instead of a 30 s synth timeout. If the mouth
+    unit is simply DOWN (quiet hours stop it, so does a crash) it is started here - the temple is not the room,
+    so the room's quiet-hours flag does not silence my VR voice. Warm-up is ~3 min; say it in text meanwhile."""
+    import subprocess
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://localhost:8769/health", timeout=2) as r:
+            if r.status == 200:
+                return True
+    except urllib.error.HTTPError as e:
+        if e.code == 503:
+            return "mouth is warming up (~3 min after a start); try again shortly"
+    except Exception:
+        pass
+    try:
+        active = subprocess.run(["systemctl", "--user", "is-active", "iris-mouth.service"],
+                                capture_output=True, text=True, timeout=5).stdout.strip()
+        if active not in ("active", "activating"):
+            subprocess.run(["systemctl", "--user", "start", "--no-block", "iris-mouth.service"],
+                           capture_output=True, timeout=5)
+            return "mouth was down (" + (active or "unknown") + ") - started it; warm in ~3 min"
+    except Exception as e:
+        return "mouth unreachable and could not check the unit: " + repr(e)
+    return "mouth unit is up but not answering yet (still binding) - try again shortly"
+
+
 def _speak(text: str) -> dict[str, Any]:
     """SAY IT, SENTENCE BY SENTENCE (2026-10-29, Zeke: "speed up your mouth — when you can finally start saying your
     first words"): the mouth renders the FIRST sentence and my body starts playing it at once; the rest are rendered
@@ -82,6 +111,9 @@ def _speak(text: str) -> dict[str, Any]:
     text = text.strip()[:400]
     if not text:
         return {"ok": False, "error": "no text"}
+    ready = _mouth_ready()
+    if ready is not True:
+        return {"ok": False, "warming": True, "error": ready}
     os.makedirs(_VOICE_DIR, exist_ok=True)
     for f in os.listdir(_VOICE_DIR):                       # keep the folder small
         fp = os.path.join(_VOICE_DIR, f)
