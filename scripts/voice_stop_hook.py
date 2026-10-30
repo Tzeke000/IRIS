@@ -839,6 +839,11 @@ def _next_pending_llm() -> dict | None:
         ts = float(data.get("ts") or 0.0)
         if (_t.time() - ts) > 600.0:
             continue
+        try:   # 10-29 fix-first #5: past the caller's own deadline nobody is waiting
+            if data.get("deadline_ts") and _t.time() > float(data["deadline_ts"]):
+                continue
+        except Exception:
+            pass
         candidates.append((ts, data))
     if not candidates:
         return None

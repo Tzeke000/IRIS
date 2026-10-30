@@ -1457,6 +1457,12 @@ async def llm_pending_poller(queue, loop, turn):
                     age = now - float(d.get("ts") or os.path.getmtime(path))
                 except Exception:
                     age = 0.0
+                try:
+                    _past_dl = bool(d.get("deadline_ts")) and now > float(d["deadline_ts"])
+                except Exception:
+                    _past_dl = False
+                if _past_dl:
+                    continue                   # caller's deadline passed; it marks itself abandoned
                 if age > LLM_PENDING_TTL_S:
                     # dead request: caller gave up long ago — mark expired (iris_llm prunes
                     # terminal-status files after 1h) and never nudge about it.

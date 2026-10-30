@@ -43,6 +43,7 @@ level audit trail. Plain functions + explicit kind tags are cleaner.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -114,7 +115,7 @@ def _prune_old() -> int:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if not isinstance(data, dict) or data.get("status") not in ("answered", "expired"):
+        if not isinstance(data, dict) or data.get("status") not in ("answered", "expired", "abandoned"):
             continue
         age = now - float(data.get("answered_ts") or data.get("ts") or 0.0)
         if age > _PRUNE_RETENTION_S:
@@ -132,8 +133,7 @@ def _refresh_flag() -> None:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, dict) and data.get("status") == "pending":
-                ts = float(data.get("ts") or 0.0)
-                if (time.time() - ts) <= _REQUEST_TTL_S:
+                if not _past_deadline(data):
                     has_pending = True
                     break
         except Exception:
@@ -148,6 +148,40 @@ def _refresh_flag() -> None:
             pass
 
 
+def _past_deadline(data: dict) -> bool:
+    now = time.time()
+    dl = data.get("deadline_ts")
+    if dl:
+        try:
+            return now > float(dl)
+        except Exception:
+            pass
+    return (now - float(data.get("ts") or 0.0)) > _REQUEST_TTL_S
+
+
+def _set_status_if_pending(path: Path, status: str) -> bool:
+    """Compare-and-set under the lock: flip pending -> status, atomically (unique tmp name, replace).
+    Never overwrites an answer that landed in between."""
+    import tempfile
+    with _LOCK:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if not isinstance(data, dict) or data.get("status") != "pending":
+            return False
+        data["status"] = status
+        data[status + "_ts"] = time.time()
+        try:
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.stem, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, ensure_ascii=False, indent=2))
+            os.replace(tmp, path)
+        except Exception:
+            return False
+    return True
+
+
 def has_pending() -> bool:
     """O(1) check used by Stop hook."""
     return _flag_path().exists()
@@ -157,7 +191,8 @@ def submit(prompt: str, kind: str = "general",
            context: Optional[dict] = None,
            requester: str = "brain",
            image_b64: Optional[str] = None,
-           image_path: Optional[str] = None) -> str:
+           image_path: Optional[str] = None,
+           deadline_s: Optional[float] = None) -> str:
     """Write a new pending LLM request, return request_id.
 
     If image_b64 or image_path is given, the request is multimodal — Iris
@@ -165,9 +200,13 @@ def submit(prompt: str, kind: str = "general",
     and any vision-LLM caller. Iris is multimodal so this works as long
     as the rewake message references the image."""
     request_id = uuid.uuid4().hex[:12]
+    _now = time.time()
     entry = {
         "id": request_id,
-        "ts": time.time(),
+        "ts": _now,
+        # 10-29 code review fix-first #5: the caller's own wait bound. Past it nobody is waiting,
+        # so every scanner skips it (and the caller marks it "abandoned" when it gives up).
+        "deadline_ts": _now + float(deadline_s if deadline_s else _REQUEST_TTL_S),
         "kind": str(kind),
         "requester": str(requester),
         "prompt": str(prompt or "")[:16000],
@@ -209,12 +248,8 @@ def next_pending() -> Optional[dict[str, Any]]:
         if data.get("status") != "pending":
             continue
         ts = float(data.get("ts") or 0.0)
-        if (time.time() - ts) > _REQUEST_TTL_S:
-            data["status"] = "expired"
-            try:
-                path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-            except Exception:
-                pass
+        if _past_deadline(data):
+            _set_status_if_pending(path, "expired")
             continue
         candidates.append((ts, data))
     if not candidates:
@@ -273,6 +308,13 @@ def wait_for_reply(request_id: str, timeout_s: float = 120.0) -> Optional[str]:
             if isinstance(data, dict) and data.get("status") == "answered":
                 return str(data.get("reply") or "")
         time.sleep(0.5)
+    # Caller is giving up: say so on disk, so I never spend a turn answering nobody (fix-first #5).
+    try:
+        if _set_status_if_pending(path, "abandoned"):
+            with _LOCK:
+                _refresh_flag()
+    except Exception:
+        pass
     return None
 
 
@@ -311,19 +353,9 @@ def describe_image(image_path: str, prompt: str = "",
                   "who is present, what they are doing, their apparent mood/energy, "
                   "anything notable. 2-3 sentences as if describing to a friend.")
     try:
-        rid = submit(
-            prompt, kind=kind, requester="scene_understanding",
-            image_path=image_path, timeout_s=timeout_s,
-        )
+        rid = submit(prompt, kind=kind, requester="scene_understanding",
+                     image_path=image_path, deadline_s=timeout_s)
         return wait_for_reply(rid, timeout_s=timeout_s)
-    except TypeError:
-        # submit() doesn't accept timeout_s — recover by submitting without it
-        try:
-            rid = submit(prompt, kind=kind, requester="scene_understanding",
-                        image_path=image_path)
-            return wait_for_reply(rid, timeout_s=timeout_s)
-        except Exception:
-            return None
     except Exception as e:
         print(f"[iris_llm] describe_image error: {e!r}")
         return None
@@ -358,7 +390,7 @@ def ask_iris(
         # Module not configured yet; refuse rather than silently fail.
         return None
     try:
-        rid = submit(prompt, kind=kind, context=context, requester=requester)
+        rid = submit(prompt, kind=kind, context=context, requester=requester, deadline_s=timeout_s)
         return wait_for_reply(rid, timeout_s=timeout_s)
     except Exception as e:
         print(f"[iris_llm] ask_iris error: {e!r}")
