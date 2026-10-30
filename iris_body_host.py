@@ -548,6 +548,9 @@ async def discord_poller(token, queue, loop, baseline_id):
                 if isinstance(ra, (int, float)) and ra > 0:
                     await asyncio.sleep(min(ra, 60))
             continue
+        # 10-29 code review: one malformed entry (non-dict / no numeric id) used to raise in the sort
+        # and kill the poller -> _supervised respawn. Drop those; the cursor itself is durable (99d397c).
+        msgs = [m for m in msgs if isinstance(m, dict) and str(m.get("id", "")).isdigit()]
         for m in sorted(msgs, key=lambda x: int(x["id"])):  # oldest-first = natural order
             last = m["id"]  # advance regardless, so a skipped message isn't re-seen
             author = m.get("author", {}) or {}
@@ -723,6 +726,22 @@ async def letters_poller(secret, queue, loop, baseline_id):
 # I poll next_pending() here, enqueue it, and reply by calling the iris chat_reply tool mid-turn
 # (fire-and-forget host, same as Discord/letters). No history replay: only requests newer than start.
 ORB_POLL_INTERVAL = 1.0
+ORB_SEEN_CAP = 2000
+
+
+def _orb_claim(msg_id):
+    """10-29 code review: claim an orb chat for delivery (lease) so the Stop hook and this host can't
+    BOTH deliver it. False = already answered, or the Stop hook holds a live claim. FAIL-OPEN."""
+    try:
+        from brain import iris_chat as _ic
+        if not msg_id:
+            return True
+        _claim = getattr(_ic, "claim", None)
+        if _claim is None:
+            return _ic.is_pending(str(msg_id))
+        return bool(_claim(str(msg_id), "host"))
+    except Exception:
+        return True
 
 
 async def orb_reader(queue, loop, start_ts):
@@ -732,36 +751,41 @@ async def orb_reader(queue, loop, start_ts):
     except Exception as e:
         print("[host] orb input: OFF - iris_chat import/configure failed: " + repr(e), file=sys.stderr)
         return
-    seen = set()
+    # 10-29 code review: (a) next_pending() returned only the OLDEST pending request, so one stale
+    # pre-boot request already in `seen` hid every newer one for up to the 600 s TTL - iterate them
+    # all (list_pending); (b) `seen` grew forever - it is now insertion-ordered and capped.
+    seen = {}
+    _list = getattr(iris_chat, "list_pending", None) or (lambda: [r for r in [iris_chat.next_pending()] if r])
     print("[host] orb input: ON - polling the body app (iris_chat) every "
           + str(ORB_POLL_INTERVAL) + "s.")
     while True:
         await asyncio.sleep(ORB_POLL_INTERVAL)
         try:
-            req = await loop.run_in_executor(None, iris_chat.next_pending)
+            reqs = await loop.run_in_executor(None, _list)
         except Exception as e:
             print("\n[host] orb poll failed (non-fatal): " + repr(e), file=sys.stderr)
             continue
-        if not req:
-            continue
-        if not isinstance(req, dict):
-            print("\n[host] orb poll: non-dict pending request (skipped): "
-                  + repr(req)[:200], file=sys.stderr)
-            continue
-        rid = req.get("id")
-        if not rid or rid in seen:
-            continue
-        if float(req.get("ts") or 0.0) < start_ts:
-            seen.add(rid)            # pre-existing request at startup; skip, don't replay
-            continue
-        seen.add(rid)
-        text = (req.get("user_text") or "").strip()
-        if text and req.get("trusted") is False:
-            # 10-29 security: NOT Zeke. Own source, own wrapper, talk-only turn (see _guest_pre_tool_hook).
-            await _enqueue(queue, ("relay", text, rid, json.dumps({"sender": req.get("sender"), "note": req.get("note"),
-                                                                    "source": req.get("source")})))
-        elif text:
-            await _enqueue(queue, ("orb", text, rid))
+        for req in (reqs or []):
+            if not isinstance(req, dict):
+                print("\n[host] orb poll: non-dict pending request (skipped): "
+                      + repr(req)[:200], file=sys.stderr)
+                continue
+            rid = req.get("id")
+            if not rid or rid in seen:
+                continue
+            seen[rid] = True
+            if len(seen) > ORB_SEEN_CAP:
+                for _old in list(seen)[:len(seen) - ORB_SEEN_CAP // 2]:
+                    seen.pop(_old, None)   # oldest ids first; at 1/s polling these are far past the 600 s TTL
+            if float(req.get("ts") or 0.0) < start_ts:
+                continue                 # pre-existing request at startup; skip, don't replay
+            text = (req.get("user_text") or "").strip()
+            if text and req.get("trusted") is False:
+                # 10-29 security: NOT Zeke. Own source, own wrapper, talk-only turn (see _guest_pre_tool_hook).
+                await _enqueue(queue, ("relay", text, rid, json.dumps({"sender": req.get("sender"), "note": req.get("note"),
+                                                                        "source": req.get("source")})))
+            elif text:
+                await _enqueue(queue, ("orb", text, rid))
 
 
 async def terminal_reader(queue, loop):
@@ -1145,12 +1169,67 @@ VR_HEARD_DEBOUNCE_S = 0.6       # a second sentence right behind the first rides
 VR_HEARD_ON = os.environ.get("IRIS_VR_HEAR", "1") != "0"
 
 
-def _vr_heard_read(pos):
-    """(new_pos, [line dicts]) of COMPLETE lines appended since byte `pos`. Rotation/truncation => from 0."""
+# 10-29 code review: a respawned reader used to start at the END of the file, losing lines written
+# during its 5 s backoff, and rotation was noticed only if the new file was smaller. The cursor
+# (offset + inode) now lives in _VR_CURSOR (survives a _supervised respawn) and on disk (survives a
+# quick host restart: honoured only if saved within VR_CURSOR_RESUME_S, so a long downtime still
+# starts tail-only and never replays stale temple talk).
+VR_CURSOR_PATH = os.path.join(REPO_ROOT, "state", "vr_temple", "heard_cursor.json")
+VR_CURSOR_RESUME_S = float(os.environ.get("IRIS_VR_CURSOR_RESUME_S", "120"))
+_VR_CURSOR = {"pos": None, "ino": None}
+
+
+def _vr_file_ino():
+    try:
+        return os.stat(VR_HEARD_PATH).st_ino
+    except OSError:
+        return None
+
+
+def _vr_cursor_save(pos):
+    _VR_CURSOR["pos"], _VR_CURSOR["ino"] = pos, _vr_file_ino()
+    try:
+        tmp = VR_CURSOR_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"pos": pos, "ino": _VR_CURSOR["ino"], "ts": time.time()}, f)
+        os.replace(tmp, VR_CURSOR_PATH)
+    except Exception:
+        pass
+
+
+def _vr_cursor_start():
+    """Where a (re)started reader begins: in-process cursor, else a fresh on-disk one, else the tail."""
+    ino = _vr_file_ino()
     try:
         size = os.path.getsize(VR_HEARD_PATH)
     except OSError:
+        size = 0
+    if _VR_CURSOR["pos"] is not None:
+        if _VR_CURSOR["ino"] == ino and _VR_CURSOR["pos"] <= size:
+            return _VR_CURSOR["pos"]
+        return 0                                # rotated while we were down: the new file from the top
+    try:
+        with open(VR_CURSOR_PATH, encoding="utf-8") as f:
+            c = json.load(f)
+        if (time.time() - float(c.get("ts") or 0)) <= VR_CURSOR_RESUME_S and c.get("ino") == ino \
+                and int(c.get("pos") or 0) <= size:
+            return int(c["pos"])
+    except Exception:
+        pass
+    return size
+
+
+def _vr_heard_read(pos):
+    """(new_pos, [line dicts]) of COMPLETE lines appended since byte `pos`. Rotation/truncation => from 0
+    (rotation = the inode changed, or the file shrank)."""
+    try:
+        st = os.stat(VR_HEARD_PATH)
+        size = st.st_size
+    except OSError:
         return 0, []
+    if _VR_CURSOR["ino"] is not None and st.st_ino != _VR_CURSOR["ino"]:
+        pos = 0
+        _VR_CURSOR["ino"] = st.st_ino
     if size < pos:
         pos = 0
     if size == pos:
@@ -1293,13 +1372,8 @@ def _inbox_drain():
         item = e[2]
         source, text, msg_id = item[0], item[1], item[2]
         sender = item[3] if len(item) > 3 else None
-        if source == "orb":
-            try:   # the Stop hook may already have answered it (same fire-time check as the main loop)
-                from brain import iris_chat as _ic
-                if msg_id and not _ic.is_pending(str(msg_id)):
-                    continue
-            except Exception:
-                pass
+        if source == "orb" and not _orb_claim(msg_id):
+            continue   # the Stop hook answered / is delivering it (same fire-time claim as the main loop)
         age = (time.time() - e[3]) if len(e) > 3 and e[3] else None
         out.append((source, text, msg_id, sender, age))
     return out
@@ -1520,15 +1594,22 @@ async def lookup_watcher():
 
 
 async def vr_heard_reader(queue, loop):
-    pos = os.path.getsize(VR_HEARD_PATH) if os.path.exists(VR_HEARD_PATH) else 0
+    pos = await loop.run_in_executor(None, _vr_cursor_start)
+    _VR_CURSOR["ino"] = _vr_file_ino()
     while True:
         await asyncio.sleep(VR_HEARD_POLL_S)
+        _prev = pos
         pos, lines = await loop.run_in_executor(None, _vr_heard_read, pos)
+        if pos != _prev:
+            await loop.run_in_executor(None, _vr_cursor_save, pos)
         lines = [d for d in lines if d.get("attending")]
         if not lines:
             continue
         await asyncio.sleep(VR_HEARD_DEBOUNCE_S)
+        _prev = pos
         pos, more = await loop.run_in_executor(None, _vr_heard_read, pos)
+        if pos != _prev:
+            await loop.run_in_executor(None, _vr_cursor_save, pos)
         lines += [d for d in more if d.get("attending")]
         text = _vr_heard_prompt(lines)
         print("\n[vr <- temple] " + text.split("\n", 1)[1], flush=True)
@@ -1555,10 +1636,11 @@ async def _supervised(name, factory, *, backoff_s=5.0):
             _blog("host", "task died", {"task": name, "error": repr(e)[:300]})
             if _hh is not None and not warned:
                 warned = True
-                try:
-                    _hh.discord_send(load_bot_token(), DISCORD_CHANNEL_ID,
-                                     "\u26a0 host task `" + name + "` died (" + repr(e)[:120]
-                                     + ") - respawning it; traceback in state/launcher_boot.log")
+                try:   # 10-29: off the event loop (discord_send blocks up to 10 s per chunk)
+                    _dm = ("\u26a0 host task `" + name + "` died (" + repr(e)[:120]
+                           + ") - respawning it; traceback in state/launcher_boot.log")
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: _hh.discord_send(load_bot_token(), DISCORD_CHANNEL_ID, _dm))
                 except Exception:
                     pass
         await asyncio.sleep(backoff_s)
@@ -1654,10 +1736,11 @@ async def llm_pending_poller(queue, loop, turn):
                 if age > LLM_PENDING_TTL_S:
                     # dead request: caller gave up long ago — mark expired (iris_llm prunes
                     # terminal-status files after 1h) and never nudge about it.
+                    # 10-29 code review: compare-and-set under iris_llm's cross-process lock + atomic
+                    # replace (an in-place write could clobber an answer that just landed).
                     try:
-                        d["status"] = "expired"
-                        with open(path, "w", encoding="utf-8") as f:
-                            json.dump(d, f, ensure_ascii=False)
+                        from brain import iris_llm as _il
+                        _il._set_status_if_pending(path, "expired", "host ttl")
                     except Exception:
                         pass
                     continue
@@ -1722,6 +1805,11 @@ async def mic_warden(loop, mic_gate, turn):
                 mic_gate.set()
                 took = False
                 _blog("warden", "gate released: daemon unreachable (fail-open)")
+            continue
+        # 10-29 code review: the status call above can take up to 3 s; a speaking turn may have opened
+        # its window meanwhile. Re-check AFTER the await so the warden never touches a turn's gate.
+        if getattr(turn, "speak_window", False):
+            quiet_polls = 0
             continue
         speaking = "state=speaking" in st
         if speaking and mic_gate.is_set():
@@ -2022,8 +2110,10 @@ async def perception_reader(queue, loop, start_ts):
                 from brain import attention_arbiter as _arb
                 _sit = ("zeke_presence" if person == "zeke" else
                         ("unknown_person" if not person else "person_presence"))
-                _arb.claim(_sit, "host-eyes", wake=bool(wake),
-                           detail=(("wake: " + desc[:100]) if wake else ("seen, no wake: " + reason))[:200])
+                _detail = (("wake: " + desc[:100]) if wake else ("seen, no wake: " + reason))[:200]
+                _wk = bool(wake)
+                # 10-29 code review: ledger file I/O off the event loop
+                await loop.run_in_executor(None, lambda: _arb.claim(_sit, "host-eyes", wake=_wk, detail=_detail))
             except Exception:
                 pass
             gone_since = None
@@ -2095,8 +2185,9 @@ async def perception_reader(queue, loop, start_ts):
                 # this is the same stranger, not a second one - ledger it, don't wake twice.
                 try:
                     from brain import attention_arbiter as _arb
-                    _d = _arb.decide("unknown_person", "unknown_capture",
-                                     detail=str((sig.get("data") or {}).get("dir") or "")[:120])
+                    _ddet = str((sig.get("data") or {}).get("dir") or "")[:120]
+                    _d = await loop.run_in_executor(   # 10-29: ledger file I/O off the event loop
+                        None, lambda: _arb.decide("unknown_person", "unknown_capture", detail=_ddet))
                     if not _d.get("wake", True):
                         _blog("eyes", desc, {"ts": ts, "wake": False,
                                              "suppressed": "arbiter: " + str(_d.get("reason") or ""),
@@ -2288,6 +2379,51 @@ class _TurnState:
             self.hold.turn_started(source)
 
 
+_STREAM = {"last_msg_ts": time.time()}
+# 10-29 code review (HIGH): a turn had no upper bound and interrupt() was never called, so one wedged
+# turn blocked all input. Bound = IDLE time (no SDK stream message at all), not wall time - long real
+# work keeps streaming tool calls/results; only a silent stream counts. Past it: interrupt(); if the
+# turn still hasn't ended TURN_INTERRUPT_GRACE_S later, raise so the host exits and is restarted.
+# IRIS_TURN_IDLE_MAX_S=0 disables.
+TURN_IDLE_MAX_S = float(os.environ.get("IRIS_TURN_IDLE_MAX_S", "3600"))
+TURN_INTERRUPT_GRACE_S = float(os.environ.get("IRIS_TURN_INTERRUPT_GRACE_S", "180"))
+
+
+async def _await_turn(turn, client, idle_max_s=None, grace_s=None, poll_s=30.0):
+    idle_max_s = TURN_IDLE_MAX_S if idle_max_s is None else idle_max_s
+    grace_s = TURN_INTERRUPT_GRACE_S if grace_s is None else grace_s
+    if idle_max_s <= 0:
+        await turn.done.wait()
+        return
+    _STREAM["last_msg_ts"] = time.time()     # the idle clock starts at THIS turn's query
+    interrupted_at = None
+    while True:
+        try:
+            await asyncio.wait_for(turn.done.wait(), timeout=min(poll_s, idle_max_s))
+            return
+        except asyncio.TimeoutError:
+            pass
+        now = time.time()
+        if interrupted_at is not None:
+            if now - interrupted_at >= grace_s:
+                raise RuntimeError("turn did not end " + str(int(grace_s)) + " s after interrupt() - "
+                                   "exiting so the supervisor restarts the host")
+            continue
+        idle = now - float(_STREAM.get("last_msg_ts") or now)
+        if idle >= idle_max_s:
+            print("\n[host] TURN WEDGED: no stream message for " + str(int(idle)) + " s - interrupting it.",
+                  flush=True)
+            try:
+                _blog("host", "turn idle interrupt", {"idle_s": int(idle), "source": getattr(turn, "source", None)})
+            except Exception:
+                pass
+            interrupted_at = now
+            try:
+                await client.interrupt()
+            except Exception as e:  # noqa: BLE001
+                print("\n[host] interrupt() failed: " + repr(e), file=sys.stderr)
+
+
 async def stream_consumer(client, turn, boundary):
     """Read the SDK session's message stream FOREVER (receive_messages, not
     receive_response) and render every segment as it happens.
@@ -2324,8 +2460,17 @@ async def stream_consumer(client, turn, boundary):
         segment_open = True
         boundary.clear()
 
+    _loop = asyncio.get_running_loop()
+
+    async def _speak(text, emotion=None, intensity=None):
+        # 10-29 code review: speak() is a blocking daemon socket call (up to 5 s); run it in the
+        # executor so a down mouth can't stall every poller + the hold sentinel. Awaited in order,
+        # so sentence order is unchanged.
+        await _loop.run_in_executor(None, speak, text, emotion, intensity)
+
     try:
         async for msg in client.receive_messages():
+            _STREAM["last_msg_ts"] = time.time()
             # Only CONTENT messages open a segment. SystemMessages (init/status) and
             # unknown types pass through without touching segment state - otherwise a
             # connect-time SystemMessage would open a phantom segment with no
@@ -2368,7 +2513,7 @@ async def stream_consumer(client, turn, boundary):
                                     turn.muted_by_flag = True
                                     turn.route_to_discord = True
                                     continue
-                                speak(s, turn.emotion, turn.intensity)
+                                await _speak(s, turn.emotion, turn.intensity)
             elif isinstance(msg, AssistantMessage):
                 for block in getattr(msg, "content", []) or []:
                     if isinstance(block, ToolUseBlock):
@@ -2398,7 +2543,7 @@ async def stream_consumer(client, turn, boundary):
                             turn.muted_by_flag = True
                             turn.route_to_discord = True
                         else:
-                            speak(buf, turn.emotion, turn.intensity)
+                            await _speak(buf, turn.emotion, turn.intensity)
                     buf = ""
                 if turn.active:
                     # Heads-down completion cue: silent turn + real work + I never
@@ -2407,7 +2552,7 @@ async def stream_consumer(client, turn, boundary):
                             and tool_calls >= HEADS_DOWN_MIN_TOOLS \
                             and not (turn.voice_flag is not None and turn.voice_flag.off()):
                         try:
-                            speak(HEADS_DOWN_CUE)
+                            await _speak(HEADS_DOWN_CUE)
                         except Exception as e:
                             print("\n[host] heads-down cue failed (non-fatal): " + repr(e),
                                   file=sys.stderr)
@@ -2426,8 +2571,9 @@ async def stream_consumer(client, turn, boundary):
                         _why = ("quiet hours / mouth flagged off mid-reply" if turn.muted_by_flag
                                 else "mouth flagged off")
                         try:
-                            _r = _hh.discord_send(load_bot_token(), DISCORD_CHANNEL_ID,
-                                                  _hh.format_routed_reply(full_text, _why))
+                            _ft = full_text
+                            _r = await _loop.run_in_executor(None, lambda: _hh.discord_send(
+                                load_bot_token(), DISCORD_CHANNEL_ID, _hh.format_routed_reply(_ft, _why)))
                         except Exception as _re:  # discord_send never raises; belt and braces
                             _r = {"ok": False, "error": repr(_re)}
                         print("\n[host] voice reply routed to Discord (" + _why + "): ok=" + str(_r.get("ok")), flush=True)
@@ -2789,18 +2935,13 @@ async def main():
                     # Stop hook often answered it long ago (observed: a 23:57
                     # cliff ghost re-delivered at 00:44 as a "fresh" turn).
                     # Re-check pending-ness at fire time; drop answered ones.
-                    try:
-                        from brain import iris_chat as _ic
-                        if msg_id and not _ic.is_pending(str(msg_id)):
-                            print("\n[host] orb turn dropped at fire time - "
-                                  "request " + str(msg_id) + " already "
-                                  "answered (stop-hook beat the queue)",
-                                  flush=True)
-                            continue
-                    except AttributeError:
-                        pass  # iris_chat.is_pending not built yet — fire as before
-                    except Exception:
-                        pass
+                    # 10-29: claim (lease) instead of check-then-act, so the Stop hook can't ALSO deliver it.
+                    if not await loop.run_in_executor(None, _orb_claim, msg_id):
+                        print("\n[host] orb turn dropped at fire time - "
+                              "request " + str(msg_id) + " already "
+                              "answered or claimed by the stop hook",
+                              flush=True)
+                        continue
                     print("\n[orb <- Zeke] " + text, flush=True)
                     prompt = (
                         "[Zeke typed this in your body app / orb (chat request id " + str(msg_id) + "). "
@@ -2923,7 +3064,7 @@ async def main():
                     print("[host] <- " + str(source or "?") + " turn received; thinking...",
                           flush=True)
                     await client.query(prompt)
-                    await turn.done.wait()
+                    await _await_turn(turn, client)
                     if _consumer_task.done():
                         raise RuntimeError("stream consumer is gone - exiting so the supervisor restarts the host")
                 finally:
