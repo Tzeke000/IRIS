@@ -1714,11 +1714,17 @@ def chat_reply(request_id: str, text: str) -> dict:
         # (we may not have logged it earlier — submit() doesn't write to the
         # transcript, so chat turns appear together when iris answers).
         req = _ic.get(str(request_id))
+        # Code review 10-29 (temporal, anchors hard-coded to zeke): since 948c8fa a chat can be an
+        # UNTRUSTED relay (a non-owner Discord DM, trusted=False). Those must not be filed as Zeke's
+        # words - not in the transcript, theory-of-mind, fact extraction or anchor moments.
+        trusted = not (req and req.get("trusted") is False)
+        person_id = "zeke" if trusted else "unverified"
         if req and req.get("status") == "pending":
             user_text = str(req.get("user_text") or "")
             if user_text:
                 _it.append(role="user", content=user_text,
-                           source="zeke", modality="chat")
+                           source=person_id if trusted else "relay:" + str(req.get("sender") or "unknown")[:80],
+                           modality="chat")
         ok = _ic.mark_answered(str(request_id), str(text))
         if not ok:
             return {"ok": False, "error": "request not found or already answered"}
@@ -1726,11 +1732,11 @@ def chat_reply(request_id: str, text: str) -> dict:
                    source="iris", modality="chat")
 
         # Post-turn hooks — feed signals to per-person modules. No LLM here;
-        # both are pattern-match cheap.
-        person_id = "zeke"  # default for now; multi-person later
+        # both are pattern-match cheap. person_id is set above from the request's trust.
         try:
-            from brain import theory_of_mind
-            theory_of_mind.post_turn_record(person_id, str(text))
+            if trusted:
+                from brain import theory_of_mind
+                theory_of_mind.post_turn_record(person_id, str(text))
         except Exception:
             pass
         try:
@@ -1747,8 +1753,8 @@ def chat_reply(request_id: str, text: str) -> dict:
         user_msg = str((req or {}).get("user_text") or "")
         try:
             from brain import iris_extraction_queue
-            if user_msg:
-                iris_extraction_queue.enqueue(user_msg, person_id="zeke", modality="chat")
+            if user_msg and trusted:   # untrusted relay text never becomes remembered "facts"
+                iris_extraction_queue.enqueue(user_msg, person_id=person_id, modality="chat")
         except Exception:
             pass
         # Phase 45: push into working memory (user msg + my reply).
@@ -1771,9 +1777,9 @@ def chat_reply(request_id: str, text: str) -> dict:
         try:
             from brain import anchor_moments
             user_msg = str((req or {}).get("user_text") or "")
-            if user_msg:
+            if user_msg and trusted:
                 anchor_id = anchor_moments.auto_detect_anchor_in_turn(
-                    "zeke", user_msg, str(text),
+                    person_id, user_msg, str(text),
                 )
                 if anchor_id:
                     print(f"[chat_reply] auto-marked anchor: {anchor_id}",
