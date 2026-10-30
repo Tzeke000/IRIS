@@ -167,3 +167,24 @@ def test_live_worker_over_its_limit_dies_alone(tmp_path):
     assert lim == 96 * 1024 ** 2 and (peak or 0) <= lim + 8 * 1024 ** 2
     assert _main_pids() == before, "the OOM kill stayed inside the worker's cgroup"
     assert all(v not in ("", "0") for v in before.values())
+
+
+@live
+def test_live_detached_child_does_not_outlive_its_worker(tmp_path):
+    db = tmp_path / "jobs.sqlite"
+    pidf = tmp_path / "child.pid"
+    env = dict(os.environ, IRIS_WORKER_DB=str(db))
+    script = f"setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $! > {pidf}; sleep 1; exit 0"
+    subprocess.run([sys.executable, str(WORKER), "run", "--kind", "acceptance", "--name", "acc_leak",
+                    "--mem", "200M", "--timeout", "60", "--force", "--", "/bin/bash", "-c", script],
+                   env=env, capture_output=True, text=True, timeout=120)
+    child = int(pidf.read_text())
+    time.sleep(1.0)
+    try:
+        os.kill(child, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    if alive:
+        os.kill(child, 9)
+    assert not alive, "KillMode=control-group must reap a setsid'd grandchild when the worker exits"
