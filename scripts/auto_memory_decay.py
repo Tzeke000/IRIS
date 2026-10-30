@@ -2,8 +2,9 @@
 """
 scripts/auto_memory_decay.py
 
-Earned-memory machinery for the auto-memory .md directory at
-`C:/Users/Owner/.claude/projects/D--Wren-Companion/memory/`, mirroring
+Earned-memory machinery for the Claude Code auto-memory .md directory
+(`~/.claude/projects/<project-key>/memory/`, derived from the repo path, or
+$IRIS_AUTO_MEMORY_DIR), mirroring
 brain/iris_human_memory.py's design at the file-level rather than the
 JSONL-entry level.
 
@@ -38,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import time
 from datetime import datetime
@@ -47,7 +49,20 @@ from typing import Any
 
 # --- Configuration ---
 
-MEMORY_DIR = Path("C:/Users/Owner/.claude/projects/D--Wren-Companion/memory")
+def _default_memory_dir() -> Path:
+    """Claude Code keys a project's memory dir by its path with every
+    non-alphanumeric character turned into '-' (e.g. a repo at /home/x/IRIS ->
+    -home-x-IRIS). Override with IRIS_AUTO_MEMORY_DIR. (Was a hard-coded
+    Windows path from the tower era, which never exists on the server.)"""
+    env = os.environ.get("IRIS_AUTO_MEMORY_DIR", "").strip()
+    if env:
+        return Path(env).expanduser()
+    repo = str(Path(__file__).resolve().parent.parent)
+    key = re.sub(r"[^A-Za-z0-9]", "-", repo)
+    return Path.home() / ".claude" / "projects" / key / "memory"
+
+
+MEMORY_DIR = _default_memory_dir()
 META_PATH = Path(__file__).resolve().parent.parent / "state" / "auto_memory_meta.json"
 
 # Ebbinghaus decay constant — half-life of base importance without retrieval.

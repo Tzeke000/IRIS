@@ -1,10 +1,14 @@
 """
 brain/iris_memory.py — Iris's memory store.
 
-Phase 3 starting point: JSONL-backed append log with naive substring search.
-Phase 4+ will swap in mem0/ChromaDB when an LLM endpoint is wired (mem0
-needs an LLM for memory extraction; without one it can't actually do its
-job, so we'd be dressing up a JSONL with extra ceremony).
+JSONL-backed durable log with a naive substring search. Semantic search is
+brain/iris_semantic_memory.py (ChromaDB + bundled MiniLM), kept in step by a
+write-through upsert/delete here and a reconcile at boot.
+
+Every read/append/rewrite goes through brain/_jsonl_store.py — one flock'd
+sidecar lock shared with iris_human_memory.record_revisit and
+scripts/memory_decay.py, fsync'd appends that can't be swallowed by a torn
+tail, per-line tolerant decoding, and mkstemp+replace rewrites.
 
 The orb's memory tab contracts:
   GET    /api/v1/memory/mem0           → {ok, entries: [{id, text, ...}]}
@@ -25,13 +29,13 @@ search layer over it.
 """
 from __future__ import annotations
 
-import json
-import threading
 import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+
+from brain import _jsonl_store
 
 
 _DEFAULT_PATH = "state/iris_memory.jsonl"
@@ -42,39 +46,25 @@ class IrisMemory:
     def __init__(self, base_dir: Path) -> None:
         self._base = Path(base_dir)
         self._path = self._base / _DEFAULT_PATH
-        self._lock = threading.Lock()
         self._available = True
 
     @property
     def available(self) -> bool:
         return self._available
 
-    def _read_all(self) -> list[dict[str, Any]]:
-        if not self._path.is_file():
-            return []
-        out: list[dict[str, Any]] = []
-        try:
-            for line in self._path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    e = json.loads(line)
-                    if isinstance(e, dict):
-                        out.append(e)
-                except Exception:
-                    pass
-        except Exception:
-            return []
-        return out
+    def _locked(self, fail_open: bool = False):
+        """The shared cross-process lock on the canonical log (see _jsonl_store)."""
+        return _jsonl_store.locked(self._path, fail_open=fail_open)
 
-    def _rewrite_all(self, entries: list[dict[str, Any]]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".jsonl.tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            for e in entries:
-                f.write(json.dumps(e, ensure_ascii=False) + "\n")
-        tmp.replace(self._path)
+    def _read(self) -> "_jsonl_store.ReadResult":
+        return _jsonl_store.read_jsonl(self._path)
+
+    def _read_all(self) -> list[dict[str, Any]]:
+        return self._read().entries
+
+    def _rewrite_all(self, entries: list[dict[str, Any]],
+                     salvage: Optional[list[bytes]] = None) -> None:
+        _jsonl_store.rewrite_jsonl(self._path, entries, salvage=salvage)
 
     def add(
         self,
@@ -145,10 +135,7 @@ class IrisMemory:
             "source": str(source or "manual"),
             "tags": list(tags or []),
         }
-        with self._lock:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            with self._path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        _jsonl_store.append_jsonl(self._path, [entry])
         # Phase 18: write-through to semantic index. Best-effort; if chroma
         # isn't ready, the JSONL write succeeded which is what matters.
         try:
@@ -159,7 +146,7 @@ class IrisMemory:
         return entry
 
     def list(self, limit: int = _DEFAULT_LIMIT) -> list[dict[str, Any]]:
-        with self._lock:
+        with self._locked(fail_open=True):
             entries = self._read_all()
         # Newest first.
         entries.sort(key=lambda e: float(e.get("ts") or 0.0), reverse=True)
@@ -169,10 +156,15 @@ class IrisMemory:
         q = (query or "").strip().lower()
         if not q:
             return []
-        with self._lock:
+        with self._locked(fail_open=True):
             entries = self._read_all()
+        # A reconsolidated memory (record_revisit) stays in the log for audit,
+        # but search returns only the version that superseded it.
+        superseded = {str(e.get("supersedes")) for e in entries if e.get("supersedes")}
         scored: list[tuple[float, dict[str, Any]]] = []
         for e in entries:
+            if str(e.get("id") or "") in superseded:
+                continue
             text = str(e.get("text") or "").lower()
             tags = " ".join(str(t) for t in (e.get("tags") or [])).lower()
             score = 0.0
@@ -191,12 +183,21 @@ class IrisMemory:
         eid = str(entry_id or "")
         if not eid:
             return False
-        with self._lock:
-            entries = self._read_all()
+        with self._locked():
+            res = self._read()
+            entries = res.entries  # a whole-file read error => [] => nothing deleted
             kept = [e for e in entries if e.get("id") != eid]
             if len(kept) == len(entries):
                 return False
-            self._rewrite_all(kept)
+            self._rewrite_all(kept, salvage=res.bad_raw)
+        # Tombstone, so boot reconcile can tell a deliberate delete from a
+        # memory the JSONL LOST (and remove it from Chroma even if the mirror
+        # call below fails). Best-effort.
+        try:
+            _jsonl_store.append_jsonl(self._path.with_name("iris_memory_deleted.jsonl"),
+                                      [{"id": eid, "ts": time.time(), "why": "deleted"}])
+        except Exception:
+            pass
         # Phase 18: mirror delete to semantic index.
         try:
             from brain import iris_semantic_memory
@@ -206,7 +207,7 @@ class IrisMemory:
         return True
 
     def count(self) -> int:
-        with self._lock:
+        with self._locked(fail_open=True):
             return len(self._read_all())
 
 

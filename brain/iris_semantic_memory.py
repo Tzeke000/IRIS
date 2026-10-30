@@ -8,9 +8,12 @@ about Zeke's sleep schedule?") rather than just substring match.
 Embeddings: Chroma's bundled all-MiniLM-L6-v2 ONNX (CPU). 80MB cached at
 ~/.cache/chroma/. No Ollama, no API keys, no extra pip installs.
 
-Sync model: write-through. Every iris_memory.add() that includes a hook
-into this module will also upsert into Chroma. On boot, we reconcile —
-any JSONL entries missing from Chroma get backfilled.
+Sync model: write-through. Every iris_memory.add() / record_revisit() also
+upserts into Chroma (and iris_memory.delete() deletes). On boot, we reconcile
+both ways — JSONL entries missing from Chroma get backfilled, and Chroma IDs
+that are no longer live in the JSONL (deleted, archived by memory_decay, or
+superseded by a reconsolidated version) get deleted; unexplained orphans
+are kept and exported for review (see reconcile_from_jsonl).
 
 Public API:
   configure(base_dir)              — bind paths, idempotent
@@ -39,6 +42,8 @@ _CLIENT: Any = None  # chromadb.PersistentClient
 _COLLECTION: Any = None  # chromadb.Collection
 _LOCK = threading.Lock()
 _COLLECTION_NAME = "iris_memories"
+_MAX_K = 50            # search() result cap (callers pass k straight through)
+_ID_PAGE = 1000        # page size for listing Chroma IDs in reconcile
 
 
 def _chroma_dir() -> Path:
@@ -94,7 +99,10 @@ def upsert(entry: dict[str, Any]) -> bool:
             "category": str(entry.get("category") or ""),
             "importance": float(entry.get("importance") or 0.0),
             "source": str(entry.get("source") or ""),
-            "tags": ",".join(entry.get("tags") or []),
+            # str() each tag: one non-string tag used to raise here, so the
+            # whole memory was never indexed.
+            "tags": ",".join(str(t) for t in (entry.get("tags") or [])
+                             if str(t).strip()),
         }
         with _LOCK:
             _COLLECTION.upsert(
@@ -126,7 +134,7 @@ def search(query: str, k: int = 5,
         with _LOCK:
             res = _COLLECTION.query(
                 query_texts=[str(query)],
-                n_results=int(max(1, k)),
+                n_results=int(max(1, min(_MAX_K, int(k)))),
                 where=where,
             )
         # Chroma returns dict of lists; we get the first row.
@@ -163,9 +171,10 @@ def search(query: str, k: int = 5,
         # hit. Doesn't fail the search if record_access errors.
         try:
             from brain import iris_human_memory
-            for entry in out:
-                if entry.get("id"):
-                    iris_human_memory.record_access(entry["id"])
+            hit_ids = [entry["id"] for entry in out if entry.get("id")]
+            if hit_ids:
+                # One meta load + one atomic save for the whole search.
+                iris_human_memory.record_accesses(hit_ids)
         except Exception:
             pass
         return out
@@ -197,44 +206,134 @@ def count() -> int:
         return 0
 
 
+def _all_ids() -> Optional[set[str]]:
+    """Every ID in the collection, paged (get(include=[]) with offset) so it
+    neither caps out at 10k nor pulls documents/embeddings. None on error —
+    callers must NOT treat an error as an empty collection."""
+    ids: set[str] = set()
+    offset = 0
+    try:
+        while True:
+            with _LOCK:
+                got = _COLLECTION.get(include=[], limit=_ID_PAGE, offset=offset)
+            page = list(got.get("ids") or [])
+            ids.update(str(i) for i in page)
+            if len(page) < _ID_PAGE:
+                return ids
+            offset += len(page)
+    except Exception as e:
+        print(f"[iris_semantic_memory] id listing error: {e!r}")
+        return None
+
+
+def _ids_in(path: Path) -> set[str]:
+    from brain import _jsonl_store
+    return {str(e.get("id")) for e in _jsonl_store.read_jsonl(path, log=False).entries
+            if e.get("id")}
+
+
 def reconcile_from_jsonl() -> int:
-    """Rebuild the collection from iris_memory.jsonl. Used at boot to
-    catch any entries that landed before chroma was ready."""
+    """Bring the collection in line with iris_memory.jsonl. Used at boot.
+
+    - backfills live JSONL entries missing from Chroma (landed before chroma
+      was ready);
+    - deletes Chroma IDs that are no longer live FOR A KNOWN REASON:
+        * superseded by a reconsolidated version (record_revisit keeps both
+          in the log for audit; only the newest should rank),
+        * archived by scripts/memory_decay.py (state/iris_memory_archive.jsonl),
+        * deleted through iris_memory.delete (tombstone in
+          state/iris_memory_deleted.jsonl — covers a delete whose Chroma
+          mirror call failed).
+    - Chroma IDs missing from the JSONL with NO known reason are KEPT and
+      exported to state/iris_memory.chroma_orphans.jsonl. Non-fsync'd appends
+      lost to power cuts (NUL-filled lines) and the old decay/rewrite race
+      left memories whose only intact copy is in Chroma; deleting those
+      would destroy them. Review that file and re-append what's real.
+
+    If the JSONL can't be read at all, or the ID listing errored, nothing is
+    deleted. Returns the number of entries ADDED (unchanged contract);
+    deletions and orphans are logged."""
     if not _ensure_client():
         return 0
     if _BASE is None:
         return 0
-    jsonl = _BASE / "state" / "iris_memory.jsonl"
+    state = _BASE / "state"
+    jsonl = state / "iris_memory.jsonl"
     if not jsonl.is_file():
         return 0
     try:
-        import json
+        from brain import _jsonl_store
+        res = _jsonl_store.read_jsonl(jsonl)
+        entries = res.entries
+        superseded = {str(e.get("supersedes")) for e in entries if e.get("supersedes")}
+        all_jsonl = {str(e.get("id")) for e in entries if e.get("id")}
+        live: dict[str, dict[str, Any]] = {}
+        for e in entries:
+            eid = str(e.get("id") or "")
+            if eid and eid not in superseded:
+                live[eid] = e
         # Pull existing IDs from chroma to avoid re-embedding everything.
-        with _LOCK:
-            existing = set()
-            try:
-                got = _COLLECTION.get(limit=10000)
-                existing = set((got.get("ids") or []))
-            except Exception:
-                pass
+        existing = _all_ids()
         added = 0
-        for line in jsonl.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
+        for eid, entry in live.items():
+            if existing is not None and eid in existing:
                 continue
-            try:
-                entry = json.loads(line)
-                if isinstance(entry, dict) and entry.get("id") not in existing:
-                    if upsert(entry):
-                        added += 1
-            except Exception:
-                continue
-        if added:
-            print(f"[iris_semantic_memory] reconciled {added} entries from JSONL")
+            if upsert(entry):
+                added += 1
+        removed = 0
+        orphans: list[str] = []
+        if existing is not None and not res.error and entries:
+            gone = existing - set(live)
+            known_gone = ((gone & superseded)
+                          | (gone & (_ids_in(state / "iris_memory_archive.jsonl")
+                                     | _ids_in(state / "iris_memory_deleted.jsonl"))))
+            # never delete something that's still a (non-superseded) JSONL row
+            known_gone -= (all_jsonl - superseded)
+            orphans = sorted(gone - known_gone)
+            stale = sorted(known_gone)
+            for i in range(0, len(stale), 500):
+                chunk = stale[i:i + 500]
+                try:
+                    with _LOCK:
+                        _COLLECTION.delete(ids=chunk)
+                    removed += len(chunk)
+                except Exception as e:
+                    print(f"[iris_semantic_memory] reconcile delete error: {e!r}")
+                    break
+            if orphans:
+                _export_orphans(orphans, state / "iris_memory.chroma_orphans.jsonl")
+        if added or removed or orphans:
+            print(f"[iris_semantic_memory] reconciled: +{added} from JSONL, "
+                  f"-{removed} superseded/archived/deleted, "
+                  f"{len(orphans)} orphan(s) kept + exported")
         return added
     except Exception as e:
         print(f"[iris_semantic_memory] reconcile error: {e!r}")
         return 0
+
+
+def _export_orphans(ids: list[str], out_path: Path) -> None:
+    """Write the full Chroma copy (id, text, metadata) of every orphan to a
+    review file, atomically. Best-effort; never raises."""
+    try:
+        from brain import _jsonl_store
+        rows: list[dict[str, Any]] = []
+        for i in range(0, len(ids), 500):
+            with _LOCK:
+                got = _COLLECTION.get(ids=ids[i:i + 500],
+                                      include=["documents", "metadatas"])
+            gids = got.get("ids") or []
+            docs = got.get("documents") or []
+            metas = got.get("metadatas") or []
+            for j, gid in enumerate(gids):
+                meta = dict(metas[j] or {}) if j < len(metas) else {}
+                rows.append({"id": gid,
+                             "text": docs[j] if j < len(docs) else "",
+                             "chroma_metadata": meta})
+        rows.sort(key=lambda r: float((r.get("chroma_metadata") or {}).get("ts") or 0.0))
+        _jsonl_store.rewrite_jsonl(out_path, rows)
+    except Exception as e:
+        print(f"[iris_semantic_memory] orphan export error: {e!r}")
 
 
 def bootstrap_iris_semantic_memory(g: dict[str, Any]) -> None:

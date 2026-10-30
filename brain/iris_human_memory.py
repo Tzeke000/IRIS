@@ -68,6 +68,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from brain import _jsonl_store
+
 
 _BASE: Path | None = None
 _LOCK = threading.Lock()
@@ -236,11 +238,7 @@ def record_episode(
         "version": 1,
         "supersedes": None,
     }
-    with _LOCK:
-        p = _episodes_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    _jsonl_store.append_jsonl(_episodes_path(), [entry])
     return entry
 
 
@@ -248,22 +246,10 @@ def recent_episodes(limit: int = 20, person_id: Optional[str] = None) -> list[di
     p = _episodes_path()
     if not p.is_file():
         return []
-    with _LOCK:
-        try:
-            lines = p.read_text(encoding="utf-8").splitlines()
-        except Exception:
-            return []
+    with _jsonl_store.locked(p, fail_open=True):
+        entries = _jsonl_store.read_jsonl(p).entries
     out: list[dict[str, Any]] = []
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            e = json.loads(line)
-        except Exception:
-            continue
-        if not isinstance(e, dict):
-            continue
+    for e in reversed(entries):
         if person_id and e.get("person_id") != person_id:
             continue
         out.append(e)
@@ -315,21 +301,14 @@ def working_memory_push(item: dict[str, Any]) -> None:
         items.insert(0, item)
         items = items[:_WORKING_MEMORY_CAPACITY]
         state = {"items": items, "updated_ts": time.time()}
-        p = _working_memory_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
-        tmp.replace(p)
+        _jsonl_store.write_json_atomic(_working_memory_path(), state, indent=2)
 
 
 def working_memory_clear() -> None:
     """Empty the buffer — explicit attention shift / sleep transition."""
     with _LOCK:
-        p = _working_memory_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({"items": [], "updated_ts": time.time()},
-                                indent=2), encoding="utf-8")
+        _jsonl_store.write_json_atomic(
+            _working_memory_path(), {"items": [], "updated_ts": time.time()}, indent=2)
 
 
 # ── Memory metadata (access_count + last_accessed_ts) ───────────────────────
@@ -346,12 +325,59 @@ def _load_meta() -> dict[str, dict[str, Any]]:
 
 
 def _save_meta(meta: dict[str, dict[str, Any]]) -> None:
-    p = _meta_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2),
-                   encoding="utf-8")
-    tmp.replace(p)
+    # mkstemp + fsync + os.replace under the shared flock (no fixed .tmp name).
+    _jsonl_store.write_json_atomic(_meta_path(), meta, indent=2)
+
+
+def _meta_locked():
+    """Cross-process lock for the meta file. Hold it across _load_meta ->
+    _save_meta so two writers (threads or processes) can't drop each other's bumps."""
+    return _jsonl_store.locked(_meta_path())
+
+
+# Meta pruning: an entry whose memory is gone from the live log (deleted, or
+# archived by scripts/memory_decay.py) AND that hasn't been touched for this
+# long is dropped. Checked at most once per _META_PRUNE_EVERY_S per process.
+_META_PRUNE_STALE_DAYS = 90.0
+_META_PRUNE_EVERY_S = 24 * 3600.0
+_META_PRUNE_MAX_FRACTION = 0.5   # refuse a prune that would drop more than this
+_last_meta_prune = 0.0
+
+
+def _meta_last_touch(m: dict[str, Any]) -> float:
+    vals = []
+    for k in ("last_accessed_ts", "tagged_ts", "last_consolidated_ts"):
+        try:
+            vals.append(float(m.get(k) or 0.0))
+        except Exception:
+            pass
+    return max(vals) if vals else 0.0
+
+
+def _prune_meta(meta: dict[str, dict[str, Any]], now: float,
+                live_ids: Optional[set[str]] = None) -> int:
+    """Drop meta rows for memories no longer in the live log and stale for
+    _META_PRUNE_STALE_DAYS. Mutates `meta`; returns how many were dropped.
+    Fails safe: an unreadable / empty / partly-bad log prunes nothing, and so
+    does a prune that would remove more than half the rows."""
+    if live_ids is None:
+        if _BASE is None:
+            return 0
+        res = _jsonl_store.read_jsonl(_BASE / "state" / "iris_memory.jsonl", log=False)
+        if res.error or res.bad or not res.entries:
+            return 0
+        live_ids = {str(e.get("id")) for e in res.entries if e.get("id")}
+    if not live_ids:
+        return 0
+    cutoff = now - _META_PRUNE_STALE_DAYS * 86400.0
+    dead = [k for k, m in meta.items()
+            if k not in live_ids
+            and (not isinstance(m, dict) or _meta_last_touch(m) < cutoff)]
+    if not dead or len(dead) > _META_PRUNE_MAX_FRACTION * len(meta):
+        return 0
+    for k in dead:
+        meta.pop(k, None)
+    return len(dead)
 
 
 def record_access(memory_id: str, g: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -377,30 +403,67 @@ def record_access(memory_id: str, g: Optional[dict[str, Any]] = None) -> dict[st
     """
     if not memory_id:
         return {"ok": False, "error": "empty memory_id"}
+    res = record_accesses([memory_id], g=g)
+    if not res.get("ok"):
+        return res
+    one = (res.get("results") or [{}])[0]
+    return {"ok": True, "memory_id": memory_id,
+            "access_count": one.get("access_count"),
+            "importance_boost": one.get("importance_boost")}
+
+
+def record_accesses(memory_ids: list[str],
+                    g: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """record_access for a whole batch (one search's hits): ONE load + ONE
+    atomic save of the meta file under the shared flock, instead of a full
+    rewrite per hit. Same per-id semantics as record_access; a repeated id in
+    the batch counts once (one retrieval event per search). Also prunes dead,
+    stale meta rows at most once a day."""
+    global _last_meta_prune
+    ids: list[str] = []
+    for mid in memory_ids or []:
+        mid = str(mid or "")
+        if mid and mid not in ids:
+            ids.append(mid)
+    if not ids:
+        return {"ok": False, "error": "empty memory_id"}
     now = time.time()
-    with _LOCK:
+    results: list[dict[str, Any]] = []
+    rows: dict[str, dict[str, Any]] = {}
+    with _meta_locked():
         meta = _load_meta()
-        m = meta.get(memory_id) or {}
-        prev_last_accessed = float(m.get("last_accessed_ts") or 0.0)
-        access_count_prev = int(m.get("access_count") or 0)
-        # Compute spacing-gated boost. If no prior access on record
-        # (last_accessed_ts == 0 OR access_count == 0), treat as fully
-        # spaced - first retrieval gets the long-interval base.
-        if prev_last_accessed <= 0.0 or access_count_prev <= 0:
-            elapsed_hours = -1.0  # sentinel -> fully spaced path
-        else:
-            elapsed_hours = max(0.0, (now - prev_last_accessed) / 3600.0)
-        boost_delta = _spacing_gated_boost(elapsed_hours)
-        access_count = access_count_prev + 1
-        new_importance = min(1.0,
-                             float(m.get("importance_boost") or 0.0)
-                             + boost_delta)
-        m["access_count"] = access_count
-        m["last_accessed_ts"] = now
-        m["importance_boost"] = new_importance
-        # Track the link from memory_id -> concept_graph node_id so we can
-        # activate it without scanning every search.
-        meta[memory_id] = m
+        for memory_id in ids:
+            m = meta.get(memory_id) or {}
+            prev_last_accessed = float(m.get("last_accessed_ts") or 0.0)
+            access_count_prev = int(m.get("access_count") or 0)
+            # Compute spacing-gated boost. If no prior access on record
+            # (last_accessed_ts == 0 OR access_count == 0), treat as fully
+            # spaced - first retrieval gets the long-interval base.
+            if prev_last_accessed <= 0.0 or access_count_prev <= 0:
+                elapsed_hours = -1.0  # sentinel -> fully spaced path
+            else:
+                elapsed_hours = max(0.0, (now - prev_last_accessed) / 3600.0)
+            boost_delta = _spacing_gated_boost(elapsed_hours)
+            access_count = access_count_prev + 1
+            new_importance = min(1.0,
+                                 float(m.get("importance_boost") or 0.0)
+                                 + boost_delta)
+            m["access_count"] = access_count
+            m["last_accessed_ts"] = now
+            m["importance_boost"] = new_importance
+            meta[memory_id] = m
+            rows[memory_id] = m
+            results.append({"memory_id": memory_id, "access_count": access_count,
+                            "importance_boost": new_importance})
+        if now - _last_meta_prune >= _META_PRUNE_EVERY_S:
+            _last_meta_prune = now
+            try:
+                dropped = _prune_meta(meta, now)
+                if dropped:
+                    print(f"[iris_human_memory] pruned {dropped} stale meta row(s) "
+                          f"for memories no longer in the log")
+            except Exception:
+                pass
         _save_meta(meta)
     # Use the stashed _G_REF if g wasn't passed.
     if g is None:
@@ -413,30 +476,42 @@ def record_access(memory_id: str, g: Optional[dict[str, Any]] = None) -> dict[st
         try:
             cg = g.get("_concept_graph")
             if cg is not None:
-                graph_node_id = m.get("graph_node_id")
-                if not graph_node_id:
-                    # Look up the memory text + derive expected slug.
-                    mem = g.get("_iris_memory")
-                    if mem is not None:
-                        for entry in mem.list(limit=200):
-                            if entry.get("id") == memory_id:
-                                from brain.concept_graph import _slugify
-                                expected_label = f"fact: {entry.get('text', '')[:80]}"
-                                graph_node_id = _slugify(expected_label)
-                                # Cache the mapping.
-                                with _LOCK:
-                                    meta = _load_meta()
-                                    if memory_id in meta:
-                                        meta[memory_id]["graph_node_id"] = graph_node_id
-                                        _save_meta(meta)
-                                break
-                if graph_node_id and graph_node_id in cg.nodes:
-                    cg.activate_node(graph_node_id)
+                recent: Optional[list[dict[str, Any]]] = None
+                new_maps: dict[str, str] = {}
+                for memory_id in ids:
+                    try:
+                        graph_node_id = rows[memory_id].get("graph_node_id")
+                        if not graph_node_id:
+                            # Look up the memory text + derive expected slug.
+                            mem = g.get("_iris_memory")
+                            if mem is not None:
+                                if recent is None:
+                                    recent = mem.list(limit=200)
+                                for entry in recent:
+                                    if entry.get("id") == memory_id:
+                                        from brain.concept_graph import _slugify
+                                        expected_label = f"fact: {entry.get('text', '')[:80]}"
+                                        graph_node_id = _slugify(expected_label)
+                                        new_maps[memory_id] = graph_node_id
+                                        break
+                        if graph_node_id and graph_node_id in cg.nodes:
+                            cg.activate_node(graph_node_id)
+                    except Exception:
+                        pass
+                if new_maps:
+                    # Cache the mappings - one save for the batch.
+                    with _meta_locked():
+                        meta = _load_meta()
+                        changed = False
+                        for mid, gid in new_maps.items():
+                            if mid in meta:
+                                meta[mid]["graph_node_id"] = gid
+                                changed = True
+                        if changed:
+                            _save_meta(meta)
         except Exception:
             pass
-    return {"ok": True, "memory_id": memory_id,
-            "access_count": access_count,
-            "importance_boost": new_importance}
+    return {"ok": True, "results": results}
 
 
 def effective_importance(memory_id: str, base_importance: float,
@@ -503,16 +578,9 @@ def _find_memory(memory_id: str) -> tuple[Optional[dict[str, Any]], Optional[Pat
     mem_path = _BASE / "state" / "iris_memory.jsonl"
     if not mem_path.is_file():
         return None, mem_path
-    try:
-        for line in mem_path.read_text(encoding="utf-8").splitlines():
-            try:
-                e = json.loads(line)
-                if isinstance(e, dict) and e.get("id") == memory_id:
-                    return e, mem_path
-            except Exception:
-                pass
-    except Exception:
-        pass
+    for e in _jsonl_store.read_jsonl(mem_path).entries:
+        if e.get("id") == memory_id:
+            return e, mem_path
     return None, mem_path
 
 
@@ -649,9 +717,17 @@ def record_revisit(memory_id: str, new_text: str,
         # A new trace starts at version 1 of its own lineage.
         new_entry["version"] = 1
 
-    with _LOCK:
-        with mem_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(new_entry, ensure_ascii=False) + "\n")
+    # Shared cross-process lock + newline-safe, fsync'd append (fix-first #3).
+    _jsonl_store.append_jsonl(mem_path, [new_entry])
+    # Keep the semantic index in step: the new version becomes searchable, and
+    # a superseded original stops ranking (it stays in the JSONL for audit).
+    try:
+        from brain import iris_semantic_memory
+        iris_semantic_memory.upsert(new_entry)
+        if effective_mode == "moderate_pe":
+            iris_semantic_memory.delete(memory_id)
+    except Exception:
+        pass
 
     out: dict[str, Any] = {
         "ok": True,
@@ -751,7 +827,7 @@ def _tag_pending_consolidation(memory_id: str, seed_id: str,
     in sleep replay."""
     if not memory_id:
         return
-    with _LOCK:
+    with _meta_locked():
         meta = _load_meta()
         m = meta.get(memory_id) or {}
         m["pending_consolidation"] = True
@@ -828,7 +904,7 @@ def drain_replay_batch(g: dict[str, Any], n: int = 3,
             # Do the real consolidation work: bump access_count, reset
             # decay clock, then clear the flag.
             record_access(eid, g=g)
-            with _LOCK:
+            with _meta_locked():
                 meta2 = _load_meta()
                 m2 = meta2.get(eid) or {}
                 m2["pending_consolidation"] = False
