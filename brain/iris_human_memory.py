@@ -222,7 +222,7 @@ def record_episode(
     entry = {
         "id": uuid.uuid4().hex[:12],
         "ts": time.time(),
-        "iso": datetime.now().isoformat(timespec="seconds"),
+        "iso": datetime.now().astimezone().isoformat(timespec="seconds"),
         "type": "episode",
         "summary": summary[:500],
         "person_id": str(person_id or "zeke"),
@@ -695,7 +695,7 @@ def record_revisit(memory_id: str, new_text: str,
     new_entry = dict(original)
     new_entry["id"] = uuid.uuid4().hex[:12]
     new_entry["ts"] = time.time()
-    new_entry["iso"] = datetime.now().isoformat(timespec="seconds")
+    new_entry["iso"] = datetime.now().astimezone().isoformat(timespec="seconds")
     new_entry["text"] = new_text_clean[:2000]
     new_entry["reconsolidation_reason"] = str(reason or "")[:300]
     new_entry["reconsolidation_mode"] = effective_mode

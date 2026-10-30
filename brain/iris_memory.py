@@ -123,7 +123,7 @@ class IrisMemory:
         entry = {
             "id": uuid.uuid4().hex[:12],
             "ts": time.time(),
-            "iso": datetime.now().isoformat(timespec="seconds"),
+            "iso": datetime.now().astimezone().isoformat(timespec="seconds"),
             "text": text[:2000],
             "person_id": str(person_id or "zeke"),
             "category": str(category or "episodic"),

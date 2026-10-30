@@ -390,3 +390,18 @@ def test_search_caps_k_and_batches_access(fake_chroma, monkeypatch) -> None:
     out = sm.search("memory", k=10_000)
     assert len(out) == sm._MAX_K
     assert len(seen) == 1 and len(seen[0]) == sm._MAX_K
+
+
+def test_memory_iso_carries_utc_offset(tmp_path: Path, monkeypatch) -> None:
+    """Code review 10-29 (bridges tracker note): memory/revisit `iso` was naive local time."""
+    from datetime import datetime as _dt
+    from brain import iris_memory, iris_semantic_memory as sm, iris_human_memory as hm
+    monkeypatch.setattr(sm, "upsert", lambda e: True)
+    monkeypatch.setattr(sm, "delete", lambda i: True)
+    mem = iris_memory.IrisMemory(tmp_path)
+    e = mem.add("Zeke likes green tea")
+    assert _dt.fromisoformat(e["iso"]).utcoffset() is not None
+    hm.configure(tmp_path)
+    out = hm.record_revisit(e["id"], "Zeke likes jasmine green tea", mode="reconsolidate")
+    rows = {r["id"]: r for r in js.read_jsonl(tmp_path / "state" / "iris_memory.jsonl").entries}
+    assert _dt.fromisoformat(rows[out["new_id"]]["iso"]).utcoffset() is not None
