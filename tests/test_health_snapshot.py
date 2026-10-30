@@ -305,3 +305,25 @@ def test_watchdog_writes_health_and_survives_a_broken_writer(tmp_path, monkeypat
     monkeypatch.setattr(wd, "__file__", str(tmp_path / "iris_watchdog.py"))   # sibling module now missing
     assert wd.write_health(time.time()) is None
     assert "health snapshot failed" in (tmp_path / "wd.log").read_text()
+
+
+def test_sdk_stream_prefers_host_heartbeat_file(hs, monkeypatch):
+    """V3 step 1.2: state/host_stream.json (written by the host's stream consumer) beats the transcript
+    proxy when its pid is the live host; a stale/foreign file falls back to the proxy."""
+    now = time.time()
+    me = os.getpid()
+    monkeypatch.setattr(hs, "find_pids", lambda needle: [4242])
+    monkeypatch.setattr(hs, "_proc_cmdline", lambda pid: "python iris_body_host.py")
+    monkeypatch.setattr(hs, "_proc_stat", lambda pid: ("claude", 4242) if pid == me else None)
+    monkeypatch.setattr(hs, "proc_age_s", lambda pid: 1000.0)
+    hb = hs.ROOT / "state" / "host_stream.json"
+    hb.write_text(json.dumps({"ts": now - 5, "pid": 4242, "turn_active": False, "turn_started_ts": None}))
+    r = hs.probe_sdk_stream(ctx(hs, now=now))
+    assert r["status"] == "ok" and r["detail"]["proxy"] is False and 4 < r["age_s"] < 6
+    hb.write_text(json.dumps({"ts": now - 4000, "pid": 4242, "turn_active": False}))
+    assert hs.probe_sdk_stream(ctx(hs, now=now))["status"] == "ok", "an idle stream between turns is legitimate"
+    hb.write_text(json.dumps({"ts": now - 4000, "pid": 4242, "turn_active": True, "turn_started_ts": now - 5000}))
+    r = hs.probe_sdk_stream(ctx(hs, now=now))
+    assert r["status"] == "warn" and "turn active" in r["error"]
+    hb.write_text(json.dumps({"ts": now - 5, "pid": 9999, "turn_active": False}))   # previous process
+    assert hs.probe_sdk_stream(ctx(hs, now=now))["detail"]["proxy"] is True

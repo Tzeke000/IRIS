@@ -48,6 +48,7 @@ BACKUP_STALE_S = 36 * 3600.0   # mirrors iris_watchdog.BACKUP_STALE_S
 DISK_WARN, DISK_RED = 85.0, 95.0
 EVENT_WARN_S = 600.0           # an un-committed event older than this = the store is not draining
 DONE_STATUSES = ("committed", "failed", "cancelled")
+STREAM_TURN_WARN_S = 1800.0    # host_stream.json: an ACTIVE turn with no SDK message this long (host interrupts at 3600)
 
 
 # ── small helpers ────────────────────────────────────────────────────────────
@@ -340,16 +341,26 @@ def _live_transcript(root: Path, now: float):
 
 
 def probe_sdk_stream(ctx: dict) -> dict:
-    """PROXY - the body host writes no stream heartbeat file (its _STREAM['last_msg_ts'] is in-memory only).
-    Precondition: host + its claude child exist; verdict inputs: state/cognition_held.json (host_hold's
-    'received, not read' flag) and the age of the live session transcript the CLI appends per message.
-    An idle stream is legitimate, so the age is reported, not judged."""
+    """Prefers state/host_stream.json - the heartbeat the body host's stream consumer writes on each SDK
+    message (V3 step 1.2, IRIS_V3_EVENTS=1; <=1 write / 2 s) - when it exists AND its pid is the live host.
+    Otherwise PROXY: the age of the live session transcript the CLI appends per message.
+    Precondition either way: host + its claude child exist; state/cognition_held.json (host_hold's
+    'received, not read' flag) is red. An idle stream is legitimate, so between turns the age is reported,
+    not judged; only an ACTIVE turn silent > STREAM_TURN_WARN_S warns."""
     root, now = ctx["root"], ctx["now"]
-    probe = ("PROXY: host + claude child present, cognition_held.json absent, session-transcript mtime age "
-             "(no host stream heartbeat exists yet)")
     hosts = [p for p in find_pids("iris_body_host.py") if "python" in _proc_cmdline(p).split(" ", 1)[0]]
-    age, name = _live_transcript(root, now)
-    det = {"host_pids": hosts, "transcript": name, "proxy": True}
+    hb = _load(root / "state" / "host_stream.json", None)
+    if isinstance(hb, dict) and hosts and hb.get("pid") in hosts and isinstance(hb.get("ts"), (int, float)):
+        probe = ("host_stream.json heartbeat (stream consumer, per SDK message) + host + claude child present, "
+                 "cognition_held.json absent")
+        age = max(0.0, now - float(hb["ts"]))
+        det = {"host_pids": hosts, "proxy": False, "turn_active": bool(hb.get("turn_active")),
+               "turn_started_ts": hb.get("turn_started_ts")}
+    else:
+        probe = ("PROXY: host + claude child present, cognition_held.json absent, session-transcript mtime age "
+                 "(no live host_stream.json heartbeat)")
+        age, name = _live_transcript(root, now)
+        det = {"host_pids": hosts, "transcript": name, "proxy": True}
     if not hosts:
         return _stack_red(ctx, probe, "no iris_body_host.py process", **det)
     kids = []
@@ -368,6 +379,8 @@ def probe_sdk_stream(ctx: dict) -> dict:
     held = _load(root / "state" / "cognition_held.json", None)
     if held is not None:
         return _r("red", probe, "cognition HELD (state/cognition_held.json): " + str(held)[:160], age=age, **det)
+    if not det["proxy"] and det["turn_active"] and age is not None and age > STREAM_TURN_WARN_S:
+        return _r("warn", probe, f"turn active but no SDK stream message for {age:.0f}s", age=age, **det)
     return _r("ok", probe, age=age, **det)
 
 

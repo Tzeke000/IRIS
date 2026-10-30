@@ -281,7 +281,7 @@ _SOURCE_PRIORITY = {
 _enqueue_seq = [0]   # monotonic tiebreaker => stable FIFO *within* a priority band
 
 
-async def _enqueue(queue, item):
+async def _enqueue(queue, item, *, ts=None, event_id=None):
     """Put one (source, text, msg_id[, sender]) item on the priority queue, tagged by source
     priority + a monotonic sequence. The seq guarantees the inner tuple is never compared
     (so heterogeneous items can't raise 'unorderable types') and preserves arrival order
@@ -290,10 +290,489 @@ async def _enqueue(queue, item):
     2026-07-13 (TikTok incident): entries also carry their ENQUEUE TIME. A backlog
     of captured utterances used to be served one-per-turn minutes later with no age
     marker — stale captures read as live replies and the input queue 'fabricated a
-    conversation'. The consumer stamps '[captured Ns ago]' on old voice items."""
+    conversation'. The consumer stamps '[captured Ns ago]' on old voice items.
+
+    V3 step 1.2 (IRIS_V3_EVENTS=1 only): the item is also written to the durable event store
+    (status admitted). `ts` = the ORIGINAL capture time for a boot re-offer (so the age marker
+    tells the truth); `event_id` = an existing row being re-offered (no new insert)."""
     prio = _SOURCE_PRIORITY.get(item[0], 5)
     _enqueue_seq[0] += 1
-    await queue.put((prio, _enqueue_seq[0], item, time.time()))
+    if _ev_on():
+        _ev_admit(item, prio, _enqueue_seq[0], event_id)
+    await queue.put((prio, _enqueue_seq[0], item, time.time() if ts is None else ts))
+
+
+# ── V3 PHASE 1 STEP 1.2 — DURABLE EVENT STORE, DUAL-WRITE (IRIS_V3_EVENTS=1) ─────────────────────
+# Every live input also gets a row in state/v3/events.sqlite (brain/iris_events.py):
+# admitted at _enqueue -> assigned (owner host-turn:<n>) at turn start / inbox hand-over ->
+# output_pending + reply_ref when a reply tool actually SENT something -> committed at turn end.
+# The in-memory queue stays the delivery path and state/discord_inbox.json stays the Discord
+# source of truth during the soak; the store only RECORDS, plus two boot-time uses:
+#   * P1-T3e: a replayed Discord/letter item that already has a reply_ref is shown as
+#     "[I already answered this before the restart: <ref>]" instead of blind "[unhandled ...]";
+#   * P1-R1b: voice / VR / letter items lost with the in-memory queue are re-offered with their age
+#     (voice/VR only if < EV_LIVE_REOFFER_S old; older ones are cancelled - stale speech must never
+#     read as live).
+# FAIL OPEN: every store call is wrapped; a store error or a missing/corrupt DB never touches
+# delivery (and the store itself never raises - belt and braces). Flag off = no store calls at all.
+try:
+    from brain import iris_events as _iris_events
+except Exception as _ev_imp_err:  # noqa: BLE001 — the store is optional
+    _iris_events = None
+    print("[host] note: brain.iris_events unavailable (" + repr(_ev_imp_err) + "); V3 dual-write OFF.",
+          file=sys.stderr)
+
+EV_SOURCES = ("discord", "orb", "relay", "voice", "vr", "letter")
+EV_LIVE_SOURCES = ("voice", "vr")
+EV_LIVE_REOFFER_S = float(os.environ.get("IRIS_V3_LIVE_REOFFER_S", "600"))      # 10 min
+EV_LETTER_REOFFER_S = float(os.environ.get("IRIS_V3_LETTER_REOFFER_S", str(48 * 3600)))
+EV_BUSY_TIMEOUT_S = float(os.environ.get("IRIS_V3_BUSY_TIMEOUT_S", "2"))   # never stall the loop long
+_EV = {"store": None, "turn_n": 0, "owner": None, "trace": None, "turn_evs": []}
+_EV_IDS = {}   # queue seq -> [event_id, ...]  (a coalesced VR entry carries several)
+
+
+def _ev_on():
+    try:
+        return _iris_events is not None and _iris_events.flag_enabled()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ev_store():
+    if _EV["store"] is None:
+        _EV["store"] = _iris_events.EventStore(busy_timeout_s=EV_BUSY_TIMEOUT_S)
+    return _EV["store"]
+
+
+def _ev_err(what, e):
+    try:
+        print("\n[host] event store " + what + " failed (non-fatal, delivery unaffected): " + repr(e)[:200],
+              file=sys.stderr)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _ev_key(source, text, msg_id, ts):
+    if msg_id:
+        if source == "discord":
+            return "discord:" + str(msg_id)
+        if source in ("orb", "relay"):
+            return "orb:" + str(msg_id)          # same id space (iris_chat request ids)
+        if source in ("letter", "vr"):
+            return source + ":" + str(msg_id)
+    import hashlib
+    return source + ":" + hashlib.sha1(((text or "") + "|" + repr(ts)).encode("utf-8", "replace")).hexdigest()[:24]
+
+
+def _ev_trusted(source, sender):
+    if source in ("discord", "orb"):
+        return True                              # owner-filtered poller / localhost orb
+    if source == "voice":
+        return bool(_voice_trusted(sender)[0])
+    if source == "vr":
+        return not _vr_has_guest(sender)
+    return False                                 # relay (not Zeke), letters (siblings)
+
+
+def _ev_sender_label(source, sender):
+    if source in ("discord", "orb"):
+        return "zeke"
+    if source == "voice":
+        try:
+            m = json.loads(sender) if isinstance(sender, str) else (sender or {})
+            return str(m.get("speaker") or m.get("status") or "?")[:80]
+        except Exception:  # noqa: BLE001
+            return "?"
+    if source == "relay":
+        try:
+            return str((json.loads(sender or "{}") or {}).get("sender") or "?")[:80]
+        except Exception:  # noqa: BLE001
+            return "?"
+    return str(sender or "")[:200] or None
+
+
+def _ev_admit(item, prio, seq, event_id=None):
+    try:
+        source = item[0]
+        if source not in EV_SOURCES:
+            return
+        if event_id is None:
+            text, msg_id = item[1], item[2]
+            sender = item[3] if len(item) > 3 else None
+            r = _ev_store().insert(
+                source, text, idempotency_key=_ev_key(source, text, msg_id, time.time()),
+                status="admitted", channel_msg_id=(str(msg_id) if msg_id else None),
+                sender=_ev_sender_label(source, sender), trusted=_ev_trusted(source, sender),
+                priority=prio, meta=({"item_sender": sender} if sender is not None else None), actor="host")
+            if r is None:
+                _ev_err("insert(" + source + ")", _ev_store().last_error)
+                return
+            event_id = r.id
+        _EV_IDS[seq] = [event_id]
+    except Exception as e:  # noqa: BLE001
+        _ev_err("admit", e)
+
+
+def _ev_take(entry):
+    """Pop the event ids riding on one queue entry (never raises)."""
+    try:
+        return _EV_IDS.pop(entry[1], []) if _EV_IDS else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _ev_set(eids, status, note, owner=None):
+    if not eids or not _ev_on():
+        return
+    for eid in eids:
+        try:
+            f = {"note": note} if note else {}
+            if owner:
+                f["owner"] = owner
+            if _ev_store().transition(eid, None, None, status, actor=owner or "host", **f) is None:
+                _ev_err(status + "(" + str(eid) + ")",
+                        _ev_store().last_error or "row not open (already terminal?)")
+        except Exception as e:  # noqa: BLE001
+            _ev_err(status, e)
+
+
+def _ev_turn_begin(eids, source, msg_id, sender):
+    """Main-loop turn start: the turn's own input(s) -> assigned to host-turn:<n>."""
+    if not _ev_on():
+        return
+    try:
+        _EV["turn_n"] += 1
+        _EV["owner"] = "host-turn:" + str(_EV["turn_n"]) + "@" + str(os.getpid())
+        _EV["turn_evs"] = []
+        _EV["trace"] = eids[0] if eids else None
+        _ev_set(eids, "assigned", None, _EV["owner"])
+        for eid in eids:
+            _EV["turn_evs"].append({"id": eid, "source": source, "msg_id": msg_id, "sender": sender})
+        _blog("turn", "start", {"trace": _EV["trace"], "owner": _EV["owner"], "source": source,
+                                "events": list(eids)})
+    except Exception as e:  # noqa: BLE001
+        _ev_err("turn begin", e)
+
+
+def _ev_handover(eids, source, msg_id, sender):
+    """Inbox checkpoint: a queued input handed to the CURRENT turn -> assigned to that turn."""
+    if not eids or not _ev_on():
+        return
+    try:
+        _ev_set(eids, "assigned", "inbox checkpoint hand-over", _EV["owner"])
+        for eid in eids:
+            _EV["turn_evs"].append({"id": eid, "source": source, "msg_id": msg_id, "sender": sender})
+    except Exception as e:  # noqa: BLE001
+        _ev_err("hand-over", e)
+
+
+def _ev_turn_end(handled):
+    """Turn end: handled items -> committed (mirrors _discord_ack: same moment, same condition).
+    A turn whose consumer died did NOT handle them - they stay open for the boot replay."""
+    if not _ev_on():
+        return
+    try:
+        evs = [e["id"] for e in _EV["turn_evs"]]
+        if handled:
+            _ev_set(evs, "committed", "turn end", _EV["owner"])
+        _blog("turn", "end", {"trace": _EV["trace"], "owner": _EV["owner"], "handled": bool(handled),
+                              "events": evs})
+    except Exception as e:  # noqa: BLE001
+        _ev_err("turn end", e)
+    finally:
+        _EV["turn_evs"] = []
+        _EV["trace"] = None
+
+
+def _tr(detail=None):
+    """Step 1.4 trace: add the current turn's root event id to a _blog detail (flag on only)."""
+    try:
+        if _EV["trace"] and _ev_on():
+            if detail is None:
+                return {"trace": _EV["trace"]}
+            if isinstance(detail, dict):
+                return dict(detail, trace=_EV["trace"])
+    except Exception:  # noqa: BLE001
+        pass
+    return detail
+
+
+def _ev_flat(resp):
+    if isinstance(resp, str):
+        return resp
+    try:
+        return json.dumps(resp, default=str)
+    except Exception:  # noqa: BLE001
+        return str(resp)
+
+
+_EV_FAIL_RE = re.compile(r'"ok"\s*:\s*false|\\"ok\\"\s*:\s*false|"is_error"\s*:\s*true', re.I)
+_EV_DISCORD_SENT_RE = re.compile(r"sent[^()]*\(ids?:\s*([0-9][0-9,\s]*)\)", re.I)
+
+
+def _ev_reply_targets(tool_name, tool_input, tool_response):
+    """(ref, predicate) for a reply tool that actually sent something, else None.
+    predicate(ev_dict) -> True for the turn's events this reply answers."""
+    name = str(tool_name or "")
+    ti = tool_input if isinstance(tool_input, dict) else {}
+    sub, prm = name, ti
+    if name.endswith("iris_tool_call"):
+        sub = str(ti.get("name") or "")
+        prm = ti.get("params") or {}
+        if isinstance(prm, str):
+            try:
+                prm = json.loads(prm)
+            except Exception:  # noqa: BLE001
+                prm = {}
+        if not isinstance(prm, dict):
+            prm = {}
+    txt = _ev_flat(tool_response)
+    if isinstance(tool_response, dict) and tool_response.get("is_error"):
+        return None
+    now = str(int(time.time()))
+    if "discord" in name and name.endswith("reply"):
+        m = _EV_DISCORD_SENT_RE.search(txt)
+        if not m:
+            return None                          # no "sent (id: ...)" => it did not go out
+        ref = "discord:" + ",".join(i for i in re.split(r"[,\s]+", m.group(1)) if i)
+        chat = str(ti.get("chat_id") or "")
+        rto = str(ti.get("reply_to") or "")
+        if chat and DISCORD_CHANNEL_ID and chat != str(DISCORD_CHANNEL_ID):
+            return ref, lambda ev: ev["source"] == "relay"
+        def _dm(ev, _rto=rto):
+            if ev["source"] != "discord":
+                return False
+            return (not _rto) or str(ev["msg_id"]) == _rto or not any(
+                str(e["msg_id"]) == _rto for e in _EV["turn_evs"])
+        return ref, _dm
+    if _EV_FAIL_RE.search(txt):
+        return None
+    if sub.endswith("chat_reply"):
+        rid = str(prm.get("request_id") or prm.get("id") or "")
+        return "orb:" + (rid or now), (lambda ev, _r=rid: ev["source"] in ("orb", "relay")
+                                       and (not _r or str(ev["msg_id"]) == _r))
+    if sub.endswith("voice_speak") or sub.endswith("voice_speak_interruptible"):
+        return "voice_speak@" + now, (lambda ev: ev["source"] == "voice")
+    if sub == "vr_temple" and str(prm.get("action") or "").lower() == "speak":
+        return "vr_speak@" + now, (lambda ev: ev["source"] == "vr")
+    if sub.endswith("sibling_reply"):
+        lid = str(prm.get("letter_id") or "")
+        return "letter-reply:" + (lid or now), (lambda ev, _l=lid: ev["source"] == "letter"
+                                                and (not _l or str(ev["msg_id"]) == _l))
+    if sub.endswith("sibling_letter"):
+        to = str(prm.get("to") or "").strip().lower()
+        return "letter-to:" + (to or "?") + "@" + now, (lambda ev, _t=to: ev["source"] == "letter"
+                                                        and str(ev["sender"] or "").lower() == _t)
+    return None
+
+
+def _ev_mark_reply(input_data):
+    """PostToolUse reply marker (fixes P1-T3e): a reply tool that SENT something marks the turn's
+    matching events output_pending + reply_ref. Not committed - committed is the turn end, the same
+    moment discord_inbox.json acks, so the soak parity check stays exact."""
+    if not _ev_on():
+        return
+    try:
+        turn = _INBOX["turn"]
+        if turn is None or not turn.active or not _EV["turn_evs"]:
+            return
+        d = input_data or {}
+        hit = _ev_reply_targets(d.get("tool_name"), d.get("tool_input"), d.get("tool_response"))
+        if not hit:
+            return
+        ref, pred = hit
+        marked = []
+        for ev in list(_EV["turn_evs"]):
+            if pred(ev):
+                if _ev_store().mark_replied(ev["id"], ref, actor=_EV["owner"], commit=False):
+                    marked.append(ev["id"])
+                else:
+                    _ev_err("mark_replied(" + ev["id"] + ")", _ev_store().last_error)
+        if marked:
+            _blog("turn", "reply marked", {"trace": _EV["trace"], "ref": ref, "events": marked})
+    except Exception as e:  # noqa: BLE001
+        _ev_err("reply marker", e)
+
+
+def _ev_replied_ref(key):
+    """reply_ref of an existing row by idempotency key, or None (flag off / no row / error)."""
+    if not _ev_on():
+        return None
+    try:
+        row = _ev_store().find_by_key(key)
+        return (row or {}).get("reply_ref") or None
+    except Exception as e:  # noqa: BLE001
+        _ev_err("find_by_key", e)
+        return None
+
+
+def _ev_discord_replay_prefix(msg_id):
+    """Boot replay label for one discord_inbox.json 'unacked' item. Flag off => exactly today's."""
+    ref = _ev_replied_ref("discord:" + str(msg_id))
+    if ref:
+        return ("[I already answered this before the restart: " + ref + " - do NOT answer it again blind; "
+                "only follow up if that reply promised more] ")
+    return "[unhandled before my restart] "
+
+
+def _ev_age_words(age_s):
+    age_s = max(0.0, float(age_s))
+    return (str(int(age_s)) + " s") if age_s < 120 else (str(int(age_s // 60)) + " min")
+
+
+async def _ev_boot_replay(queue, start_ts, discord_unacked_ids=None, discord_last_id=None):
+    """P1-R1b + parity hygiene, once at boot (flag on only). Rows from BEFORE this process
+    (received_ts < start_ts) that never committed:
+      voice / vr  < EV_LIVE_REOFFER_S old -> re-offered with their age; older -> cancelled.
+                  Already replied (I spoke it) -> committed, NOT re-offered: re-saying something
+                  aloud in the room is the worst kind of duplicate, and speech has no thread to
+                  follow up in anyway.
+      letter      < EV_LETTER_REOFFER_S -> re-offered with age (+ the already-answered label if
+                  replied - a text thread can hold a promised follow-up); older -> cancelled.
+      orb / relay -> cancelled: the orb has its own durable pending store + Stop-hook path, and
+                  the host never replays pre-boot orb requests (orb_reader skips ts < start).
+      discord     -> NOT replayed from here (discord_inbox.json is the source of truth); a row the
+                  JSON already acked (not in unacked, id <= the saved cursor) is committed so the
+                  parity check doesn't carry a ghost. Ids past the cursor are left for the poller."""
+    if not _ev_on():
+        return
+    try:
+        store = _ev_store()
+        rows = [r for r in (store.unanswered(limit=2000) or [])
+                if float(r.get("received_ts") or 0) < start_ts]
+        now = time.time()
+        n_re = n_cx = n_cm = 0
+        unacked = {str(i) for i in (discord_unacked_ids or [])}
+        for r in sorted(rows, key=lambda x: float(x.get("received_ts") or 0)):
+            src, eid = r.get("source"), r.get("event_id")
+            age = now - float(r.get("received_ts") or now)
+            meta = r.get("meta")
+            if not isinstance(meta, dict):
+                try:
+                    meta = json.loads(r.get("meta_json") or "{}") or {}
+                except Exception:  # noqa: BLE001
+                    meta = {}
+            sender = meta.get("item_sender")
+            if src == "discord":
+                mid = str(r.get("channel_msg_id") or "")
+                if mid and mid not in unacked and discord_last_id and mid.isdigit() \
+                        and str(discord_last_id).isdigit() and int(mid) <= int(discord_last_id):
+                    _ev_set([eid], "committed", "boot reconcile: discord_inbox.json already acked it")
+                    n_cm += 1
+                continue
+            if src in ("orb", "relay"):
+                _ev_set([eid], "cancelled", "boot: orb requests are not replayed by the host "
+                                            "(own pending store + Stop hook)")
+                n_cx += 1
+                continue
+            if src in EV_LIVE_SOURCES:
+                if r.get("reply_ref"):
+                    _ev_set([eid], "committed", "boot: already answered aloud (" + str(r["reply_ref"])
+                            + ") - not re-offered")
+                    n_cm += 1
+                    continue
+                if age >= EV_LIVE_REOFFER_S:
+                    _ev_set([eid], "cancelled", "boot: stale " + src + " (" + _ev_age_words(age)
+                            + " old, limit " + str(int(EV_LIVE_REOFFER_S)) + " s) - never replayed as live")
+                    n_cx += 1
+                    continue
+                lead = ("[said " + _ev_age_words(age) + " ago, BEFORE my restart - not live; the "
+                        "conversation may have moved on] ")
+            elif src == "letter":
+                if age >= EV_LETTER_REOFFER_S:
+                    _ev_set([eid], "cancelled", "boot: letter older than the re-offer window")
+                    n_cx += 1
+                    continue
+                lead = "[arrived " + _ev_age_words(age) + " ago, unhandled before my restart] "
+                if r.get("reply_ref"):
+                    lead = ("[I already answered this before the restart: " + str(r["reply_ref"])
+                            + " - do NOT answer it again blind; only follow up if that reply promised more] ")
+            else:
+                continue
+            text = r.get("text") or ""
+            if src == "vr" and "\n" in text:
+                head, body = text.split("\n", 1)     # keep the VR header first (coalesce splits on it)
+                text = head + "\n" + lead + body
+            else:
+                text = lead + text
+            item = (src, text, r.get("channel_msg_id"), sender) if sender is not None or src in ("vr", "letter") \
+                else (src, text, r.get("channel_msg_id"))
+            await _enqueue(queue, item, ts=float(r.get("received_ts") or now), event_id=eid)
+            n_re += 1
+        if n_re or n_cx or n_cm:
+            print("[host] event store boot replay: re-offered " + str(n_re) + ", cancelled " + str(n_cx)
+                  + ", committed " + str(n_cm) + " (pre-restart rows).", flush=True)
+            _blog("host", "event store boot replay", {"reoffered": n_re, "cancelled": n_cx, "committed": n_cm})
+    except Exception as e:  # noqa: BLE001
+        _ev_err("boot replay", e)
+
+
+# Step 1.5: the SDK stream heartbeat the health snapshot reads (state/host_stream.json).
+HOST_STREAM_PATH = os.path.join(REPO_ROOT, "state", "host_stream.json")
+HOST_STREAM_MIN_GAP_S = 2.0
+
+
+def _host_stream_beat(turn, force=False):
+    if not _ev_on():
+        return
+    try:
+        now = time.time()
+        if not force and now - float(_STREAM.get("hb_ts") or 0.0) < HOST_STREAM_MIN_GAP_S:
+            return
+        _STREAM["hb_ts"] = now
+        rec = {"ts": round(now, 3), "pid": os.getpid(), "turn_active": bool(getattr(turn, "active", False)),
+               "turn_started_ts": _STREAM.get("turn_started_ts"), "last_msg_ts": _STREAM.get("last_msg_ts")}
+        tmp = HOST_STREAM_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rec, f)
+        os.replace(tmp, HOST_STREAM_PATH)
+    except Exception as e:  # noqa: BLE001
+        if not _STREAM.get("hb_err_logged"):
+            _STREAM["hb_err_logged"] = True
+            print("\n[host] host_stream.json heartbeat write failed (non-fatal): " + repr(e), file=sys.stderr)
+
+
+# Step 1.3 file leases for helpers - LOG-ONLY for now (Zeke's open question: strict vs log-only).
+_EV_WRITE_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+
+
+async def _lease_pre_tool_hook(input_data, tool_use_id, context):
+    """PreToolUse for Edit/Write in SUB-AGENT sessions: check the advisory file leases and LOG a
+    conflict. NEVER denies, never raises (returns {} on every path)."""
+    try:
+        d = input_data or {}
+        aid = d.get("agent_id")
+        if not aid or str(d.get("tool_name") or "") not in _EV_WRITE_TOOLS or not _ev_on():
+            return {}
+        ti = d.get("tool_input") or {}
+        path = str(ti.get("file_path") or ti.get("notebook_path") or "")
+        if not path:
+            return {}
+        store = _ev_store()
+        task_id = None
+        for t in (store.open_tasks() or []):
+            if str(t.get("owner") or "") in (str(aid), "agent:" + str(aid)):
+                task_id = t.get("task_id")
+                break
+        if task_id:
+            res = store.check_write(task_id, path) or {}
+            if not res.get("allowed", True) and not res.get("degraded"):
+                print("\n[host] LEASE (log-only): helper " + str(aid) + " task " + str(task_id) + " writes "
+                      + path + " - " + str(res.get("reason")), flush=True)
+                _blog("lease", "write conflict (log-only)", _tr({"agent_id": aid, "task_id": task_id, "path": path,
+                                                                  "reason": res.get("reason"),
+                                                                  "held_by": res.get("held_by")}))
+        else:
+            holders = sorted({str(l.get("task_id")) for l in (store.lease_holders(path) or [])})
+            if holders:
+                print("\n[host] LEASE (log-only): helper " + str(aid) + " (no task) writes " + path
+                      + " - leased by " + ",".join(holders), flush=True)
+                _blog("lease", "write conflict (log-only)", _tr({"agent_id": aid, "task_id": None, "path": path,
+                                                                  "reason": "leased by another task",
+                                                                  "held_by": holders}))
+    except Exception as e:  # noqa: BLE001
+        _ev_err("lease check", e)
+    return {}
 
 
 def _is_speak_tool(block):
@@ -1294,6 +1773,9 @@ def _vr_coalesce(queue, entry):
                 _spk |= set(str(_e[2][3]).split(",")) if len(_e[2]) > 3 and _e[2][3] else set()
             entry = (entry[0], entry[1], ("vr", _merged, _last[2][2], ",".join(sorted(_spk))),
                      *entry[3:])
+            if _EV_IDS:   # V3: the folded batches' event rows ride the surviving entry
+                for _e in _vr_more:
+                    _EV_IDS.setdefault(entry[1], []).extend(_EV_IDS.pop(_e[1], []))
             print("[host] VR coalesce: folded " + str(len(_vr_more)) + " waiting VR batch(es) into one turn", flush=True)
     return entry
 
@@ -1372,8 +1854,11 @@ def _inbox_drain():
         item = e[2]
         source, text, msg_id = item[0], item[1], item[2]
         sender = item[3] if len(item) > 3 else None
+        _eids = _ev_take(e)
         if source == "orb" and not _orb_claim(msg_id):
+            _ev_set(_eids, "cancelled", "orb: answered / claimed by the Stop hook")
             continue   # the Stop hook answered / is delivering it (same fire-time claim as the main loop)
+        _ev_handover(_eids, source, msg_id, sender)
         age = (time.time() - e[3]) if len(e) > 3 and e[3] else None
         out.append((source, text, msg_id, sender, age))
     return out
@@ -1384,6 +1869,7 @@ async def _inbox_post_tool_hook(input_data, tool_use_id, context):
     must not break a tool call)."""
     try:
         _INBOX["last_tool_ts"] = time.time()
+        _ev_mark_reply(input_data)   # V3 (flag on only): a reply that went out is recorded, even from a helper
         # 10-30 bug: SDK hooks ALSO fire for sub-agent tool calls (Workflow/Agent helpers), so
         # Zeke's DMs were drained into a helper's context and never reached me. agent_id is
         # present only inside a sub-agent - leave the inbox for the main thread.
@@ -1411,7 +1897,7 @@ async def _inbox_post_tool_hook(input_data, tool_use_id, context):
                 except Exception:
                     pass
             lines.append(_inbox_line(source, text, msg_id, sender, age))
-        _blog("inbox", "checkpoint delivered", {"n": len(items), "sources": [i[0] for i in items]})
+        _blog("inbox", "checkpoint delivered", _tr({"n": len(items), "sources": [i[0] for i in items]}))
         body = "\n\n".join(lines)
         if len(body) > INBOX_MAX_CHARS:
             body = body[:INBOX_MAX_CHARS] + "\n[... truncated]"
@@ -1520,7 +2006,7 @@ async def _guest_pre_tool_hook(input_data, tool_use_id, context):
             if name in RELAY_ALLOWED_TOOLS:
                 return {}
             print("\n[host] RELAY GUARD: denied " + name + " in a non-owner DM turn", flush=True)
-            _blog("guard", "relay turn tool denied", {"tool": name})
+            _blog("guard", "relay turn tool denied", _tr({"tool": name}))
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                     "permissionDecisionReason": "This turn is a DM from someone who isn't Zeke: I can reply to "
                     "them, nothing else. Anything needing real action becomes a note for Zeke."}}
@@ -1529,7 +2015,7 @@ async def _guest_pre_tool_hook(input_data, tool_use_id, context):
                     name == "mcp__iris__iris_tool_call" and str(ti.get("name") or "") == "voice_speak"):
                 return {}
             print("\n[host] VOICE GUARD: denied " + name + " in an unverified-speaker voice turn", flush=True)
-            _blog("guard", "unverified voice turn tool denied", {"tool": name, "sub": str(ti.get("name") or "")[:40]})
+            _blog("guard", "unverified voice turn tool denied", _tr({"tool": name, "sub": str(ti.get("name") or "")[:40]}))
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                     "permissionDecisionReason": "Unverified-speaker voice turn: the voiceprint didn't confirm Zeke, "
                     "so I can talk (my reply is spoken) and nothing else. Anything needing real action becomes "
@@ -1548,7 +2034,7 @@ async def _guest_pre_tool_hook(input_data, tool_use_id, context):
             # not for guests: stopping/starting my body, kicking players, stage/test actions, destroying builds
             if act not in ("join", "leave", "kick", "action") and not (act == "build" and op in ("delete", "clear_strokes", "unstroke")):
                 return {}
-        _blog("guard", "guest turn tool denied", {"tool": name, "sub": str(ti.get("name") or "")[:40]})
+        _blog("guard", "guest turn tool denied", _tr({"tool": name, "sub": str(ti.get("name") or "")[:40]}))
         print("\n[host] GUEST GUARD: denied " + name + " in a VR guest turn", flush=True)
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                 "permissionDecisionReason": "VR guest turn: only my temple body (vr_temple) is available while "
@@ -1563,8 +2049,12 @@ async def _guest_pre_tool_hook(input_data, tool_use_id, context):
 def _inbox_hooks():
     try:
         from claude_agent_sdk import HookMatcher  # type: ignore
-        return {"PostToolUse": [HookMatcher(matcher=None, hooks=[_inbox_post_tool_hook])],
-                "PreToolUse": [HookMatcher(matcher=None, hooks=[_guest_pre_tool_hook])]}
+        hooks = {"PostToolUse": [HookMatcher(matcher=None, hooks=[_inbox_post_tool_hook])],
+                 "PreToolUse": [HookMatcher(matcher=None, hooks=[_guest_pre_tool_hook])]}
+        if _ev_on():   # V3 step 1.3 file leases for helpers: LOG-ONLY, never denies
+            hooks["PreToolUse"].append(HookMatcher(matcher="|".join(_EV_WRITE_TOOLS),
+                                                   hooks=[_lease_pre_tool_hook]))
+        return hooks
     except Exception as e:  # noqa: BLE001
         print("[host] note: SDK hooks unavailable (" + repr(e) + "); no mid-turn inbox.", file=sys.stderr)
         return None
@@ -1594,7 +2084,7 @@ async def lookup_watcher():
             if (time.time() - max(first, _INBOX["last_tool_ts"])) >= LOOKUP_INTERRUPT_S:
                 print("\n[host] LOOK-UP: priority phrase waited " + str(int(LOOKUP_INTERRUPT_S))
                       + "s with no tool boundary - interrupting the working turn.", flush=True)
-                _blog("inbox", "look-up interrupt", {"waited_s": LOOKUP_INTERRUPT_S})
+                _blog("inbox", "look-up interrupt", _tr({"waited_s": LOOKUP_INTERRUPT_S}))
                 seen_since.clear()
                 await client.interrupt()
         except Exception as e:  # noqa: BLE001
@@ -1692,12 +2182,12 @@ async def hold_sentinel(turn, loop):
                 continue
             if ev["event"] == "held":
                 _hh.write_held_flag(ev)
-                _blog("cognition", "held", ev)
+                _blog("cognition", "held", _tr(ev))
                 print("\n[host] HELD: " + str(ev.get("reason")), flush=True)
                 msg = _hh.format_held_message(ev)
             else:
                 _hh.clear_held_flag()
-                _blog("cognition", "released", ev)
+                _blog("cognition", "released", _tr(ev))
                 print("\n[host] RELEASED after " + _hh.human_duration(float(ev.get("duration_s") or 0)), flush=True)
                 msg = _hh.format_released_message(ev)
             r = await loop.run_in_executor(None, lambda m=msg: _hh.discord_send(token, DISCORD_CHANNEL_ID, m))
@@ -2454,7 +2944,7 @@ async def _await_turn(turn, client, idle_max_s=None, grace_s=None, poll_s=30.0):
             print("\n[host] TURN WEDGED: no stream message for " + str(int(idle)) + " s - interrupting it.",
                   flush=True)
             try:
-                _blog("host", "turn idle interrupt", {"idle_s": int(idle), "source": getattr(turn, "source", None)})
+                _blog("host", "turn idle interrupt", _tr({"idle_s": int(idle), "source": getattr(turn, "source", None)}))
             except Exception:
                 pass
             interrupted_at = now
@@ -2511,6 +3001,7 @@ async def stream_consumer(client, turn, boundary):
     try:
         async for msg in client.receive_messages():
             _STREAM["last_msg_ts"] = time.time()
+            _host_stream_beat(turn)   # V3 step 1.5 (flag on only; throttled)
             # Only CONTENT messages open a segment. SystemMessages (init/status) and
             # unknown types pass through without touching segment state - otherwise a
             # connect-time SystemMessage would open a phantom segment with no
@@ -2618,7 +3109,7 @@ async def stream_consumer(client, turn, boundary):
                             _r = {"ok": False, "error": repr(_re)}
                         print("\n[host] voice reply routed to Discord (" + _why + "): ok=" + str(_r.get("ok")), flush=True)
                         _blog("voice", "reply routed to discord",
-                              {"why": _why, "ok": _r.get("ok"), "chars": len(full_text), "error": _r.get("error")})
+                              _tr({"why": _why, "ok": _r.get("ok"), "chars": len(full_text), "error": _r.get("error")}))
                     if turn.hold is not None:
                         turn.hold.turn_ended()
                     turn.active = False
@@ -2847,7 +3338,9 @@ async def main():
             if token:
                 _discord_inbox_load()
                 for _u in list(_DISCORD_INBOX["unacked"]):
-                    await _enqueue(queue, ("discord", "[unhandled before my restart] " + str(_u.get("content") or ""), _u["id"]))
+                    # V3 P1-T3e: flag off => "[unhandled before my restart] " exactly as before; flag on and
+                    # the event store saw my reply go out => "[I already answered this before the restart: ...]"
+                    await _enqueue(queue, ("discord", _ev_discord_replay_prefix(_u["id"]) + str(_u.get("content") or ""), _u["id"]))
                 if _DISCORD_INBOX["unacked"]:
                     print("[host] discord inbox: re-queued " + str(len(_DISCORD_INBOX["unacked"]))
                           + " message(s) left unhandled before the restart.", flush=True)
@@ -2863,6 +3356,10 @@ async def main():
                       + str(int(POLL_INTERVAL)) + "s.")
             else:
                 print("[host] discord inbound: OFF - no DISCORD_BOT_TOKEN found.", file=sys.stderr)
+            if _ev_on():   # V3 P1-R1b: voice/VR/letters lost with the in-memory queue (flag on only)
+                await _ev_boot_replay(queue, start_ts,
+                                      [u.get("id") for u in _DISCORD_INBOX["unacked"]] if token else None,
+                                      _DISCORD_INBOX["last_id"] if token else None)
 
             secret = load_sibling_secret()
             if secret:
@@ -2899,6 +3396,7 @@ async def main():
             while True:
                 entry = await queue.get()
                 entry = _vr_coalesce(queue, entry)
+                _turn_eids = _ev_take(entry)   # V3: this entry's event row(s); [] when the flag is off
                 _prio, _seq, item = entry[0], entry[1], entry[2]
                 enq_ts = entry[3] if len(entry) > 3 else None   # 2026-07-13 age stamp
                 source, text, msg_id = item[0], item[1], item[2]
@@ -2933,6 +3431,7 @@ async def main():
                               + str(int(_age)) + "s >= flush_stale_voice_s "
                               + str(int(_flush_s)) + "s): " + repr(text[:100]),
                               flush=True)
+                        _ev_set(_turn_eids, "cancelled", "stale voice flushed (age " + str(int(_age)) + " s)")
                         continue
                     _backlog = queue.qsize()
                     _stale_bits = []
@@ -2977,6 +3476,7 @@ async def main():
                     # Re-check pending-ness at fire time; drop answered ones.
                     # 10-29: claim (lease) instead of check-then-act, so the Stop hook can't ALSO deliver it.
                     if not await loop.run_in_executor(None, _orb_claim, msg_id):
+                        _ev_set(_turn_eids, "cancelled", "orb: answered / claimed by the Stop hook")
                         print("\n[host] orb turn dropped at fire time - "
                               "request " + str(msg_id) + " already "
                               "answered or claimed by the stop hook",
@@ -3093,7 +3593,11 @@ async def main():
                     # (see stream_consumer; this is the off-by-one fix's ordering half).
                     await boundary.wait()
                     _INBOX["turn_ids"] = [msg_id] if source == "discord" else []
+                    _ev_turn_begin(_turn_eids, source, msg_id, sender)   # V3: -> assigned (flag on only)
                     turn.begin(speak_out, source, route_to_discord)
+                    if _ev_on():
+                        _STREAM["turn_started_ts"] = time.time()
+                        _host_stream_beat(turn, force=True)
                     turn.guest = ("relay" if source == "relay" else
                                   "voice" if (source == "voice" and not _voice_trusted(sender)[0]) else
                                   (source == "vr" and _vr_has_guest(sender)))
@@ -3111,6 +3615,10 @@ async def main():
                     turn.active = False
                     if not _consumer_task.done():          # a turn that died did NOT handle its items
                         _discord_ack(_INBOX["turn_ids"])   # durable inbox: handled now, not before
+                    _ev_turn_end(not _consumer_task.done())   # V3: same moment, same condition (flag on only)
+                    if _ev_on():
+                        _STREAM["turn_started_ts"] = None
+                        _host_stream_beat(turn, force=True)
                     _INBOX["turn_ids"] = []
                     if speak_out:
                         # Keep the window open through the playback TAIL (sentences still
