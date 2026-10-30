@@ -1,0 +1,5 @@
+[Unit]
+Description=Demote disposable helpers (torch compile workers) in core units to oom_score_adj 0
+[Service]
+Type=oneshot
+ExecStart=/home/iris/IRIS/scripts/server/oom_demote_helpers.sh
