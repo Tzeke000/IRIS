@@ -393,6 +393,25 @@ class Ears:
                 time.sleep(poll)
 
 
+def _spool_is_safe(path: str) -> bool:
+    """Code review (security, low): the spool sits at a fixed /tmp path, so another
+    local user could create it first and feed me speech. Refuse a spool that isn't
+    a real directory owned by me; tighten its mode to 0700 (the bot runs as me)."""
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+        st = os.lstat(path)
+        import stat as _stat
+        if not _stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            log("REFUSING spool %s: not a directory owned by uid %d" % (path, os.getuid()))
+            return False
+        if st.st_mode & 0o077:
+            os.chmod(path, 0o700)
+        return True
+    except OSError as e:
+        log("REFUSING spool %s: %s" % (path, e))
+        return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--spool", default=DEFAULT_SPOOL)
@@ -406,6 +425,8 @@ def main() -> int:
     ap.add_argument("--once", action="store_true", help="process what's in the spool, then exit (tests)")
     ap.add_argument("--no-live", action="store_true", help="don't publish display partials (live_partial.json)")
     a = ap.parse_args()
+    if not _spool_is_safe(a.spool):
+        return 2
     ears = Ears(a)
     n = ears.run(a.once, a.poll)
     log("done, %d line(s)" % n)
