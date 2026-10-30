@@ -8,7 +8,7 @@ device. This plays them on the tower's current default output.
 Protocol (one TCP connection = one mouth session):
     first line : JSON header  {"sr": 24000, "ch": 1, "fmt": "f32le", "from": "iris-mouth"}
     then       : raw little-endian float32 PCM until the socket closes
-A new connection preempts the old one. A closed socket stops playback at once (barge-in).
+A new connection preempts the old one once its header arrives (a bare probe never does). A closed socket stops playback at once (barge-in).
 
 Security: only addresses in IRIS_AUDIO_SINK_ALLOW (default: localhost + the server VM) may
 connect (default: localhost + `iris_home_host` from config/private.local.json) - otherwise
@@ -37,6 +37,12 @@ BLOCK_BYTES = 4096  # 1024 float32 samples ~ 43 ms at 24 kHz
 
 _current: "socket.socket | None" = None
 _lock = threading.Lock()
+# 2026-10-30 crash fix: held by a session for the WHOLE life of its PortAudio stream. PortAudio is not
+# safe to terminate/re-initialise while another thread still has a stream open - that is exactly what a
+# preempting session did (sd._terminate() under the old session's live stream.write) and pythonw died in
+# ntdll (0xc0000005 / 0xc0000374 heap corruption) twice on 10-30, leaving my voice playing nowhere.
+_stream_lock = threading.Lock()
+HEADER_TIMEOUT_S = 5.0
 
 
 _LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state", "audio_sink.log")
@@ -72,12 +78,30 @@ def _read_header(conn: socket.socket) -> dict:
 def _serve(conn: socket.socket, peer: str) -> None:
     global _current
     stream = None
+    have_stream_lock = False
     try:
+        # A connection only preempts once it has sent a VALID header: a bare TCP probe (health checks
+        # connect every minute) used to close the playing session - cutting me off mid-sentence.
+        conn.settimeout(HEADER_TIMEOUT_S)
         hdr = _read_header(conn)
+        conn.settimeout(None)
         sr, ch = int(hdr.get("sr", 24000)), int(hdr.get("ch", 1))
         if hdr.get("fmt", "f32le") != "f32le":
             raise ValueError(f"unsupported fmt {hdr.get('fmt')!r}")
-        # follow the OS default output (Zeke switches between headset and speakers)
+        with _lock:
+            old, _current = _current, conn
+        if old is not None:
+            log("new session preempts the old one")
+            try:
+                old.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+        # wait for the old session to close ITS stream before touching PortAudio globally
+        if not _stream_lock.acquire(timeout=3.0):
+            raise TimeoutError("previous session still holds the audio stream")
+        have_stream_lock = True
+        # follow the OS default output (Zeke switches between headset and speakers) - safe now: no
+        # other stream exists while we hold _stream_lock
         try:
             sd._terminate(); sd._initialize()
         except Exception:
@@ -87,6 +111,8 @@ def _serve(conn: socket.socket, peer: str) -> None:
         log(f"playing from {peer} ({hdr.get('from', '?')}, {sr} Hz) on '{sd.query_devices(kind='output').get('name')}'")
         pending = b""
         while True:
+            if _current is not conn:      # preempted: stop at once, don't drain what's buffered
+                break
             data = conn.recv(BLOCK_BYTES)
             if not data:
                 break
@@ -104,6 +130,8 @@ def _serve(conn: socket.socket, peer: str) -> None:
                 stream.abort(); stream.close()
             except Exception:
                 pass
+        if have_stream_lock:
+            _stream_lock.release()
         try:
             conn.close()
         except Exception:
@@ -135,14 +163,6 @@ def main() -> int:
             log(f"REFUSED {ip}:{port} (not in IRIS_AUDIO_SINK_ALLOW)")
             conn.close()
             continue
-        with _lock:
-            old, _current = _current, conn
-        if old is not None:
-            log("new session preempts the old one")
-            try:
-                old.close()
-            except Exception:
-                pass
         threading.Thread(target=_serve, args=(conn, f"{ip}:{port}"), daemon=True).start()
 
 
