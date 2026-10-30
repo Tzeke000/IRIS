@@ -73,6 +73,9 @@ LOCAL_MODEL = os.environ.get("IRIS_LOCAL_MODEL", "llama3.2:3b")
 # cold reload room (90s), and hold the model resident 30min between turns so
 # active use never re-pays the load.
 LOCAL_TIMEOUT_S = 90.0
+# Code review 10-29 (Vector med): one turn could block 4 hops x 90 s = 360 s. One overall deadline
+# per turn now; each hop gets only what is left of it (min 10 s). Env-tunable, 0 = old behaviour.
+LOCAL_TURN_DEADLINE_S = float(os.environ.get("IRIS_LB_TURN_DEADLINE_S", "150"))
 LOCAL_KEEP_ALIVE = os.environ.get("IRIS_LB_KEEP_ALIVE", "30m")
 # 2026-07-24 (Zeke): 120 was cutting her off mid-sentence AND leaving no room to
 # emit a tool call after any preamble. 256 is a ceiling — short replies still
@@ -525,13 +528,20 @@ def _ask_local(messages: list[dict], cap_turn: dict | None = None) -> str | None
             _tools_on = False
     convo = [{"role": "system", "content": system}] + convo
 
+    turn_t0 = time.time()
+
+    def _left() -> float:
+        if LOCAL_TURN_DEADLINE_S <= 0:
+            return LOCAL_TIMEOUT_S
+        return LOCAL_TURN_DEADLINE_S - (time.time() - turn_t0)
+
     def _one(msgs: list[dict]) -> str | None:
         r = requests.post(
             f"{OLLAMA}/v1/chat/completions",
             json={"model": LOCAL_MODEL, "messages": msgs,
                   "temperature": 0.6, "max_tokens": LOCAL_MAX_TOKENS,
                   "keep_alive": LOCAL_KEEP_ALIVE},
-            timeout=LOCAL_TIMEOUT_S)
+            timeout=max(10.0, min(LOCAL_TIMEOUT_S, _left())))
         if r.status_code != 200:
             print(f"[vector-brain] local llm http {r.status_code}: "
                   f"{r.text[:120]!r}")
@@ -555,6 +565,10 @@ def _ask_local(messages: list[dict], cap_turn: dict | None = None) -> str | None
         lbt = _lbt()
         out = ""
         for _hop in range(lbt.MAX_TOOL_HOPS + 1):
+            if _hop and _left() < 10.0:
+                print(f"[vector-brain] turn deadline ({LOCAL_TURN_DEADLINE_S:.0f}s) reached "
+                      f"after {_hop} hop(s) - answering with what she has", flush=True)
+                break
             out = _one_timed(convo)
             if out is None:
                 return None

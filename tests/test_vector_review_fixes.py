@@ -407,3 +407,51 @@ def test_body_possess_tool_writes_atomically(tmp_path, monkeypatch):
     vst._body_possess({"hold": True}, {})
     assert json.loads(p.read_text())["hold"] is True
     assert (p.stat().st_mode & 0o777) == 0o640       # replace keeps the file's mode
+
+
+# ------------------------------- MED: little-brain turn has ONE overall deadline (10-30)
+def _fake_lbt():
+    class L:
+        MAX_TOOL_HOPS = 3
+        TOOL_SPEC = ""
+
+        @staticmethod
+        def parse_tool_calls(out):
+            return [("look", {})]          # she always wants another tool
+
+        @staticmethod
+        def dispatch(n, a):
+            return "ok"
+
+        @staticmethod
+        def strip_tool_calls(out):
+            return "partial answer"
+    return L
+
+
+@pytest.mark.parametrize("deadline,expect_calls", [(0.0, 4), (0.3, 1)])
+def test_local_turn_deadline_caps_tool_hops(brain_server, monkeypatch, deadline, expect_calls):
+    import requests
+    timeouts = []
+
+    class Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "[[tool:look]]"}}]}
+
+    def fake_post(url, json=None, timeout=None):
+        timeouts.append(timeout)
+        time.sleep(0.05)
+        return Resp()
+    monkeypatch.setenv("IRIS_LB_TOOLS", "1")
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr(brain_server, "_little_brain_parked", lambda: False)
+    monkeypatch.setattr(brain_server, "_ensure_ollama", lambda: None)
+    monkeypatch.setattr(brain_server, "_lbt", _fake_lbt)
+    monkeypatch.setattr(brain_server, "LOCAL_TURN_DEADLINE_S", deadline)
+    out = brain_server._ask_local([{"role": "user", "content": "where are you?"}])
+    assert len(timeouts) == expect_calls, timeouts
+    assert out == "partial answer"
+    assert all(t <= brain_server.LOCAL_TIMEOUT_S for t in timeouts)
