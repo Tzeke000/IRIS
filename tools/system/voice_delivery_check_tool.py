@@ -58,6 +58,7 @@ def _sink_sessions(lines: int = 200) -> tuple[list[tuple[float, float | None]], 
     pat = re.compile(r"^\[audio_sink (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] (.*)$")
     sessions: list[tuple[float, float | None]] = []
     cur: float | None = None
+    cur_peer = ""
     for line in out.splitlines():
         m = pat.match(line.strip())
         if not m:
@@ -68,7 +69,16 @@ def _sink_sessions(lines: int = 200) -> tuple[list[tuple[float, float | None]], 
             if cur is not None:
                 sessions.append((cur, t))
             cur = t
-        elif " ended" in msg or " error:" in msg or "preempts" in msg:
+            cur_peer = msg.split()[2] if len(msg.split()) > 2 else ""
+        elif msg.startswith("listening on"):          # the sink restarted: whatever was open is gone
+            if cur is not None:
+                sessions.append((cur, t))
+                cur = None
+        elif ((" ended" in msg or " error:" in msg) and cur_peer and ("from " + cur_peer + " ") in msg) \
+                or "preempts" in msg:
+            # 10-30: only the PLAYING session's own end counts. The fish mouth keeps ONE session open across
+            # replies, and health probes ('session from <other peer> error: closed before header') used to
+            # close it here -> false "no sink session open" warnings while Zeke + Bee heard every word.
             if cur is not None:
                 sessions.append((cur, t))
                 cur = None
