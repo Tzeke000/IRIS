@@ -458,9 +458,66 @@ def discord_get_messages(token, after=None, limit=20):
         return json.loads(r.read().decode("utf-8"))
 
 
+# DURABLE DISCORD INBOX (2026-10-29 code review fix-first #4): the cursor lived only in memory and
+# reset to the NEWEST message at boot, so every DM Zeke sent while I was down/restarting was skipped
+# for good, and a _supervised poller restart replayed everything since boot. Now the cursor AND the
+# not-yet-handled messages persist in state/discord_inbox.json; an item is ACKED only when the turn
+# that handled it ENDS (main-loop turn, or the turn a mid-turn checkpoint handed it to). At boot the
+# unacked items are re-queued first, then polling resumes after the saved cursor.
+DISCORD_INBOX_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "discord_inbox.json")
+DISCORD_CATCHUP_MAX_AGE_S = 48 * 3600     # don't resurrect anything older than this after a long outage
+_DISCORD_INBOX = {"last_id": None, "unacked": []}   # unacked: [{"id","content","ts"}]
+
+
+def _discord_inbox_load():
+    try:
+        with open(DISCORD_INBOX_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+        _DISCORD_INBOX["last_id"] = d.get("last_id")
+        _DISCORD_INBOX["unacked"] = [u for u in (d.get("unacked") or []) if isinstance(u, dict) and u.get("id")]
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print("[host] discord inbox unreadable (fail-open, re-baselining): " + repr(e), file=sys.stderr)
+
+
+def _discord_inbox_save():
+    try:
+        tmp = DISCORD_INBOX_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"last_id": _DISCORD_INBOX["last_id"], "unacked": _DISCORD_INBOX["unacked"][-200:]}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, DISCORD_INBOX_PATH)
+    except Exception as e:
+        print("[host] discord inbox save failed (non-fatal): " + repr(e), file=sys.stderr)
+
+
+def _discord_ack(ids):
+    ids = {str(i) for i in ids if i}
+    if not ids:
+        return
+    before = len(_DISCORD_INBOX["unacked"])
+    _DISCORD_INBOX["unacked"] = [u for u in _DISCORD_INBOX["unacked"] if str(u.get("id")) not in ids]
+    if len(_DISCORD_INBOX["unacked"]) != before:
+        _discord_inbox_save()
+
+
+def _discord_msg_age_s(m):
+    try:
+        import datetime as _dt
+        return time.time() - _dt.datetime.fromisoformat(str(m.get("timestamp"))).timestamp()
+    except Exception:
+        return 0.0
+
+
 async def discord_poller(token, queue, loop, baseline_id):
-    """Every POLL_INTERVAL: pull new messages from Zeke, enqueue as (discord, text, id)."""
-    last = baseline_id
+    """Every POLL_INTERVAL: pull new messages from Zeke, enqueue as (discord, text, id).
+    Cursor is the persisted one (survives restarts AND _supervised respawns - no replay)."""
+    if _DISCORD_INBOX["last_id"] is None:
+        _DISCORD_INBOX["last_id"] = baseline_id
+        _discord_inbox_save()
+    last = _DISCORD_INBOX["last_id"]
     while True:
         await asyncio.sleep(POLL_INTERVAL)
         try:
@@ -489,8 +546,15 @@ async def discord_poller(token, queue, loop, baseline_id):
             if author.get("id") != DISCORD_OWNER_ID or author.get("bot"):
                 continue
             content = (m.get("content") or "").strip()
-            if content:
+            if content and _discord_msg_age_s(m) < DISCORD_CATCHUP_MAX_AGE_S:
+                age = _discord_msg_age_s(m)
+                if age >= 120:   # caught up after downtime: say so, it is not a live message
+                    content = "[sent " + str(int(age // 60)) + " min ago, while I was down or restarting] " + content
+                _DISCORD_INBOX["unacked"].append({"id": m["id"], "content": content, "ts": time.time()})
                 await _enqueue(queue, ("discord", content, m["id"]))
+        if msgs:
+            _DISCORD_INBOX["last_id"] = last
+            _discord_inbox_save()
 
 
 # ----------------------------------------------------------------- Post-office inbound (letter-drop poll)
@@ -1132,7 +1196,7 @@ def _vr_coalesce(queue, entry):
 # I choose per item: answer now, say I'll answer after the task, or defer. No work is killed.
 # "Iris, look up for a moment" from Zeke is flagged PRIORITY; if no tool boundary comes within
 # LOOKUP_INTERRUPT_S, the look-up watcher interrupt()s the turn so the queue gets served.
-_INBOX = {"queue": None, "turn": None, "client": None, "last_tool_ts": 0.0}
+_INBOX = {"queue": None, "turn": None, "client": None, "last_tool_ts": 0.0, "turn_ids": []}
 INBOX_SOURCES = ("discord", "orb", "voice", "vr", "letter")
 INBOX_MAX_CHARS = 6000
 LOOKUP_INTERRUPT_S = float(os.environ.get("IRIS_LOOKUP_INTERRUPT_S", "90"))
@@ -1204,6 +1268,8 @@ async def _inbox_post_tool_hook(input_data, tool_use_id, context):
             return {}
         lines = []
         for source, text, msg_id, sender, age in items:
+            if source == "discord":
+                _INBOX["turn_ids"].append(msg_id)   # acked when THIS turn ends
             print("\n[host] INBOX CHECKPOINT -> handing " + source + " item to the working turn: "
                   + repr((text or "")[:80]), flush=True)
             t_mod = _TRANSCRIPT_MODALITY.get(source or "")
@@ -2398,6 +2464,12 @@ async def main():
 
             token = load_bot_token()
             if token:
+                _discord_inbox_load()
+                for _u in list(_DISCORD_INBOX["unacked"]):
+                    await _enqueue(queue, ("discord", "[unhandled before my restart] " + str(_u.get("content") or ""), _u["id"]))
+                if _DISCORD_INBOX["unacked"]:
+                    print("[host] discord inbox: re-queued " + str(len(_DISCORD_INBOX["unacked"]))
+                          + " message(s) left unhandled before the restart.", flush=True)
                 try:
                     latest = await loop.run_in_executor(None, lambda: discord_get_messages(token, limit=1))
                     baseline = latest[0]["id"] if latest else None
@@ -2613,6 +2685,7 @@ async def main():
                     # segment - wait for the stream to reach a segment boundary first
                     # (see stream_consumer; this is the off-by-one fix's ordering half).
                     await boundary.wait()
+                    _INBOX["turn_ids"] = [msg_id] if source == "discord" else []
                     turn.begin(speak_out, source, route_to_discord)
                     turn.emotion, turn.intensity = _turn_emotion() if speak_out else (None, 0.5)
                     # Receipt marker (Zeke 2026-07-08: "i cant tell if youre thinking or
@@ -2626,6 +2699,9 @@ async def main():
                         raise RuntimeError("stream consumer is gone - exiting so the supervisor restarts the host")
                 finally:
                     turn.active = False
+                    if not _consumer_task.done():          # a turn that died did NOT handle its items
+                        _discord_ack(_INBOX["turn_ids"])   # durable inbox: handled now, not before
+                    _INBOX["turn_ids"] = []
                     if speak_out:
                         # Keep the window open through the playback TAIL (sentences still
                         # draining after the turn finished generating) — Zeke can cut in
