@@ -27,8 +27,9 @@ Usage:
       [--style edm|dubstep|deephouse] [--out out.mp4] [--size 1280x720]
       [--fps 30] [--device cuda|cpu] [--no-vocals]
 
-  Server, chunk-parallel (2026-10-09; same args + --workers, default 16):
-    scripts/server/lyric_viz_parallel.sh [--workers 16] <args> --out out.mp4
+  Server, chunk-parallel (2026-10-09; same args + --workers, default 3 since the 10-29 review;
+  each chunk is a capped systemd unit in iris-workers.slice):
+    scripts/server/lyric_viz_parallel.sh [--workers 3] <args> --out out.mp4
   Each chunk SIMULATES state up to its first frame (Renderer.simulate), so the
   stitched video is pixel-identical to a single render (verified max abs diff
   0 at every join). --window renders simulate the same way.

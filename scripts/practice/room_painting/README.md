@@ -5,7 +5,7 @@ It is a painting of how she remembers the room, not a photo. It's hers; nobody g
 
 - `build_room_painting.py` builds the scene and renders it. It runs in Blender 5.2, headless.
 - `render_week.sh` is the launcher. It always goes through `scripts/server/render.sh` (the capped
-  `iris-render.slice`) and the GPU `flock`.
+  `iris-workers-render.slice`, inside the 20 GB `iris-workers.slice`) and the GPU `flock`.
 - `CREDITS.md` lists every outside asset used.
 
 Outputs go to `scratch/practice/room_painting/<YYYY-Www>/`, which is git-ignored. Each week gets a full

@@ -75,8 +75,10 @@ Song sections ("Hit a Bump", 119 s): 0–32.9 calm (intro build) | 32.9–47.1 d
 92.5–99.2 drop | 99.2–102.4 calm | 102.4–117.0 BIG drop | 117–119 outro.
 Good windows: `28:36` (build → first drop entry), `100:106` (into the big drop), `10:13` (calm).
 
-Full render (do it once, at the end): `scripts/server/lyric_viz_parallel.sh --workers 16
+Full render (do it once, at the end): `scripts/server/lyric_viz_parallel.sh [--workers 3]
 <same args as test.sh, --size 1920x1080, no --window> --out state/tzeke_songs/hit_a_bump/hit_a_bump_<scene>.mp4`
+(Workers run as capped systemd units inside the 20 GB `iris-workers.slice`; the default is 3 since the
+10-29 code review - 16 was the likeliest cause of the RAM blow-ups. Raise it only with headroom measured.)
 
 **Review rule (10-10):** thumbnail contact sheets hide small details (Zeke caught eyeless pumpkins
 that two sheet reviews missed). Before calling a scene done, also check full-res CLOSE-UP crops of
