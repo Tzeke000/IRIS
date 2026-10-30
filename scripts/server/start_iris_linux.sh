@@ -81,12 +81,24 @@ log "starting iris_body_host.py (model=$IRIS_MODEL). Host stderr follows in this
 exec 8<&0
 "$PY" "$ROOT/iris_body_host.py" 0<&8 2>>"$LOG" &
 HPID=$!
+# 2026-10-29 code review: `pkill -P` reaches DIRECT children only, so claude's own children (MCP servers,
+# Bash-tool processes) outlived a stop. Snapshot the WHOLE descendant tree first (pid:starttime, so a
+# recycled pid is never killed later), TERM it all, then KILL whatever of that snapshot is still there.
+# Units started via systemd-run (renders, workers) are not descendants and are not touched.
+descendants() { local c; for c in $(pgrep -P "$1" 2>/dev/null); do echo "$c"; descendants "$c"; done; }
+pid_start() { sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
 stop_stack() {
-  log "launcher got a stop signal - stopping host $HPID and its children"
-  pkill -TERM -P "$HPID" 2>/dev/null
+  log "launcher got a stop signal - stopping host $HPID and its whole process tree"
+  local tree="" p
+  for p in $(descendants "$HPID"); do tree="$tree $p:$(pid_start "$p")"; done
+  for p in $tree; do kill -TERM "${p%%:*}" 2>/dev/null; done
   kill -TERM "$HPID" 2>/dev/null
   for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$HPID" 2>/dev/null || break; sleep 1; done
-  pkill -KILL -P "$HPID" 2>/dev/null; kill -KILL "$HPID" 2>/dev/null
+  for p in $(descendants "$HPID"); do tree="$tree $p:$(pid_start "$p")"; done   # late spawns
+  for p in $tree; do
+    [ -n "${p#*:}" ] && [ "$(pid_start "${p%%:*}")" = "${p#*:}" ] && kill -KILL "${p%%:*}" 2>/dev/null
+  done
+  kill -KILL "$HPID" 2>/dev/null
   pkill -u "$(id -u)" -f "$ROOT/iris_runtime.py" 2>/dev/null
 }
 trap 'stop_stack; log "launcher END (stopped)."; exit 143' TERM INT HUP
