@@ -135,6 +135,7 @@ def step(frame, faces: list[dict], capture_ts: float) -> dict[str, Any]:
         if 0.0 < dt < 1.0:
             _state["fps_ema"] = 0.9 * _state["fps_ema"] + 0.1 * (1.0 / dt)
         _state["last_step_ts"] = capture_ts
+        _state["last_step_wall"] = now
         try:
             from brain import yolox_person
             t0 = time.time()
@@ -285,6 +286,19 @@ def target_offset(label: str) -> dict[str, Any] | None:
                 "source": source,
                 "track_id": track["id"] if track else None,
                 "age_s": round(max(0.0, now_ts - (float(face["ts"]) if source == "face" else float(track["ts"]))), 3)}
+
+
+def snapshot() -> dict[str, Any]:
+    """Copies of the live tracks + what's needed to aim at one of them, for the
+    `person:any` picker (brain/person_any, 2026-10-30). Read-only; no stepping.
+    `wall_ts` is time.time() of the last step, so a caller can refuse stale
+    tracks without knowing which clock capture_ts runs on."""
+    with _LOCK:
+        return {"tracks": [dict(t, tlwh=list(t["tlwh"]), vel=list(t["vel"]))
+                           for t in _state["tracks"]],
+                "frame_shape": _state.get("frame_shape"),
+                "fps": float(_state.get("fps_ema") or 30.0),
+                "wall_ts": float(_state.get("last_step_wall") or 0.0)}
 
 
 def track_boxes() -> tuple[list[list[float]], tuple[int, int] | None]:

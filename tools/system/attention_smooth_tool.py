@@ -674,8 +674,12 @@ def _face_fast_offset(g: dict[str, Any], st: dict[str, Any],
             label = t.split(":", 1)[1] if ":" in t else t
         frame_new = res.capture_ts > float(st.get("_ft_frame_ts") or 0.0)
         faces = g.get("_face_results") or []
-        m = next((f for f in faces
-                  if str(f.get("person_id") or "").lower() == label), None)
+        if str(state.get("target") or "") == "person:any":
+            from brain import person_any   # seed on whoever the picker is following
+            m = person_any.current_face()
+        else:
+            m = next((f for f in faces
+                      if str(f.get("person_id") or "").lower() == label), None)
         bb = (m.get("bbox") or m.get("box")) if m else None
         # 2026-09-07: a face box smaller than this is texture (vent grille, screen) - not a target.
         if bb and len(bb) >= 4 and (int(bb[3]) - int(bb[1]) < 28 or int(bb[2]) - int(bb[0]) < 28):
@@ -737,10 +741,17 @@ def _person_track_offset(g: dict[str, Any], st: dict[str, Any],
         person_track.step(res.frame, g.get("_face_results") or [],
                           res.capture_ts)
         label = str(state.get("target_label") or "").lower()
-        if not label:
-            t = str(state.get("target") or "")
-            label = t.split(":", 1)[1] if ":" in t else t
-        off = person_track.target_offset(label)
+        t = str(state.get("target") or "")
+        if t == "person:any":
+            # 2026-10-30 (Zeke: follow ANYONE): brain/person_any picks who — owner >
+            # closest real face > a FACE-corroborated body track — with hysteresis.
+            # None = holding/nobody, which the lost rails below handle (never hunts).
+            from brain import person_any
+            off = person_any.servo_offset(g)
+        else:
+            if not label:
+                label = t.split(":", 1)[1] if ":" in t else t
+            off = person_track.target_offset(label)
         if off is None:
             st["pt_misses"] = int(st.get("pt_misses") or 0) + 1
             return None
@@ -1509,6 +1520,12 @@ def _attention_smooth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
 
     if action == "status":
         out = {k: v for k, v in st.items() if k not in ("thread", "stop")}
+        if str((g.get("_attention_state_obj") or {}).get("target") or "") == "person:any":
+            try:
+                from brain import person_any
+                out["person_any"] = person_any.picker().status()
+            except Exception as e:  # noqa: BLE001
+                out["person_any"] = {"error": repr(e)[:120]}
         out.update({"ok": True, "running": running,
                     "gain_units": float(st.get("gain_units") or _GAIN_UNITS),
                     "kd_units": float(st.get("kd_units") or _KD_UNITS)})
@@ -1657,11 +1674,13 @@ register_tool(
     "attention_smooth",
     "TRUE smooth pursuit (HID jog protocol, ~12Hz visual servo, up to "
     "~21 deg/s continuous) for ANY target — person or object. "
-    "action='start' (+target='zeke'|'object:mug') | 'stop' | 'status' | "
-    "'tune' (gain=, kd=, auto_start='person:zeke'|'off', reset=) — persisted "
+    "action='start' (+target='zeke'|'person:any'|'object:mug') | 'stop' | 'status' | "
+    "'tune' (gain=, kd=, auto_start='person:zeke'|'person:any'|'off', reset=) — persisted "
     "to state/attention/servo_tune.json | 'autostart' (boot re-arm). "
     "Replaces the steppy absolute-move follow for live tracking; object "
-    "targets auto-pin. Rails: zero-vector on lost/stale/error, absolute "
+    "targets auto-pin. target='person:any' (alias 'anyone') follows ANYONE: "
+    "recognised owner > closest real face > a face-corroborated body, with "
+    "hysteresis; holds when lost. Rails: zero-vector on lost/stale/error, absolute "
     "home+resync after 8s lost. NOTE: WinRT bearing readback cannot see jog "
     "motion — est_bearing in status is dead-reckoned.",
     2,

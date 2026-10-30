@@ -18,9 +18,9 @@ What "study" means here, mechanically:
   4. write study.json with what the sensors said (bbox, confidence, the
      InsightFace age/gender GUESS — labelled a guess, never a fact),
   5. hand it back. Cognition looks, describes, and DMs Zeke the crop on
-     Discord (his DM chat_id). Speaking to them is ALLOWED
-     (Zeke 09-02 13:3x: "you can try and speak to a stranger, they might not hear
-     you because you're in headphones") — ask who they are; never announce he's out.
+     Discord (his DM chat_id). ★ SILENT (Zeke 10-30, SUPERSEDES the 09-02 "you may
+     speak to a stranger"): "some people ... are like higher important people ...
+     no need to say hi" — track, photograph, record, DM him; never voice_speak to them.
   6. PHOTOGRAPHIC MEMORY (Zeke 09-02: "learn photographic memory in the ways you
      can"): every studied face is embedded (ArcFace, via the live InsightFace
      engine) into faces/_seen/<seen_id>/ and matched against every stranger seen
@@ -417,10 +417,9 @@ def _study_start(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     out["next"] = ("Read ONLY sheet.jpg (pre-shrunk, safe). Say what you can about "
                    "who/what you see — and check frame CONTEXT: a face on a SCREEN "
                    "reads as a visitor. Then DM Zeke on Discord with crop.jpg "
-                   f"(chat_id {DISCORD_CHAT_ID}). You MAY speak to them (Zeke 09-02) - "
-                   "but my voice lands in his HEADPHONES so they may not hear; ask who "
-                   "they are / what they need, never announce that he is out. Then "
-                   "study_face action=note seen_id=... text='what I saw' and action=release.")
+                   f"(chat_id {DISCORD_CHAT_ID}). Do NOT speak to them (Zeke 10-30: "
+                   "important visitors may come in - silent observation only, no hello). "
+                   "Then study_face action=note seen_id=... text='what I saw' and action=release.")
     return out
 
 
@@ -531,7 +530,7 @@ register_tool(
     "phone is off the wifi). action='start' puts the head on them, burst-captures "
     "frames to faces/_drafts/study_<ts>/, cuts crop.jpg and a SMALL sheet.jpg "
     "(safe to Read), writes study.json; then cognition looks + DMs Zeke the crop "
-    "(may speak: voice is in his headphones; never say he's out). Every studied "
+    "(SILENT - never speak to them, Zeke 10-30). Every studied "
     "face is embedded into faces/_seen/ and matched against strangers seen before "
     "(seen_before in the result). 'note' (seen_id=, text=) stores my words about "
     "them; 'gallery' lists strangers I've seen; 'release' returns the head to its "

@@ -1936,9 +1936,9 @@ _STUDY_RULE = (" STANDING RULE (Zeke 2026-09-02): an unrecognised face while he 
                " sheet.jpg that is SAFE to Read), look at sheet.jpg, say what you can about"
                " who/what you see (check frame context - a face on a screen reads as a"
                " visitor), then DM Zeke the crop.jpg on Discord (chat_id " + DISCORD_CHANNEL_ID + ")."
-               " You MAY speak to them (Zeke 09-02: 'you can try and speak to a stranger') - but"
-               " my voice lands in HIS HEADPHONES, so they may not hear; ask who they are and what"
-               " they need, and do NOT announce that Zeke is out. Finish with study_face action=release.")
+               " SILENT: do NOT speak to them (Zeke 10-30, supersedes 09-02 - important visitors"
+               " may come in; track, photograph, record, DM him - no hello). Finish with study_face"
+               " action=release.")
 
 
 def _describe_perception(sig):
@@ -1977,9 +1977,23 @@ def _describe_perception(sig):
         base = ("My eyes auto-captured " + str(data.get("frames") or "?")
                 + " photos of " + str(data.get("unknown_count") or "an") + " unknown person(s)"
                 + " in frame alongside " + known + " - saved to " + str(data.get("dir") or "faces/_drafts/") + ".")
+        if str(data.get("rule") or "") == "stranger-frontal":
+            # brain/unknown_capture STRANGER rule (2026-10-30): a face looked straight at
+            # the camera and stayed unrecognised; study_face ALREADY ran and the DM went.
+            dm = data.get("dm") or {}
+            return ("STRANGER (frontal, still unrecognised): a face looked straight at my camera"
+                    " and I don't know it. study_face ALREADY ran (" + str(data.get("draft_id") or "?")
+                    + ", seen_id " + str(data.get("seen_id") or "?")
+                    + (", seen before" if data.get("seen_before") else ", first sighting")
+                    + ") - do NOT re-run it. Text DM to Zeke "
+                    + ("SENT" if dm.get("sent") else "NOT sent (" + str(dm.get("reason") or dm.get("result")) + ")")
+                    + ". Read ONLY the small sheet " + str(data.get("sheet") or "(none)")
+                    + " (check context: a face on a screen reads as a visitor), then send Zeke the crop "
+                    + str(data.get("crop") or "(none)") + " on Discord (chat_id " + DISCORD_CHANNEL_ID + ")."
+                    " SILENT: do NOT speak to them (Zeke 10-30 - important visitors may come in).")
         if str(data.get("rule") or "") == "unknown-while-zeke-away":
             return base + " Zeke's phone is OFF the wifi." + _STUDY_RULE
-        return base + " Suggestion: consider staging a draft profile and asking Zeke (or them) who they are."
+        return base + " Suggestion: consider staging a draft profile and asking Zeke who they are (do not speak to them - Zeke 10-30)."
     if stype == "new_person_detected":
         # brain/face_tracking promoted a face that stayed unknown for the full
         # persistence window. Deliberately phrased as an OBSERVATION, not an
@@ -2204,18 +2218,23 @@ async def perception_reader(queue, loop, start_ts):
                 # ARBITER (Iris_fixes #6): unknown_capture is a FOLLOW-UP about photos on
                 # disk. If the face_appeared|unknown wake already reached me seconds ago,
                 # this is the same stranger, not a second one - ledger it, don't wake twice.
-                try:
-                    from brain import attention_arbiter as _arb
-                    _ddet = str((sig.get("data") or {}).get("dir") or "")[:120]
-                    _d = await loop.run_in_executor(   # 10-29: ledger file I/O off the event loop
-                        None, lambda: _arb.decide("unknown_person", "unknown_capture", detail=_ddet))
-                    if not _d.get("wake", True):
-                        _blog("eyes", desc, {"ts": ts, "wake": False,
-                                             "suppressed": "arbiter: " + str(_d.get("reason") or ""),
-                                             "unknown_capture": sig.get("data")})
-                        continue
-                except Exception:
-                    pass
+                # A 'stranger-frontal' event is NOT a duplicate of the face_appeared|unknown
+                # wake: it is the stronger, later claim (frontal + still unknown, already
+                # studied + DM'd) and is rate-limited per stranger at the source.
+                _stranger = str((sig.get("data") or {}).get("rule") or "") == "stranger-frontal"
+                if not _stranger:
+                    try:
+                        from brain import attention_arbiter as _arb
+                        _ddet = str((sig.get("data") or {}).get("dir") or "")[:120]
+                        _d = await loop.run_in_executor(   # 10-29: ledger file I/O off the event loop
+                            None, lambda: _arb.decide("unknown_person", "unknown_capture", detail=_ddet))
+                        if not _d.get("wake", True):
+                            _blog("eyes", desc, {"ts": ts, "wake": False,
+                                                 "suppressed": "arbiter: " + str(_d.get("reason") or ""),
+                                                 "unknown_capture": sig.get("data")})
+                            continue
+                    except Exception:
+                        pass
                 _blog("eyes", desc, {"ts": ts, "wake": True, "unknown_capture": sig.get("data")})
                 await _enqueue(queue, ("perception", desc, ts))
                 continue

@@ -633,6 +633,10 @@ def available() -> bool:
         return False
 
 
+_ANY_ALIASES = frozenset({"any", "anyone", "anybody", "person:any", "person:anyone",
+                          "person:anybody", "face:any"})
+
+
 def canonical_target(spec: str) -> tuple[str, str]:
     """Normalise a target spec into (canonical_id, label).
 
@@ -646,6 +650,11 @@ def canonical_target(spec: str) -> tuple[str, str]:
     low = spec.lower()
     if low in ("home", "centre", "center"):
         return ("home", "home")
+    # person:any (2026-10-30, Zeke: follow ANYONE in the room, not only people I
+    # recognise) — brain/person_any picks who each tick: owner > closest real face >
+    # a face-corroborated body. One canonical id for every spelling.
+    if low in _ANY_ALIASES:
+        return ("person:any", "anyone")
     if ":" in spec:
         kind, _, rest = spec.partition(":")
         kind = kind.strip().lower()
@@ -1028,7 +1037,17 @@ def observe(g: dict[str, Any], *, frame_shape: tuple[int, int] | None = None) ->
         need_miss = int(_tune("attention_lose_frames", 8))
 
         faces = _faces_from_g(g)
-        face = _match_face(faces, tid)
+        if tid == "person:any":
+            # Resolved by the picker, which already does its own face-corroborated
+            # body coasting — so the single-identity body bridge below is skipped.
+            try:
+                from brain import person_any
+                face = person_any.match_face(g, faces)
+            except Exception as e:  # noqa: BLE001 — a miss, never a crash
+                _log(f"person_any unavailable: {e!r}")
+                face = None
+        else:
+            face = _match_face(faces, tid)
         # Object targets resolve through OWL-ViT instead of the face pipeline.
         # Before 2026-08-08 there was no resolver for them at all, so
         # `attention_look 'object:mug'` could only ever reach `lost`.
@@ -1043,7 +1062,7 @@ def observe(g: dict[str, Any], *, frame_shape: tuple[int, int] | None = None) ->
         # brain/yolox_person.bridge(), which refuses without a recent face
         # match and refuses when two people are in frame. Person-shaped is not
         # somebody, and somebody is not Zeke.
-        elif face is None and not tid.startswith("object:"):
+        elif face is None and not tid.startswith("object:") and tid != "person:any":
             try:
                 from brain import frame_store, yolox_person
                 res = frame_store.get_buffered_frame(max_age_sec=2.0)

@@ -93,6 +93,47 @@ AWAY_COOLDOWN_S = float(os.environ.get("IRIS_UNKNOWN_CAPTURE_AWAY_COOLDOWN", "18
 AWAY_HOLD_S = float(os.environ.get("IRIS_UNKNOWN_CAPTURE_AWAY_HOLD_S", "10"))
 
 
+# ── STRANGER RULE (Zeke, 2026-10-30) ──────────────────────
+# A face looking STRAIGHT at the camera that is STILL unrecognised is a genuine
+# stranger ("'unrecognised' at an angle = can't see the face from here" — that's why
+# the gate is frontal-only; brain/person_any.StrangerGate holds the thresholds). On a
+# trigger: study_face (photos + crop + photographic memory), ONE Discord DM to Zeke per
+# stranger (seen_id) per ALERT_COOLDOWN_S, and an `unknown_capture` signal with
+# rule='stranger-frontal' so cognition can send him the crop. SILENT: "no need to say
+# hi" (Zeke 10-30) — nothing on this path may speak.
+STRANGER_ENABLED = os.environ.get("IRIS_STRANGER_GATE", "1").strip().lower() not in (
+    "0", "off", "false", "no", "")
+STRANGER_DM = os.environ.get("IRIS_STRANGER_DM", "1").strip().lower() not in (
+    "0", "off", "false", "no", "")
+
+
+def _tool(g: dict[str, Any], name: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Any registered tool through the registry (no import cycle)."""
+    try:
+        from tools.tool_registry import _REGISTRY
+        td = _REGISTRY.get(name)
+        if td is None:
+            return {"ok": False, "error": f"{name} not registered"}
+        return td.handler(params, g)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": repr(e)[:160]}
+
+
+def dm_zeke(text: str) -> dict[str, Any]:
+    """Zeke's Discord DM through the runtime's existing REST path (brain.host_hold.
+    discord_send + the channel bot token resilience_supervisor uses). Never raises."""
+    try:
+        from brain.host_hold import discord_send
+        from brain.private_config import get as _priv
+        from brain.resilience_supervisor import _token
+        chat = _priv("zeke_dm_chat_id")
+        if not chat:
+            return {"ok": False, "error": "no zeke_dm_chat_id in private config"}
+        return discord_send(_token(), chat, text)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": repr(e)[:160]}
+
+
 def zeke_presence() -> dict[str, Any]:
     """Read the wifi watcher's verdict. Returns {away: True|False|None, present,
     age_s, since, ip, reason}. away is None when the watcher file is stale
@@ -151,8 +192,12 @@ class UnknownCaptureWatcher:
 
     def status(self) -> dict[str, Any]:
         now = time.time()
+        sg = self.__dict__.get("_stranger_gate")
         return {
             "enabled": ENABLED,
+            "stranger_gate": ({"enabled": STRANGER_ENABLED, "dm": STRANGER_DM,
+                               **sg.status()} if sg is not None
+                              else {"enabled": STRANGER_ENABLED, "dm": STRANGER_DM}),
             "alive": bool(self._thread is not None and self._thread.is_alive()),
             "condition_held_s": round(now - self._cond_since, 1) if self._cond_since else 0.0,
             "cooldown_remaining_s": max(0.0, round(self._cooldown_until - now, 1)),
@@ -199,6 +244,10 @@ class UnknownCaptureWatcher:
         # 1) In-flight capture: wait for the video loop to finish saving.
         if self._active is not None:
             self._poll_active(now)
+            return
+
+        # 1b) Stranger rule (2026-10-30): frontal + still unknown => study + DM.
+        if STRANGER_ENABLED and self._stranger_tick(now):
             return
 
         knowns, unknowns = self._classify()
@@ -268,6 +317,87 @@ class UnknownCaptureWatcher:
         _log(f"TRIGGER {draft_id}: {trigger_meta['rule']} "
              f"(known={[k['person_id'] for k in trigger_meta['known_present']]}, "
              f"unknowns={len(unknowns)})")
+
+    def _stranger_tick(self, now: float, *, study_fn=None, dm_fn=None,
+                       sharp_fn=None) -> bool:
+        """Feed the frontal-unknown gate; on a trigger study + alert. True = handled
+        this tick (a study ran). Hooks are injectable for tests."""
+        from brain import person_any
+        g = self._g
+        d = self.__dict__   # attrs set lazily: a watcher built by older code still works
+        gate = d.get("_stranger_gate")
+        if not isinstance(gate, person_any.StrangerGate):
+            gate = d["_stranger_gate"] = person_any.StrangerGate()
+        lim = d.get("_stranger_limiter")
+        if not isinstance(lim, person_any.AlertLimiter):
+            lim = d["_stranger_limiter"] = person_any.AlertLimiter()
+        faces = [f for f in (g.get("_face_results") or []) if isinstance(f, dict)]
+        if sharp_fn is None and any(person_any.is_unnamed(f.get("person_id")) for f in faces):
+            frame = None
+            try:
+                from brain import frame_store
+                frame = frame_store.get_buffered_frame(max_age_sec=1.0).frame
+            except Exception:
+                frame = None
+            sharp_fn = ((lambda bb: person_any.face_sharpness(frame, bb))
+                        if frame is not None else None)
+        ev = gate.observe(faces, now, sharp_fn=sharp_fn)
+        if ev is None:
+            return False
+        if bool((g.get("_study_face") or {}).get("active")):
+            gate.cooldown_until = now + 30.0   # cognition is studying already; retry soon
+            return False
+        # Move the head only if the servo is ALREADY running — a stopped head was stopped
+        # on purpose (Zeke gaming / asleep). study_face hands the head back on release.
+        sm = g.get("_attention_smooth") or {}
+        th = sm.get("thread")
+        track = bool(th is not None and th.is_alive())
+        _log(f"STRANGER trigger: {ev}")
+        study = (study_fn or (lambda p: _tool(g, "study_face", p)))(
+            {"action": "start", "frames": 4, "interval_s": 0.6, "track": track})
+        if track:
+            try:
+                (study_fn or (lambda p: _tool(g, "study_face", p)))({"action": "release"})
+            except Exception:
+                pass
+        if not study.get("ok"):
+            _log(f"stranger study failed: {study.get('error')}")
+            self._last_event = {"rule": "stranger-frontal", "ok": False,
+                                "error": study.get("error"), "trigger": ev}
+            return True
+        seen = study.get("seen") or {}
+        key = str(seen.get("seen_id") or "unidentified")
+        pres = study.get("zeke_presence") or zeke_presence()
+        alerted: dict[str, Any] = {"sent": False, "reason": "rate-limited (same stranger)"}
+        allowed = lim.allow(key, now)
+        if allowed and STRANGER_DM:
+            text = person_any.stranger_dm_text(ev, study, pres)
+            r = (dm_fn or dm_zeke)(text)
+            alerted = {"sent": bool(r.get("ok")), "result": {k: r.get(k) for k in ("ok", "error", "status")}}
+        elif allowed:
+            alerted = {"sent": False, "reason": "IRIS_STRANGER_DM off"}
+        event = {
+            "draft_id": study.get("study_id"), "dir": study.get("dir"),
+            "frames": study.get("frames_saved"),
+            "known": list(study.get("known_present") or []), "unknown_count": 1,
+            "rule": "stranger-frontal", "trigger": ev, "seen_id": key,
+            "seen_before": bool(seen.get("seen_before")),
+            "crop": (study.get("crop") or {}).get("path"),
+            "sheet": (study.get("sheet") or {}).get("path"),
+            "zeke_presence": pres, "dm": alerted,
+            "note": ("a face looked straight at me and is still unrecognised - studied; "
+                     "SILENT (Zeke 10-30: no need to say hi)"),
+        }
+        self._last_event = event
+        if allowed:   # a rate-limited repeat is logged, not re-woken
+            try:
+                bus = g.get("_signal_bus")
+                if bus is not None:
+                    bus.fire("unknown_capture", data=event, priority="high")
+            except Exception as e:
+                _log(f"signal fire error: {e!r}")
+        _log(f"stranger studied {event['draft_id']} seen={key} dm={alerted}")
+        return True
 
     def _poll_active(self, now: float) -> None:
         g = self._g
