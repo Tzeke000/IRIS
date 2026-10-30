@@ -42,7 +42,7 @@ _lock = threading.Lock()
 # preempting session did (sd._terminate() under the old session's live stream.write) and pythonw died in
 # ntdll (0xc0000005 / 0xc0000374 heap corruption) twice on 10-30, leaving my voice playing nowhere.
 _stream_lock = threading.Lock()
-HEADER_TIMEOUT_S = 5.0
+HEADER_TIMEOUT_S = 300.0   # the mouth connects FIRST, then sends the header when audio is ready (a plain-fallback reply can take 30 s+); a probe never preempts, so long is safe
 
 
 _LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state", "audio_sink.log")
