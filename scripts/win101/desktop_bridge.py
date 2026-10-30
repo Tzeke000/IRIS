@@ -8,7 +8,7 @@ POST /move    {"x","y"}  POST /drag {"x","y","x2","y2","button"}
 POST /type    {"text"}   POST /key {"keys":["ctrl","s"]}   POST /scroll {"x","y","amount","mods":["ctrl"]}
   (scroll amount is in Windows wheel units: one notch = 120)
 """
-import io, json, os
+import hmac, io, json, os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 import mss, pyautogui
@@ -20,7 +20,7 @@ TOKEN = open(r"C:\iris_dev\bridge_token.txt").read().strip()
 
 class H(BaseHTTPRequestHandler):
     def _auth(self):
-        if self.headers.get("X-Iris-Token") != TOKEN:
+        if not hmac.compare_digest(str(self.headers.get("X-Iris-Token") or ""), TOKEN):   # 10-29: constant-time
             self.send_response(403); self.end_headers(); return False
         return True
 
@@ -75,4 +75,6 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", 8790), H).serve_forever()
+    # 10-29 code review: full mouse/keyboard control - bind to the address in IRIS_BRIDGE_BIND (e.g. the VM's
+    # tailscale/vmbr IP) when set; 0.0.0.0 stays the default so the server's existing path keeps working.
+    ThreadingHTTPServer((os.environ.get("IRIS_BRIDGE_BIND", "0.0.0.0"), 8790), H).serve_forever()

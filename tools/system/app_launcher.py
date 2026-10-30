@@ -291,8 +291,11 @@ def _tool_open_app(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     # Step 6: shell start as the very last resort. Reached only when the
     # discoverer either isn't loaded or has zero candidates — shell start
     # might still find a Windows-registered app via PATH.
+    # 10-29 code review: app_name went into a shell string - a quote or & in it was command injection.
+    if any(c in str(app_name) for c in '"&|<>^%\r\n`'):
+        return {"ok": False, "error": f"refusing shell start for {app_name!r}: contains shell metacharacters"}
     try:
-        subprocess.Popen(f'start "" "{app_name}"', shell=True)
+        subprocess.Popen(["cmd.exe", "/c", "start", "", str(app_name)])
         return {"ok": True, "launched": app_name, "method": "shell_start", "source": "shell"}
     except Exception as e:
         return {"ok": False, "error": f"Could not launch {app_name!r}: {e}"}
