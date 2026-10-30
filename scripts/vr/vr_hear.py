@@ -281,6 +281,28 @@ class Ears:
             log("merged %d clips from %s (%.1f s)" % (b["n"], who, b["x"].size / 16000.0))
         return self._emit(self.transcribe(meta, b["x"], b["stem"]))
 
+    def activity(self, who: str, t0: float, t1: float, meta: dict, x: np.ndarray) -> None:
+        """10-29 full-duplex: who is TALKING right now, written the moment a clip lands (~0.7 s after a
+        phrase ends) - BEFORE the 1.3 s merge wait + transcription. vr_temple speak reads it between and
+        during sentences to stop when someone talks over me (barge-in). Only audible speech counts."""
+        try:
+            lvl = speech_dbfs(x)
+            eff = lvl + float(meta.get("atten_db", 0.0))
+            if lvl < MIN_SPEECH_DBFS or eff < MIN_EFFECTIVE_DBFS:
+                return
+            p = self.out.parent / "voice_activity.json"
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                d = {}
+            d[who] = {"t_start": t0, "t_end": t1, "seen": time.time(), "dist_m": meta.get("dist_m"),
+                      "facing": bool(meta.get("facing")), "eff_db": round(eff, 1)}
+            tmp = p.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(d), encoding="utf-8")
+            os.replace(tmp, p)
+        except Exception as e:  # noqa: BLE001
+            log("activity write failed: %r" % (e,))
+
     def run(self, once: bool, poll: float) -> int:
         n = 0
         self.buf: dict[str, dict] = {}
@@ -296,6 +318,7 @@ class Ears:
                 who = str(meta.get("speaker", "?"))
                 t0 = float(meta.get("t_start", time.time()))
                 t1 = float(meta.get("t_end", t0 + x.size / 16000.0))
+                self.activity(who, t0, t1, meta, x)
                 b = self.buf.get(who)
                 gap = t0 - b["t_end"] if b else 1e9
                 if b and -0.5 <= gap <= MERGE_GAP_S and (b["x"].size + x.size) / 16000.0 <= MERGE_MAX_S:

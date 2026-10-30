@@ -123,8 +123,21 @@ def _speak(text: str) -> dict[str, Any]:
     first_s = None
     total = 0.0
     nbytes = 0
+    play_end = t0
+    sents = _sentences(text)
     out: dict[str, Any] = {"ok": False}
-    for k, sent in enumerate(_sentences(text)):
+
+    def _stop(by: dict[str, Any], k: int) -> dict[str, Any]:
+        _send({"cmd": "hush"})
+        return {"ok": True, "interrupted": True, "by": by.get("speaker"), "dist_m": by.get("dist_m"),
+                "sentences_sent": k, "of": len(sents), "first_word_s": first_s,
+                "note": "someone talked over me - I stopped (barge-in). Their words arrive as a heard line; "
+                        "answer THAT, don't resume the old line unless they ask."}
+
+    for k, sent in enumerate(sents):
+        b = _barge_since(t0)
+        if b:
+            return _stop(b, k)
         req = urllib.request.Request("http://localhost:8769/synth", data=json.dumps({"text": sent, "rate": 48000}).encode(),
                                      headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=30) as r:
@@ -137,13 +150,48 @@ def _speak(text: str) -> dict[str, Any]:
             return out
         if first_s is None:
             first_s = round(time.time() - t0, 2)
-        total += float(out.get("seconds", 0.0))
+        secs = float(out.get("seconds", 0.0))
+        play_end = max(play_end, time.time()) + secs
+        total += secs
         nbytes += len(wav)
+    # FULL-DUPLEX (10-29): keep listening until my line has finished PLAYING - a barge-in during the
+    # last sentence still stops me. Bounded so a bad duration can't hold the tool call.
+    while time.time() < min(play_end, t0 + 90.0):
+        b = _barge_since(t0)
+        if b:
+            return _stop(b, len(sents))
+        time.sleep(0.2)
     out["seconds"] = round(total, 2)
     out["wav_bytes"] = nbytes
     out["first_word_s"] = first_s
-    out["sentences"] = len(_sentences(text))
+    out["sentences"] = len(sents)
     return out
+
+
+_ACTIVITY = "/home/iris/IRIS/state/vr_temple/voice_activity.json"
+BARGE_MAX_DIST_M = 6.0
+
+
+def _barge_since(t0: float) -> dict[str, Any] | None:
+    """Someone (within BARGE_MAX_DIST_M) started an audible phrase AFTER I began speaking. Written by
+    vr_hear the moment a clip lands. A phrase that began before I spoke is their trailing words, not a barge."""
+    import os
+    try:
+        if not os.path.exists(_ACTIVITY) or os.path.getmtime(_ACTIVITY) < t0 - 2.0:
+            return None
+        with open(_ACTIVITY, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return None
+    for who, a in (d or {}).items():
+        try:
+            if float(a.get("t_start", 0)) >= t0 + 0.3:
+                dist = a.get("dist_m")
+                if dist is None or float(dist) <= BARGE_MAX_DIST_M:
+                    return {"speaker": who, **a}
+        except Exception:
+            continue
+    return None
 
 
 _HEARD = "/home/iris/IRIS/state/vr_temple/heard.jsonl"
