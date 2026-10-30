@@ -67,6 +67,11 @@ if [ "${IRIS_ROLE:-live}" = "staging" ] && [ "${IRIS_STAGING_HOST:-0}" != "1" ];
   log "staging dry run rc=$RC"
   exit "$RC"
 fi
+# 2026-10-29 voice speaker gate (2f0b5e3): voice-id is not yet enabled/enrolled on the server mic,
+# so REQUIRE_MATCH=1 would make every one of the owner's voice turns talk-only. Interim = 0: turns the
+# daemon could not judge (skipped/cold/no fields) keep full tools; an explicit non-owner match or a
+# clear no-match is still talk-only. Flip to 1 once the owner's print is verified on this mic.
+export IRIS_VOICE_REQUIRE_MATCH="${IRIS_VOICE_REQUIRE_MATCH:-0}"
 log "starting iris_body_host.py (model=$IRIS_MODEL). Host stderr follows in this log."
 # 2026-10-07: run the host as a WAITED child, not a plain foreground command - bash defers traps
 # until a foreground child exits, so a stopped launcher (timeout, systemctl stop, tmux kill)
