@@ -34,7 +34,7 @@
 #             if the scene needs an add-on at render time)  BUILD_FLAGS (e.g. --disable-autoexec)
 # Command-line env overrides win over scene.env for: PCT SPP CHUNK WORKERS LOCK FORCE GRAIN CRF MP4 STILLS_DIR
 #   STILL_AT CAM_PROPS PATCH MEM OUT_DIR FG ANIM — and are forwarded into the units with -E (units start in $HOME with a bare env).
-# Every Blender launch runs inside a scripts/server/render.sh unit (iris-render.slice, MemoryMax, OOMScoreAdjust)
+# Every Blender launch runs inside a scripts/server/render.sh unit (iris-workers-render.slice under the shared iris-workers.slice cap, MemoryMax, OOMScoreAdjust)
 # and under `flock $LOCK nice -n 15`.
 set -euo pipefail
 

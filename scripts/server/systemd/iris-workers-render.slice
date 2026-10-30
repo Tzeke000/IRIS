@@ -1,0 +1,9 @@
+# ~/.config/systemd/user/iris-workers-render.slice - Blender renders (scripts/server/render.sh). The dash
+# in the name makes it a CHILD of iris-workers.slice, so renders share that slice's 20G total cap.
+# Replaces the old stand-alone iris-render.slice (2026-10-11: MemoryMax 30G of its own). 2026-10-29.
+[Unit]
+Description=Iris render jobs (Blender) - inside iris-workers.slice, so a runaway render dies alone
+
+[Slice]
+# the parent's caps bound this; per-render MemoryMax is set by render.sh (MEM, default 20G)
+CPUWeight=100

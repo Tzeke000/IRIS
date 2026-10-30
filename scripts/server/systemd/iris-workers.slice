@@ -1,0 +1,17 @@
+# ~/.config/systemd/user/iris-workers.slice - ONE shared cap for everything heavy I start that is not my
+# core: Blender renders (child slice iris-workers-render.slice, via scripts/server/render.sh) and the
+# lyric_viz chunk workers (scripts/server/lyric_viz_parallel.py). 2026-10-29 code review HIGH: each
+# render unit had MemoryMax=20G but nothing capped their SUM - three of them could ask for 60 GB on a
+# 47 GB VM. Now all workers together get at most 20G + 2G swap, and they shrink first (MemoryHigh).
+# Installed by scripts/server/install_supervision.sh. Nothing in the core runs here.
+[Unit]
+Description=Iris workers (renders + chunk workers) - one shared memory cap, never the core
+
+[Slice]
+MemoryHigh=16G
+MemoryMax=20G
+MemorySwapMax=2G
+TasksMax=4096
+# Zeke 10-11: I always get priority - workers get a small share of CPU/IO when we compete.
+CPUWeight=20
+IOWeight=20

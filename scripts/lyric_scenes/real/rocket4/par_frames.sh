@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Parallel, resumable frame render for rocket v4: W workers, each in its OWN capped systemd unit (the server's
-# render rule: scripts/server/render.sh = iris-render.slice, MemoryMax, OOMScoreAdjust), chunks interleaved
+# render rule: scripts/server/render.sh = iris-workers-render.slice under the shared iris-workers.slice cap, MemoryMax, OOMScoreAdjust), chunks interleaved
 # (worker w takes chunks w, w+W, w+2W, ...), each worker under its own GPU lock (as v3's 4-worker run did).
 #
 #   par_frames.sh START END [WORKERS=3] [PCT=100] [TAG=r4]       → launches the units and returns

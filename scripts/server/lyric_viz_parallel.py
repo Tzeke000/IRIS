@@ -26,12 +26,24 @@ silently produce a short video.
 
 Workers run at nice 15 (and ionice idle) with OpenCV capped at a few threads
 each, so the live voice + vision on this box stay responsive.
+
+2026-10-29 (code review HIGH, "likeliest cause of the RAM blow-up"): every
+process this driver starts (prep, assembler, each chunk) runs as its OWN
+transient user unit in iris-workers.slice (the shared worker cap: MemoryMax 20G
+for ALL workers together, swap 2G) with a per-unit MemoryMax, RuntimeMaxSec,
+OOMScoreAdjust=500 and KillMode=control-group, via `systemd-run --wait --pipe`.
+Default workers 16 -> 3. If the driver is killed outright, the units it started
+still end at RuntimeMaxSec; stop them by hand with
+`systemctl --user stop 'lvp-*'`. --no-units (or no user systemd) = the old
+plain-Popen path, with a warning.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import atexit
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -42,6 +54,12 @@ REPO = Path(__file__).resolve().parent.parent.parent
 RUNNER = REPO / "scripts" / "server" / "lyric_viz.sh"
 
 # flags the driver owns; passing them through would break the tiling
+WORKER_SLICE = "iris-workers.slice"
+# env the units need (a transient user unit does NOT inherit the caller's environment)
+_PASS_ENV = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS", "PYTHONUNBUFFERED", "PYTHONIOENCODING",
+             "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES")
+
 _OWNED = ("--frame-range", "--lossless", "--assemble", "--prep-only",
           "--threads", "--tiktok")
 
@@ -83,6 +101,47 @@ def _nice_prefix(level: int) -> list[str]:
     return pre
 
 
+def user_systemd_ok() -> bool:
+    """True when `systemd-run --user` can start units here (the server). Fail-open: no -> old path."""
+    if shutil.which("systemd-run") is None or shutil.which("systemctl") is None:
+        return False
+    try:
+        r = subprocess.run(["systemctl", "--user", "is-system-running"],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        return False
+    return r.stdout.strip() in ("running", "degraded")
+
+
+def unit_argv(unit: str, argv: list[str], env: dict, *, mem_max: str,
+              max_sec: int, nice: int) -> list[str]:
+    """argv wrapped in a capped, waited transient user unit in iris-workers.slice.
+
+    --wait makes systemd-run exit with the unit's own result, --pipe hands it
+    our stdout/stderr (the chunk log file), so callers poll it like a child."""
+    pre = ["systemd-run", "--user", "--quiet", "--collect", "--wait", "--pipe",
+           f"--unit={unit}", f"--slice={WORKER_SLICE}",
+           f"--working-directory={REPO}",
+           "-p", f"MemoryMax={mem_max}", "-p", f"RuntimeMaxSec={int(max_sec)}",
+           "-p", "OOMScoreAdjust=500", "-p", "KillMode=control-group",
+           "-p", f"Nice={int(nice)}", "-p", "IOSchedulingClass=idle"]
+    for k in _PASS_ENV:
+        if k in env:
+            pre += ["-E", f"{k}={env[k]}"]
+    return pre + list(argv)
+
+
+def stop_unit(unit: str | None) -> None:
+    """Killing the waiting systemd-run does NOT stop its unit (measured 10-29) - stop it."""
+    if not unit:
+        return
+    try:
+        subprocess.run(["systemctl", "--user", "stop", unit],
+                       capture_output=True, timeout=40)
+    except Exception:
+        pass
+
+
 def _tail(path: Path, n: int = 25) -> str:
     try:
         return "\n".join(path.read_text(errors="replace").splitlines()[-n:])
@@ -96,7 +155,10 @@ def main() -> int:
         usage="lyric_viz_parallel.sh [--workers N] [--chunks M] "
               "[--cv-threads K] [--nice L] [--keep-chunks] [--work-dir DIR] "
               "<lyric_viz args> --out OUT.mp4")
-    ap.add_argument("--workers", type=int, default=16)
+    ap.add_argument("--workers", type=int, default=3,
+                    help="parallel chunk renderers (default 3; was 16 before "
+                         "the 10-29 review - all share iris-workers.slice's "
+                         "20G cap)")
     ap.add_argument("--chunks", type=int, default=0,
                     help="number of frame ranges (default 3 x workers: "
                          "smaller pieces balance the heavy drop sections and "
@@ -108,6 +170,16 @@ def main() -> int:
                     help="workers' niceness (default 15). The encoder runs 5 "
                          "steps less nice (but never below 10) so it keeps "
                          "pace with 16 renderers instead of being starved")
+    ap.add_argument("--mem-max", default="6G",
+                    help="MemoryMax per worker unit (default 6G; the slice "
+                         "caps all of them together at 20G)")
+    ap.add_argument("--chunk-max-sec", type=int, default=3600,
+                    help="RuntimeMaxSec per prep/chunk unit (default 3600)")
+    ap.add_argument("--asm-max-sec", type=int, default=6 * 3600,
+                    help="RuntimeMaxSec for the streaming assembler unit "
+                         "(it lives as long as the whole render; default 6h)")
+    ap.add_argument("--no-units", action="store_true",
+                    help="old path: plain child processes, no systemd caps")
     ap.add_argument("--keep-chunks", action="store_true")
     ap.add_argument("--work-dir", type=Path, default=None)
     me, rest = ap.parse_known_args()
@@ -128,11 +200,32 @@ def main() -> int:
     work = (me.work_dir or out.parent / f".{out.stem}.parts").resolve()
     work.mkdir(parents=True, exist_ok=True)
     words = _repo_path(words_s).resolve() if words_s else work / "words.json"
-    nice = _nice_prefix(me.nice)
-    nice_enc = _nice_prefix(max(10, me.nice - 5))
+    nice_enc_level = max(10, me.nice - 5)
     env = dict(os.environ, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1",
                MKL_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1",
                PYTHONUNBUFFERED="1")
+    use_units = (not me.no_units) and user_systemd_ok()
+    if not use_units:
+        print("[parallel] WARNING: running WITHOUT systemd caps (--no-units or "
+              "no user systemd) - nothing limits these workers' memory",
+              file=sys.stderr, flush=True)
+    tag = f"lvp-{os.getpid()}"
+    live_units: set = set()
+
+    def launch(name: str, argv: list[str], level: int, max_sec: int):
+        """(argv to Popen, unit name or None) for one driver child."""
+        if not use_units:
+            return _nice_prefix(level) + argv, None
+        unit = f"{tag}-{name}"
+        live_units.add(unit)
+        return unit_argv(unit, argv, env, mem_max=me.mem_max,
+                         max_sec=max_sec, nice=level), unit
+
+    def _stop_all_units():
+        for u in list(live_units):
+            stop_unit(u)
+            live_units.discard(u)
+    atexit.register(_stop_all_units)
     t_all = time.time()
 
     # -- 1. prep: one transcription + analysis, cached for everyone ----------
@@ -140,11 +233,17 @@ def main() -> int:
           flush=True)
     prep_log = work / "prep.log"
     with open(prep_log, "w") as lf:
-        rc = subprocess.run(nice + [str(RUNNER)] + rest
-                            + ["--words-json", str(words), "--prep-only",
-                               "--out", str(out)],
-                            stdout=lf, stderr=subprocess.STDOUT, env=env,
-                            cwd=REPO).returncode
+        prep_cmd, prep_unit = launch(
+            "prep", [str(RUNNER)] + rest + ["--words-json", str(words),
+                                            "--prep-only", "--out", str(out)],
+            me.nice, me.chunk_max_sec)
+        try:
+            rc = subprocess.run(prep_cmd, stdout=lf, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, env=env,
+                                cwd=REPO).returncode
+        finally:
+            stop_unit(prep_unit)
+            live_units.discard(prep_unit)
     info = None
     for ln in prep_log.read_text(errors="replace").splitlines():
         if ln.startswith("PREP "):
@@ -184,17 +283,22 @@ def main() -> int:
     #    Audio is muxed once at the end. Tiling + per-chunk counts checked.
     asm_log = work / "assemble.log"
     asm_lf = open(asm_log, "w")
-    asm = subprocess.Popen(nice_enc + [str(RUNNER)] + rest
-                           + ["--assemble", str(manifest), "--assemble-wait",
-                              "--out", str(asm_out)],
-                           stdout=asm_lf, stderr=subprocess.STDOUT, env=env,
+    asm_cmd, asm_unit = launch(
+        "asm", [str(RUNNER)] + rest + ["--assemble", str(manifest),
+                                       "--assemble-wait", "--out", str(asm_out)],
+        nice_enc_level, me.asm_max_sec)
+    asm = subprocess.Popen(asm_cmd, stdout=asm_lf, stderr=subprocess.STDOUT,
+                           stdin=subprocess.DEVNULL, env=env,
                            cwd=REPO, start_new_session=True)
+    asm.unit = asm_unit
     pending = list(chunks)
     running: dict = {}
     done = 0
     failed = None
 
     def _stop(p):
+        stop_unit(getattr(p, "unit", None))      # the real work lives in the unit
+        live_units.discard(getattr(p, "unit", None))
         try:
             os.killpg(p.pid, signal.SIGTERM)
         except Exception:
@@ -217,24 +321,30 @@ def main() -> int:
             _stop(asm)
         asm_out.unlink(missing_ok=True)
 
-    def _on_signal(signum, _frm):
+    def _on_signal(signum, _frm):  # SIGHUP too: a closed ssh/tmux must not orphan the units
         print(f"[parallel] signal {signum}: stopping workers", file=sys.stderr)
         _kill_all()
         sys.exit(130)
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGHUP, _on_signal)
 
     t_render = time.time()
     while pending or running:
         while pending and len(running) < workers and failed is None:
             c = pending.pop(0)
             lf = open(c["log"], "w")
-            cmd = (nice + [str(RUNNER)] + rest_nowin
-                   + ["--words-json", str(words),
-                      "--frame-range", f"{c['f0']}:{c['f1']}", "--lossless",
-                      "--threads", str(cvt), "--out", c["path"]])
+            cmd, unit = launch(
+                f"c{c['k']:03d}",
+                [str(RUNNER)] + rest_nowin
+                + ["--words-json", str(words),
+                   "--frame-range", f"{c['f0']}:{c['f1']}", "--lossless",
+                   "--threads", str(cvt), "--out", c["path"]],
+                me.nice, me.chunk_max_sec)
             p = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
-                                 env=env, cwd=REPO, start_new_session=True)
+                                 stdin=subprocess.DEVNULL, env=env, cwd=REPO,
+                                 start_new_session=True)
+            p.unit = unit
             running[p.pid] = (p, c, lf)
         time.sleep(1.0)
         if asm.poll() not in (None, 0):
@@ -250,6 +360,7 @@ def main() -> int:
                 continue
             lf.close()
             del running[pid]
+            live_units.discard(getattr(p, "unit", None))
             if rc != 0 or not Path(c["path"]).is_file():
                 failed = (c, rc)
                 break
@@ -272,6 +383,7 @@ def main() -> int:
           f"waiting for the encoder to finish", flush=True)
     rc = asm.wait()
     asm_lf.close()
+    live_units.discard(asm_unit)
     if rc != 0 or not asm_out.is_file():
         asm_out.unlink(missing_ok=True)
         print(f"[parallel] ✗ ASSEMBLE FAILED rc={rc}\n{_tail(asm_log)}",
