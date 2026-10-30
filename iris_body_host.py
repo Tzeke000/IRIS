@@ -1109,7 +1109,7 @@ MIC_WARDEN_ON = os.environ.get("IRIS_MIC_WARDEN", "1").strip().lower() not in ("
 # request has sat pending >= MIN_AGE with no turn in flight and nothing queued, enqueue
 # ONE lowest-priority nudge. The nudge turn ending is all that's needed — the Stop hook
 # then delivers the real prompt(s). Each request id is nudged at most once.
-LLM_PENDING_POLL_S = float(os.environ.get("IRIS_LLM_PENDING_POLL_S", "30"))
+LLM_PENDING_POLL_S = float(os.environ.get("IRIS_LLM_PENDING_POLL_S", "10"))   # 10-30: 30 -> 10 (60 s reflect deadlines)
 LLM_PENDING_MIN_AGE_S = float(os.environ.get("IRIS_LLM_PENDING_MIN_AGE_S", "30"))
 # 2026-09-09 (Iris): requests older than this have no caller left waiting (brain/* callers
 # time out at 120-180 s; brain/iris_llm._REQUEST_TTL_S is 600). The poller used to count
@@ -1752,7 +1752,20 @@ async def llm_pending_poller(queue, loop, turn):
                     except Exception:
                         pass
                     continue
-                if age < LLM_PENDING_MIN_AGE_S or rid in nudged:
+                # 10-30 (Iris): reflect requests carry a 60 s deadline, so a fixed 30 s min age + a 30 s poll
+                # nudged at ~34-59 s and the Stop hook then found them PAST deadline ("nothing pending") - the
+                # thought was lost and I had to read the file by hand. Scale the wait to the caller's window
+                # (30 % of it, capped at MIN_AGE) and don't nudge when too little time is left to answer.
+                _min_age = LLM_PENDING_MIN_AGE_S
+                try:
+                    if d.get("deadline_ts"):
+                        _window = float(d["deadline_ts"]) - float(d.get("ts") or now)
+                        _min_age = min(LLM_PENDING_MIN_AGE_S, max(5.0, 0.3 * _window))
+                        if float(d["deadline_ts"]) - now < 15.0:
+                            continue
+                except Exception:
+                    pass
+                if age < _min_age or rid in nudged:
                     continue
                 waiting.append((rid, str(d.get("kind") or "?"), str(d.get("requester") or "?"), int(age)))
             if not waiting:
