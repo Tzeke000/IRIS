@@ -23,9 +23,14 @@ Hot-loadable via iris_tool_reload so the body layer can grow mid-session.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from tools.tool_registry import register_tool
+
+_REPO = Path(__file__).resolve().parents[2]
+POSSESSION_JSON = _REPO / "state" / "vector" / "possession.json"
+POSSESSION_STATUS_JSON = _REPO / "state" / "vector" / "possession_status.json"
 
 
 def _sess():
@@ -58,16 +63,17 @@ def _body_possess(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     in a firmware low-battery emergency."""
     import json
     import time as _time
-    from pathlib import Path
-    repo = Path(__file__).resolve().parents[2]
-    ctl = repo / "state" / "vector" / "possession.json"
-    status_p = repo / "state" / "vector" / "possession_status.json"
+    ctl = POSSESSION_JSON
+    status_p = POSSESSION_STATUS_JSON
     out: dict[str, Any] = {"ok": True}
     if params.get("hold") is not None:
         want = bool(params.get("hold"))
-        ctl.parent.mkdir(parents=True, exist_ok=True)
-        ctl.write_text(json.dumps({"hold": want, "set_ts": _time.time()}),
-                       encoding="utf-8")
+        # Atomic (code review 10-29): the inhabit daemon reads this every ~3 s; a torn read of a
+        # bare write_text could re-possess the robot mid-dock. Unique tmp so the pilot's own
+        # writer (brain.vector_pilot._write_possession) can never share a tmp name with us.
+        from brain._jsonl_store import write_json_atomic
+        write_json_atomic(ctl, {"hold": want, "set_ts": _time.time(), "by": "body_possess"},
+                          indent=None)
         out["set_hold"] = want
         out["note"] = "daemon applies within ~3s — re-check status"
     try:

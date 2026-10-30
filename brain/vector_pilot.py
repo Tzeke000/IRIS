@@ -69,11 +69,9 @@ def _write_possession(hold: bool, by: str) -> None:
     """Atomic possession.json write (code review 10-29): the inhabit daemon
     reads it every 3s, and a torn read of a bare write_text used to count as
     'hold' — re-possessing the robot mid-dock."""
-    POSSESSION_JSON.parent.mkdir(parents=True, exist_ok=True)
-    tmp = POSSESSION_JSON.with_name(POSSESSION_JSON.name + ".tmp")
-    tmp.write_text(json.dumps({"hold": bool(hold), "set_ts": time.time(),
-                               "by": by}), encoding="utf-8")
-    tmp.replace(POSSESSION_JSON)
+    from brain._jsonl_store import write_json_atomic   # mkstemp tmp: unique per writer
+    write_json_atomic(POSSESSION_JSON, {"hold": bool(hold), "set_ts": time.time(), "by": by},
+                      indent=None)
 
 
 def _battery_low_off_charger() -> bool:

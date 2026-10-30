@@ -390,3 +390,20 @@ def test_unit_pins_model_env():
     txt = (REPO / "scripts" / "server" / "iris-vector-brain.service").read_text()
     assert "Environment=IRIS_LOCAL_MODEL=" in txt
     assert "Environment=IRIS_LB_TOOLS=1" in txt
+
+
+# ------------------------- body_possess tool writes possession.json atomically too (10-30)
+def test_body_possess_tool_writes_atomically(tmp_path, monkeypatch):
+    from tools.system import vector_session_tool as vst
+    p = tmp_path / "possession.json"
+    monkeypatch.setattr(vst, "POSSESSION_JSON", p)
+    monkeypatch.setattr(vst, "POSSESSION_STATUS_JSON", tmp_path / "status.json")
+    out = vst._body_possess({"hold": False}, {})
+    assert out["set_hold"] is False and out["wanted"] is False
+    d = json.loads(p.read_text())
+    assert d["hold"] is False and d["by"] == "body_possess"
+    assert not [x for x in tmp_path.iterdir() if x.name.endswith(".tmp")]
+    p.chmod(0o640)
+    vst._body_possess({"hold": True}, {})
+    assert json.loads(p.read_text())["hold"] is True
+    assert (p.stat().st_mode & 0o777) == 0o640       # replace keeps the file's mode
