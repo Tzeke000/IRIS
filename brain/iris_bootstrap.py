@@ -52,6 +52,10 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     idempotent on bootstrap). Safe to call multiple times."""
     g["BASE_DIR"] = root
     g["_bootstrap_failures"] = {}  # reset each call
+    # Process start for "just booted" guards (sleep_mode schedule trigger,
+    # temporal_sense). Only a verify script used to set it, so the guard never
+    # fired (code review 2026-10-29). setdefault: idempotent across re-calls.
+    g.setdefault("_process_start_ts", time.time())
     state_dir = root / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
 

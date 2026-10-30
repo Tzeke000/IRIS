@@ -59,6 +59,8 @@ State file: state/iris_time.json
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -72,7 +74,14 @@ _TICK_INTERVAL_S = 1.0
 _FLUSH_EVERY_TICKS = 10  # write to disk every 10s, not every 1s
 _THREAD_STARTED = False
 _PROCESS_STARTED_TS = time.time()
-_PROCESS_STARTED_ISO = datetime.now().isoformat(timespec="seconds")
+_PROCESS_STARTED_ISO = datetime.now().astimezone().isoformat(timespec="seconds")
+# Snapshot of the PREVIOUS process's persisted state, taken in
+# bootstrap_iris_time BEFORE this process overwrites the file (code review
+# 2026-10-29: the old boot path saved the new process id first, so the gap
+# report always said "the body kept ticking" after a restart). None when there
+# was no previous run (or it was this same process).
+_PREVIOUS_RUN: Optional[dict[str, Any]] = None
+_WEEK_S = 7 * 86400.0
 _LAST_TICK_TS: float = _PROCESS_STARTED_TS
 _LIVE_STATE: dict[str, Any] = {
     "tick_count": 0,
@@ -124,13 +133,33 @@ def _load_persisted() -> dict[str, Any]:
     return {}
 
 
-def _save_persisted(state: dict[str, Any]) -> None:
-    p = _state_path()
+def _iso(ts: Optional[float] = None) -> str:
+    """Offset-aware local ISO string (code review 2026-10-29: naive strings
+    hide which timezone they are in)."""
+    d = datetime.now() if ts is None else datetime.fromtimestamp(ts)
+    return d.astimezone().isoformat(timespec="seconds")
+
+
+def _atomic_write_json(p: Path, state: dict[str, Any]) -> None:
+    """Write via a UNIQUE temp file + replace. Both writers used to share
+    one `.json.tmp` name, so two concurrent writers could interleave."""
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=p.name + ".", suffix=".tmp", dir=str(p.parent))
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
-        tmp.replace(p)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(state, indent=2))
+        os.replace(tmp, p)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _save_persisted(state: dict[str, Any]) -> None:
+    try:
+        _atomic_write_json(_state_path(), state)
     except Exception:
         pass
 
@@ -154,7 +183,7 @@ def _build_full_state() -> dict[str, Any]:
         "process_started_iso": _PROCESS_STARTED_ISO,
         "tick_count": int(_LIVE_STATE["tick_count"]),
         "last_tick_ts": float(_LIVE_STATE["last_tick_ts"]),
-        "last_tick_iso": datetime.fromtimestamp(_LIVE_STATE["last_tick_ts"]).isoformat(timespec="seconds"),
+        "last_tick_iso": _iso(float(_LIVE_STATE["last_tick_ts"])),
         "last_session_attached_ts": float(_LIVE_STATE.get("last_session_attached_ts") or 0.0),
         "last_session_iso": str(_LIVE_STATE.get("last_session_iso") or ""),
         "session_attach_count": int(_LIVE_STATE.get("session_attach_count") or persisted.get("session_attach_count") or 0),
@@ -185,10 +214,15 @@ def _build_full_state() -> dict[str, Any]:
             >= float(persisted.get("last_zeke_contact_ts") or 0.0)
             else str(persisted.get("last_zeke_contact_iso") or "")
         ),
-        "weekly_checkins_missed_consecutive": int(
-            _LIVE_STATE.get("weekly_checkins_missed_consecutive")
-            or persisted.get("weekly_checkins_missed_consecutive")
-            or 0
+        "weekly_checkins_missed_consecutive": (
+            int(persisted.get("weekly_checkins_missed_consecutive") or 0)
+            if float(persisted.get("last_zeke_contact_ts") or 0.0)
+            > float(_LIVE_STATE.get("last_zeke_contact_ts") or 0.0)
+            else int(
+                _LIVE_STATE.get("weekly_checkins_missed_consecutive")
+                or persisted.get("weekly_checkins_missed_consecutive")
+                or 0
+            )
         ),
         "week_window_anchor_ts": float(
             _LIVE_STATE.get("week_window_anchor_ts")
@@ -225,10 +259,7 @@ def _persist_zeke_contact_merge(now: float, now_iso: str) -> None:
             current["last_zeke_contact_ts"] = now
             current["last_zeke_contact_iso"] = now_iso
             current["weekly_checkins_missed_consecutive"] = 0
-            p.parent.mkdir(parents=True, exist_ok=True)
-            tmp = p.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(current, indent=2), encoding="utf-8")
-            tmp.replace(p)
+            _atomic_write_json(p, current)
     except Exception:
         # Best-effort persist — never block update_zeke_contact on disk failure.
         pass
@@ -251,7 +282,7 @@ def update_zeke_contact() -> dict[str, Any]:
     Returns a brief summary dict.
     """
     now = time.time()
-    now_iso = datetime.now().isoformat(timespec="seconds")
+    now_iso = _iso(now)
     with _LOCK:
         prior_contact_ts = float(_LIVE_STATE.get("last_zeke_contact_ts") or 0.0)
         _LIVE_STATE["last_zeke_contact_ts"] = now
@@ -315,6 +346,7 @@ def substrate_counters_report() -> dict[str, Any]:
       - weekly_checkins_missed_consecutive: int
     """
     now = time.time()
+    _roll_week_window(now)
     state = _build_full_state()
     last_contact_ts = float(state.get("last_zeke_contact_ts") or 0.0)
     seconds_since_zeke = (now - last_contact_ts) if last_contact_ts > 0 else 0.0
@@ -330,6 +362,38 @@ def substrate_counters_report() -> dict[str, Any]:
     }
 
 
+def _roll_week_window(now: Optional[float] = None) -> None:
+    """Advance week_window_anchor_ts in 7-day steps and count each window
+    that closed with no Zeke contact (code review 2026-10-29: the counter was
+    reset but never incremented and the anchor was never set, so it was
+    always 0). Contact inside a window resets the streak to 0."""
+    now = time.time() if now is None else now
+    persisted = _load_persisted()
+    with _LOCK:
+        live_contact = float(_LIVE_STATE.get("last_zeke_contact_ts") or 0.0)
+        disk_contact = float(persisted.get("last_zeke_contact_ts") or 0.0)
+        if disk_contact > live_contact:
+            # A cross-process update_zeke_contact landed on disk; adopt it.
+            _LIVE_STATE["last_zeke_contact_ts"] = disk_contact
+            _LIVE_STATE["last_zeke_contact_iso"] = str(persisted.get("last_zeke_contact_iso") or "")
+            _LIVE_STATE["weekly_checkins_missed_consecutive"] = 0
+        last_contact = max(live_contact, disk_contact)
+        anchor = float(_LIVE_STATE.get("week_window_anchor_ts")
+                       or persisted.get("week_window_anchor_ts") or 0.0)
+        if anchor <= 0.0:
+            _LIVE_STATE["week_window_anchor_ts"] = now
+            return
+        missed = int(_LIVE_STATE.get("weekly_checkins_missed_consecutive") or 0)
+        while now >= anchor + _WEEK_S:
+            if last_contact >= anchor:
+                missed = 0          # he checked in during the window that just closed
+            else:
+                missed += 1
+            anchor += _WEEK_S
+        _LIVE_STATE["week_window_anchor_ts"] = anchor
+        _LIVE_STATE["weekly_checkins_missed_consecutive"] = missed
+
+
 def mark_session_attached() -> dict[str, Any]:
     """Called when an MCP tool fires — proves a CC session is currently
     attached. Returns the time-awareness summary so the caller can choose
@@ -343,7 +407,7 @@ def mark_session_attached() -> dict[str, Any]:
             if gap_s > longest:
                 _LIVE_STATE["longest_unattended_gap_s"] = gap_s
         _LIVE_STATE["last_session_attached_ts"] = now
-        _LIVE_STATE["last_session_iso"] = datetime.now().isoformat(timespec="seconds")
+        _LIVE_STATE["last_session_iso"] = _iso(now)
         _LIVE_STATE["session_attach_count"] = int(_LIVE_STATE.get("session_attach_count") or 0) + 1
     return _build_full_state()
 
@@ -382,21 +446,49 @@ def time_awareness_report() -> dict[str, Any]:
     gap_since_attach_s = (now - last_attach) if last_attach > 0 else 0.0
 
     # Was this a new process? (i.e. iris_runtime restarted in the gap)
-    last_persisted_started = persisted.get("process_started_ts")
-    is_new_process = (last_persisted_started != _PROCESS_STARTED_TS)
+    # Code review 2026-10-29: the old check compared the file's
+    # process_started_ts with ours, but bootstrap had already overwritten the
+    # file with OUR id, so this was always False. Now: the gap spans a restart
+    # when the last attach predates this process's start (restored from the
+    # previous run by bootstrap), or when there is a previous run and no
+    # attach at all. A process that never bootstrapped (a subprocess reader)
+    # falls back to the old file-identity check.
+    prev = _PREVIOUS_RUN
+    if prev is not None:
+        is_new_process = (last_attach < _PROCESS_STARTED_TS)
+    elif _THREAD_STARTED:
+        is_new_process = False
+    else:
+        is_new_process = (persisted.get("process_started_ts") != _PROCESS_STARTED_TS)
+
+    downtime_s: Optional[float] = None
+    prev_last_tick_ts = float((prev or {}).get("last_tick_ts") or 0.0)
+    if prev_last_tick_ts > 0:
+        downtime_s = max(0.0, _PROCESS_STARTED_TS - prev_last_tick_ts)
 
     # Did the body keep ticking through the gap, or was it a cold start?
     if is_new_process:
         body_was_alive_during_gap = False
+        off_part = ""
+        if downtime_s is not None:
+            off_part = (
+                f" It was off for about {_human_duration(downtime_s)} "
+                f"(last heartbeat {_iso(prev_last_tick_ts)}, persisted every "
+                f"{int(_FLUSH_EVERY_TICKS * _TICK_INTERVAL_S)}s)."
+            )
         gap_explanation = (
-            "the body itself was OFF during the gap — no ticks happened, no "
-            "heartbeat, the harness was cold. It came back up at "
-            + _PROCESS_STARTED_ISO
-            + ". I have only the gap and what's in it from elsewhere."
+            "the body itself was OFF during part of the gap — the runtime "
+            "restarted, so no ticks happened while it was down." + off_part
+            + " It came back up at " + _PROCESS_STARTED_ISO
+            + f" and has been up {_human_duration(body_uptime_s)} since."
+            + " For the off stretch I have only the gap and what's in it from elsewhere."
         )
     else:
         body_was_alive_during_gap = True
-        ticks_during_gap = int(_LIVE_STATE["tick_count"])  # all ticks since process start
+        # Ticks during the gap = seconds since the last attach, bounded by
+        # ticks since process start (was: ALL ticks since start).
+        ticks_during_gap = int(min(float(_LIVE_STATE["tick_count"]),
+                                   gap_since_attach_s / max(_TICK_INTERVAL_S, 1e-6)))
         gap_explanation = (
             "the body kept ticking through the gap — "
             f"{ticks_during_gap:,} seconds counted, heartbeat alive, mood "
@@ -459,7 +551,7 @@ def time_awareness_report() -> dict[str, Any]:
 
     return {
         "now_ts": now,
-        "now_iso": datetime.now().isoformat(timespec="seconds"),
+        "now_iso": _iso(now),
         "now_dow": datetime.now().strftime("%A"),
         "body_uptime_s": body_uptime_s,
         "body_uptime_human": _human_duration(body_uptime_s),
@@ -471,6 +563,13 @@ def time_awareness_report() -> dict[str, Any]:
         "gap_since_attach_s": gap_since_attach_s,
         "gap_since_attach_human": _human_duration(gap_since_attach_s),
         "gap_explanation": gap_explanation,
+        "process_started_iso": _PROCESS_STARTED_ISO,
+        "downtime_s": downtime_s,
+        "downtime_human": _human_duration(downtime_s) if downtime_s is not None else None,
+        "previous_run_last_tick_iso": _iso(prev_last_tick_ts) if prev_last_tick_ts > 0 else None,
+        "previous_run_uptime_human": (
+            _human_duration(float((prev or {}).get("current_process_uptime_s") or 0.0))
+            if prev is not None else None),
         "gap_evidence": gap_evidence,
         "mood_drift_note": mood_drift_note,
         "tod_register": tod_register,
@@ -553,6 +652,10 @@ def _tick_loop() -> None:
             if flush_counter >= _FLUSH_EVERY_TICKS:
                 flush_counter = 0
                 try:
+                    _roll_week_window(now_ts)
+                except Exception:
+                    pass
+                try:
                     # Persist a state where total_lifetime_uptime_s excludes the
                     # CURRENT process's uptime (it gets folded in at next-boot
                     # via bootstrap_iris_time). Otherwise every periodic save
@@ -590,18 +693,26 @@ def bootstrap_iris_time(g: dict[str, Any]) -> None:
     base = Path(g.get("BASE_DIR") or ".")
     configure(base)
 
-    # Capture this process's start, then load any persisted state to
-    # finalize the previous run's uptime into total_lifetime_uptime_s.
+    # Snapshot the PREVIOUS run BEFORE anything overwrites the file (code
+    # review 2026-10-29). The old code pre-saved a "finalized" copy that kept
+    # the old process id, which made _build_full_state add the previous run's
+    # uptime a SECOND time, and then the save below replaced the id so every
+    # later report said is_new_process=False. _build_full_state already folds
+    # the previous run's uptime into the lifetime once, so no pre-save.
+    global _PREVIOUS_RUN
     persisted = _load_persisted()
-    if persisted:
-        # On startup, persist a snapshot that finalizes previous run.
-        prev_started = persisted.get("process_started_ts")
-        if prev_started and prev_started != _PROCESS_STARTED_TS:
-            previous_lifetime = float(persisted.get("total_lifetime_uptime_s") or 0.0)
-            previous_run_uptime = float(persisted.get("current_process_uptime_s") or 0.0)
-            persisted["total_lifetime_uptime_s"] = previous_lifetime + previous_run_uptime
-            persisted["previous_process_uptime_s"] = previous_run_uptime
-            _save_persisted(persisted)
+    prev_started = persisted.get("process_started_ts") if persisted else None
+    if prev_started and prev_started != _PROCESS_STARTED_TS and _PREVIOUS_RUN is None:
+        _PREVIOUS_RUN = dict(persisted)
+        with _LOCK:
+            # Carry the session fields across the restart so the gap is
+            # measured from the last REAL attach, not from 0 ("a moment").
+            for k in ("last_session_attached_ts", "last_session_iso",
+                      "session_attach_count", "longest_unattended_gap_s",
+                      "last_zeke_contact_ts", "last_zeke_contact_iso",
+                      "weekly_checkins_missed_consecutive", "week_window_anchor_ts"):
+                if not _LIVE_STATE.get(k) and persisted.get(k):
+                    _LIVE_STATE[k] = persisted[k]
 
     start_tick_thread()
     # Persist with total_lifetime_uptime_s NOT including current uptime

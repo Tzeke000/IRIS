@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -396,15 +397,66 @@ def _read_active_estimates(g: dict[str, Any]) -> dict[str, dict[str, Any]]:
         data = json.loads(p.read_text(encoding="utf-8")) or {}
     except Exception:
         data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data = _prune_stale_estimates(data, now)
     g["_temporal_estimates_cache"] = data
     g["_temporal_estimates_cache_mtime"] = cur_mtime
     return data
 
 
+_STALE_ESTIMATE_FLOOR_S = 6 * 3600.0
+_STALE_ESTIMATE_FACTOR = 20.0
+
+
+def _prune_stale_estimates(data: dict[str, Any], now: float) -> dict[str, Any]:
+    """Drop estimates nobody will ever resolve (code review 2026-10-29): an
+    entry left open when its session/thread died stayed in the file forever
+    (the sweeper is dead code; nine sleep_phase3 entries 2-3 months old sat
+    there). Stale = older than max(stale_after_seconds [6 h], 20x its own
+    estimate). Pruned on READ; the next write persists the smaller set.
+    Not logged to history, so calibration isn't skewed by abandoned tasks."""
+    try:
+        floor = float(_cfg("estimate_tracking", "stale_after_seconds",
+                           default=_STALE_ESTIMATE_FLOOR_S))
+    except (TypeError, ValueError):
+        floor = _STALE_ESTIMATE_FLOOR_S
+    if floor <= 0:
+        return data
+    out: dict[str, Any] = {}
+    dropped = 0
+    for tid, entry in data.items():
+        try:
+            created = float((entry or {}).get("created_at") or now)
+            est = float((entry or {}).get("estimate_seconds") or 0.0)
+        except (TypeError, ValueError, AttributeError):
+            dropped += 1
+            continue
+        if (now - created) > max(floor, _STALE_ESTIMATE_FACTOR * est):
+            dropped += 1
+            continue
+        out[tid] = entry
+    if dropped:
+        print(f"[temporal_sense] pruned {dropped} stale active estimate(s)")
+    return out
+
+
 def _write_active_estimates(g: dict[str, Any], estimates: dict[str, dict[str, Any]]) -> None:
     p = _estimates_path(g)
     try:
-        p.write_text(json.dumps(estimates, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Atomic: temp file + replace (a reader used to be able to see a
+        # half-written file and fall back to {}).
+        fd, tmp = tempfile.mkstemp(prefix=p.name + ".", suffix=".tmp", dir=str(p.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(estimates, indent=2, ensure_ascii=False))
+            os.replace(tmp, p)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         # Update cache with our write so the next read doesn't reload.
         g["_temporal_estimates_cache"] = estimates
         try:

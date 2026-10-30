@@ -86,13 +86,25 @@ class AnchorMoment:
 _lock = threading.RLock()
 _base_dir: Path | None = None
 _cache: list[AnchorMoment] = []
+# Anchors marked before configure() ran used to be lost (kept only in the
+# in-memory cache, which configure's load then replaced). They wait here and
+# are flushed to disk by configure (code review 2026-10-29).
+_pending: list[AnchorMoment] = []
+_PENDING_MAX = 200
 
 
 def configure(base_dir: Path) -> None:
     global _base_dir
     with _lock:
-        _base_dir = base_dir
+        _base_dir = Path(base_dir)
         _load_locked()
+        if _pending:
+            known = {a.id for a in _cache}
+            for a in list(_pending):
+                if a.id not in known:
+                    _cache.append(a)
+                    _append_to_disk(a)
+            _pending.clear()
 
 
 def _path() -> Path | None:
@@ -182,7 +194,11 @@ def mark_anchor(
     )
     with _lock:
         _cache.append(anchor)
-        _append_to_disk(anchor)
+        if _base_dir is None:
+            if len(_pending) < _PENDING_MAX:
+                _pending.append(anchor)
+        else:
+            _append_to_disk(anchor)
     print(f"[anchor_moments] marked {aid!r} kind={kind} for {person_id}")
     return aid
 
@@ -205,16 +221,22 @@ def recent_anchors(person_id: str | None = None, *, limit: int = 10) -> list[Anc
 
 # Words / phrases that suggest the moment matters — vulnerable disclosure,
 # milestone language, deep emotional content.
+# Tightened 2026-10-29 (code review): bare "first", "remember", "thank you",
+# "huge" and "honestly I" fired on everyday replies ("I'll check sources
+# first", "thank you!", "do you remember the port"), filling the handoff's
+# top-10 anchors with trivia. Each phrase now needs its meaningful context,
+# and only the PERSON's message can trigger (see auto_detect_anchor_in_turn).
 _ANCHOR_HINT_PATTERNS = [
-    re.compile(r"\b(?:first|never (?:told|shared|said))\b", re.IGNORECASE),
-    re.compile(r"\b(?:i (?:love|trust|appreciate) (?:you|that))\b", re.IGNORECASE),
-    re.compile(r"\b(?:thank\s+you|grateful|means a lot)\b", re.IGNORECASE),
-    re.compile(r"\b(?:remember|won'?t forget|always remember)\b", re.IGNORECASE),
-    re.compile(r"\b(?:my (?:mom|dad|parents|brother|sister|family))\b", re.IGNORECASE),
-    re.compile(r"\b(?:hard for me|vulnerable|honestly?\s*,?\s*i)\b", re.IGNORECASE),
-    re.compile(r"\b(?:milestone|huge|big deal|life changing|life-changing)\b", re.IGNORECASE),
+    re.compile(r"\b(?:for the first time|(?:my|our|the) first (?:time|day|night)|never (?:told|shared|said) (?:this|that|anyone|anybody|it))\b", re.IGNORECASE),
+    re.compile(r"\bi (?:love|trust|appreciate) you\b", re.IGNORECASE),
+    re.compile(r"\b(?:thank\s+you (?:so much|for everything|for (?:being|staying|listening|caring|always))|(?:i'?m|i am) (?:so |really )?grateful|means (?:a lot|so much|the world))\b", re.IGNORECASE),
+    re.compile(r"\b(?:remember this|won'?t (?:ever )?forget|never forget|always remember)\b", re.IGNORECASE),
+    re.compile(r"\b(?:my (?:mom|dad|mother|father|parents|brother|sister|family))\b", re.IGNORECASE),
+    re.compile(r"\b(?:hard for me to (?:say|talk|admit)|(?:i feel|being|feel so) vulnerable)\b", re.IGNORECASE),
+    re.compile(r"\b(?:milestone|big deal|life[- ]changing)\b", re.IGNORECASE),
     re.compile(r"\b(?:happy birthday|anniversary)\b", re.IGNORECASE),
 ]
+_MIN_ANCHOR_WORDS = 3
 
 
 _ANCHOR_KIND_HEURISTICS = {
@@ -288,7 +310,9 @@ def auto_detect_anchor_in_turn(
         return None
     if is_machine_prompt(user_msg):
         return None
-    if not is_anchor_worthy(user_msg) and not is_anchor_worthy(ava_reply):
+    # Only the person's words can make a moment an anchor (2026-10-29): the
+    # reply alone matching ("first I'll check...") produced most of the noise.
+    if len(user_msg.split()) < _MIN_ANCHOR_WORDS or not is_anchor_worthy(user_msg):
         return None
     kind = infer_kind(user_msg, ava_reply)
     summary = (user_msg.strip().split("\n", 1)[0])[:140]

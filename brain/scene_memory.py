@@ -21,12 +21,25 @@ How it works (thread, ~2 s cadence, like brain/unknown_capture.py):
      iris_memory (category "scene") so memory_search can answer "what was
      the room like this afternoon".
 
-Not built (ask first): object-level diffs ("the bike stand moved"), retention
-pruning, a browsable timeline in the orb.
+Retention (code review 2026-10-29): `prune()` runs once a day from the loop.
+JPEG day-folders older than IMAGE_KEEP_DAYS (90) are removed, then the oldest
+folders while the total is over IMAGE_MAX_BYTES (2 GB); index records older
+than INDEX_KEEP_DAYS (365) are compacted out of keyframes.jsonl (update lines
+merged in). NOTHING younger than MIN_KEEP_DAYS (7) is ever deleted. Captioned
+words also live in iris_memory, so a pruned picture keeps its sentence there.
+Override with env IRIS_SCENE_IMAGE_KEEP_DAYS / IRIS_SCENE_INDEX_KEEP_DAYS
+(0 = never prune that part).
+
+Not built (ask first): object-level diffs ("the bike stand moved"), a
+browsable timeline in the orb.
 """
 from __future__ import annotations
 
 import json
+import os
+import re
+import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -57,6 +70,23 @@ CAPTION_TIMEOUT_S = 540.0   # the bridge's request TTL is 600 s; 240 s timed out
 HEAD_MOVE_DEG = 1.5
 KF_MAX_W = 900
 KF_MAX_BYTES = 150_000
+# Retention (2026-10-29). MIN_KEEP_DAYS is a hard floor no setting can lower.
+IMAGE_KEEP_DAYS = 90.0
+INDEX_KEEP_DAYS = 365.0
+IMAGE_MAX_BYTES = 2 * 1024 ** 3
+MIN_KEEP_DAYS = 7.0
+MAX_RECORDS = 2000          # in-memory records/order cap (was: order only)
+PRUNE_EVERY_S = 86400.0
+PRUNE_FIRST_DELAY_S = 600.0  # don't prune during boot
+_DAY_DIR_RE = re.compile(r"^\d{8}$")
+
+
+def _keep_days(env: str, default: float) -> float:
+    try:
+        v = float(os.environ.get(env, default))
+    except (TypeError, ValueError):
+        v = default
+    return v  # 0 or negative = disabled; positive values are floored at MIN_KEEP_DAYS by the caller
 
 
 def _log(msg: str) -> None:
@@ -117,6 +147,8 @@ class SceneMemory:
         self._retry: dict[str, float] = {}  # kid -> not-before ts (round-2 fix 2.7)
         self.records: dict[str, dict[str, Any]] = {}
         self.order: list[str] = []
+        self._io_lock = threading.Lock()   # index appends vs compaction
+        self._next_prune_ts = time.time() + PRUNE_FIRST_DELAY_S
         self.stats = {"samples": 0, "self_motion_skips": 0, "commits": 0,
                       "captions": 0, "caption_timeouts": 0, "caption_retries": 0, "last_diff": None,
                       "last_sample_ts": None, "started_ts": None}
@@ -142,15 +174,128 @@ class SceneMemory:
                     self.order.append(kid)
         except Exception as e:  # noqa: BLE001
             _log(f"index load error: {e!r}")
-        self.order = self.order[-2000:]
+        self._trim_memory()
+
+    def _trim_memory(self) -> None:
+        """Cap the in-memory index; records is trimmed TOGETHER with order
+        (it used to keep every record ever loaded or committed)."""
+        if len(self.order) > MAX_RECORDS:
+            drop = self.order[:-MAX_RECORDS]
+            self.order = self.order[-MAX_RECORDS:]
+            keep = set(self.order)
+            for kid in drop:
+                if kid not in keep:
+                    self.records.pop(kid, None)
+                    self._retry.pop(kid, None)
+        if len(self.records) > len(self.order):
+            keep = set(self.order)
+            for kid in [k for k in self.records if k not in keep]:
+                self.records.pop(kid, None)
 
     def _append(self, d: dict[str, Any]) -> None:
         try:
-            DIR.mkdir(parents=True, exist_ok=True)
-            with INDEX.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(d, ensure_ascii=False) + "\n")
+            with self._io_lock:
+                DIR.mkdir(parents=True, exist_ok=True)
+                with INDEX.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(d, ensure_ascii=False) + "\n")
         except Exception as e:  # noqa: BLE001
             _log(f"index write error: {e!r}")
+
+    # ── retention ────────────────────────────────────────────────────────
+    def prune(self, now: float | None = None) -> dict[str, Any]:
+        """Age/size retention for keyframe JPEGs and the index. Never touches
+        anything younger than MIN_KEEP_DAYS. Best-effort; returns a summary."""
+        now = time.time() if now is None else now
+        out: dict[str, Any] = {"image_dirs_removed": [], "index_dropped": 0, "bytes_freed": 0}
+        floor_ts = now - MIN_KEEP_DAYS * 86400.0
+        img_days = _keep_days("IRIS_SCENE_IMAGE_KEEP_DAYS", IMAGE_KEEP_DAYS)
+        idx_days = _keep_days("IRIS_SCENE_INDEX_KEEP_DAYS", INDEX_KEEP_DAYS)
+
+        # 1. JPEG day folders (keyframes/YYYYMMDD) — age, then total size.
+        kf_root = DIR / "keyframes"
+        if img_days > 0 and kf_root.is_dir():
+            img_cut = min(floor_ts, now - max(img_days, MIN_KEEP_DAYS) * 86400.0)
+            days: list[tuple[float, Path, int]] = []
+            for d in kf_root.iterdir():
+                if not (d.is_dir() and not d.is_symlink() and _DAY_DIR_RE.match(d.name)):
+                    continue
+                try:
+                    # end of that local day = the newest a file in it can be
+                    end_ts = time.mktime(time.strptime(d.name, "%Y%m%d")) + 86400.0
+                except ValueError:
+                    continue
+                size = 0
+                for f in d.iterdir():
+                    try:
+                        if f.is_file():
+                            size += f.stat().st_size
+                    except OSError:
+                        pass
+                days.append((end_ts, d, size))
+            days.sort()
+            total = sum(sz for _, _, sz in days)
+            for end_ts, d, size in days:
+                too_old = end_ts < img_cut
+                too_big = total > IMAGE_MAX_BYTES and end_ts < floor_ts
+                if not (too_old or too_big):
+                    continue
+                try:
+                    shutil.rmtree(d)
+                    total -= size
+                    out["bytes_freed"] += size
+                    out["image_dirs_removed"].append(d.name)
+                except OSError as e:
+                    _log(f"prune rmtree {d.name} failed: {e!r}")
+
+        # 2. Index compaction — drop records older than idx_days.
+        if idx_days > 0 and INDEX.exists():
+            idx_cut = min(floor_ts, now - max(idx_days, MIN_KEEP_DAYS) * 86400.0)
+            try:
+                with self._io_lock:
+                    merged: dict[str, dict[str, Any]] = {}
+                    order: list[str] = []
+                    for line in INDEX.read_text(encoding="utf-8").splitlines():
+                        if not line.strip():
+                            continue
+                        try:
+                            d = json.loads(line)
+                        except ValueError:
+                            continue
+                        kid = d.get("id")
+                        if not kid:
+                            continue
+                        if d.get("_update"):
+                            if kid in merged:
+                                merged[kid].update({k: v for k, v in d.items() if k != "_update"})
+                        elif kid not in merged:
+                            merged[kid] = d
+                            order.append(kid)
+                    old = [k for k in order if float(merged[k].get("ts") or now) < idx_cut]
+                    if old:
+                        drop = set(old)
+                        DIR.mkdir(parents=True, exist_ok=True)
+                        fd, tmp = tempfile.mkstemp(prefix="keyframes.", suffix=".tmp", dir=str(DIR))
+                        try:
+                            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                                for k in order:
+                                    if k not in drop:
+                                        f.write(json.dumps(merged[k], ensure_ascii=False) + "\n")
+                            os.replace(tmp, INDEX)
+                        except Exception:
+                            try:
+                                os.unlink(tmp)
+                            except OSError:
+                                pass
+                            raise
+                        out["index_dropped"] = len(old)
+                        self.order = [k for k in self.order if k not in drop]
+                        self._trim_memory()
+            except Exception as e:  # noqa: BLE001
+                _log(f"index compaction failed: {e!r}")
+        if out["image_dirs_removed"] or out["index_dropped"]:
+            _log(f"pruned {len(out['image_dirs_removed'])} day dir(s) "
+                 f"({out['bytes_freed'] // 1024} KB), {out['index_dropped']} index record(s)")
+        return out
 
     # ── lifecycle ────────────────────────────────────────────────────────
     def start(self) -> None:
@@ -231,6 +376,12 @@ class SceneMemory:
 
     def _tick(self, first: bool) -> None:
         self._retry_timeouts(time.time())
+        if time.time() >= self._next_prune_ts:
+            self._next_prune_ts = time.time() + PRUNE_EVERY_S
+            try:
+                self.prune()
+            except Exception as e:  # noqa: BLE001
+                _log(f"prune error: {e!r}")
         from brain import frame_store
         res = frame_store.get_buffered_frame(max_age_sec=3.0)
         frame = res.frame
@@ -312,6 +463,7 @@ class SceneMemory:
                "words": None, "caption_status": "pending" if caption else "none"}
         self.records[kid] = rec
         self.order.append(kid)
+        self._trim_memory()
         self._append(rec)
         self._base = _small_grey(frame)
         self._last_commit_ts = now

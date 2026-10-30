@@ -10,6 +10,9 @@ Runs: weekly via heartbeat, or during leisure when bored.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,7 +21,31 @@ from typing import Any
 
 _CONSOLIDATION_STATE = "state/consolidation_state.json"
 _CONSOLIDATION_LOG = "state/consolidation_log.jsonl"
+_CONSOLIDATION_LOCKFILE = "state/consolidation.lock"
 _WEEK_SECONDS = 7 * 24 * 3600
+# After a FAILED pass the week gate does not advance (code review
+# 2026-10-29), so back off before retrying instead of re-running (and
+# re-asking cognition) on every heartbeat.
+_RETRY_AFTER_FAILURE_S = 12 * 3600
+# Leisure and the heartbeat/inner-monologue path could consolidate at the
+# same time. One pass at a time: a thread lock in-process + a flock across
+# processes (best-effort; the flock is skipped where fcntl is unavailable).
+_RUN_LOCK = threading.Lock()
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _base(g: dict[str, Any]) -> Path:
@@ -37,8 +64,7 @@ def _load_state(g: dict[str, Any]) -> dict[str, Any]:
 
 def _save_state(g: dict[str, Any], state: dict[str, Any]) -> None:
     path = _base(g) / _CONSOLIDATION_STATE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(state, indent=2, ensure_ascii=False))
 
 
 def _log_consolidation(g: dict[str, Any], entry: dict[str, Any]) -> None:
@@ -49,16 +75,53 @@ def _log_consolidation(g: dict[str, Any], entry: dict[str, Any]) -> None:
 
 
 def should_consolidate(g: dict[str, Any]) -> bool:
+    if _RUN_LOCK.locked():
+        return False
     state = _load_state(g)
+    now = time.time()
     last = float(state.get("last_consolidation_ts") or 0)
-    return (time.time() - last) >= _WEEK_SECONDS
+    if (now - last) < _WEEK_SECONDS:
+        return False
+    last_fail = float(state.get("last_failed_attempt_ts") or 0)
+    return (now - last_fail) >= _RETRY_AFTER_FAILURE_S
 
 
 def consolidate(g: dict[str, Any]) -> dict[str, Any]:
     """
     Full consolidation pass. Returns summary dict.
     Ava prioritizes what matters to her — no prescribed focus.
+
+    Only one pass runs at a time; a concurrent call returns
+    {"ok": False, "skipped": "already_running", "steps": {}} immediately.
     """
+    if not _RUN_LOCK.acquire(blocking=False):
+        return {"ts": time.time(), "ok": False, "skipped": "already_running", "steps": {}}
+    lock_fh = None
+    try:
+        try:
+            import fcntl  # type: ignore
+            lp = _base(g) / _CONSOLIDATION_LOCKFILE
+            lp.parent.mkdir(parents=True, exist_ok=True)
+            lock_fh = open(lp, "a+")
+            try:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                lock_fh.close()
+                lock_fh = None
+                return {"ts": time.time(), "ok": False, "skipped": "already_running_elsewhere", "steps": {}}
+        except ImportError:
+            lock_fh = None
+        return _consolidate_locked(g)
+    finally:
+        if lock_fh is not None:
+            try:
+                lock_fh.close()   # closing releases the flock
+            except Exception:
+                pass
+        _RUN_LOCK.release()
+
+
+def _consolidate_locked(g: dict[str, Any]) -> dict[str, Any]:
     base = _base(g)
     result: dict[str, Any] = {
         "ts": time.time(),
@@ -210,9 +273,9 @@ def consolidate(g: dict[str, Any]) -> dict[str, Any]:
                 current_model["weekly_pattern"] = str(update.get("weekly_pattern") or "")[:400]
                 current_model["emotional_shift"] = str(update.get("emotional_shift") or "")[:400]
                 current_model["growth_note"] = str(update.get("growth_note") or "")[:400]
-                current_model["last_updated"] = datetime.now().isoformat(timespec="seconds")
-                current_model_path.write_text(
-                    json.dumps(current_model, indent=2, ensure_ascii=False), encoding="utf-8"
+                current_model["last_updated"] = datetime.now().astimezone().isoformat(timespec="seconds")
+                _atomic_write_text(
+                    current_model_path, json.dumps(current_model, indent=2, ensure_ascii=False)
                 )
                 _step3["updated"] = True
                 _step3["weekly_pattern"] = current_model["weekly_pattern"]
@@ -284,10 +347,34 @@ def consolidate(g: dict[str, Any]) -> dict[str, Any]:
         _step_learning["error"] = str(e)[:100]
     result["steps"]["learning_summary"] = _step_learning
 
-    # Save state and log
+    # Save state and log. The week gate advances ONLY on success (code review
+    # 2026-10-29): a step that raised, or no self-model update (cognition
+    # unavailable / unparseable reply), is a failed pass — recorded, retried
+    # after _RETRY_AFTER_FAILURE_S, and the week clock is left alone.
+    # Core steps only: concept pruning / identity / learning-summary errors
+    # are recorded in the log but don't hold the gate (an optional module
+    # missing must not make every pass "fail" forever).
+    failed_steps = [name for name in ("episode_review", "self_model_update", "journal_entry")
+                    if (result["steps"].get(name) or {}).get("error")]
+    if not _step3.get("updated"):
+        failed_steps.append("self_model_update")
+    if not _step4.get("written"):
+        failed_steps.append("journal_entry")
+    success = not failed_steps
+    result["ok"] = success
+    if failed_steps:
+        result["failed_steps"] = sorted(set(failed_steps))
     state = _load_state(g)
-    state["last_consolidation_ts"] = time.time()
-    state["last_consolidation_date"] = datetime.now().strftime("%Y-%m-%d")
+    now_ts = time.time()
+    state["last_attempt_ts"] = now_ts
+    if success:
+        state["last_consolidation_ts"] = now_ts
+        state["last_consolidation_date"] = datetime.now().strftime("%Y-%m-%d")
+        state.pop("last_failed_attempt_ts", None)
+        state.pop("last_failed_steps", None)
+    else:
+        state["last_failed_attempt_ts"] = now_ts
+        state["last_failed_steps"] = result["failed_steps"]
     state["last_result_summary"] = {
         "episodes_reviewed": _step1.get("episodes_reviewed"),
         "themes": _step1.get("themes"),
@@ -297,6 +384,6 @@ def consolidate(g: dict[str, Any]) -> dict[str, Any]:
     _save_state(g, state)
     _log_consolidation(g, result)
 
-    print(f"[consolidation] complete episodes={_step1.get('episodes_reviewed')} "
+    print(f"[consolidation] {'complete' if success else 'FAILED ' + ','.join(result.get('failed_steps') or [])} episodes={_step1.get('episodes_reviewed')} "
           f"themes={_step1.get('themes')} self_model_updated={_step3.get('updated')}")
     return result

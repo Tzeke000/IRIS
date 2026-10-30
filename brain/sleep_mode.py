@@ -25,7 +25,9 @@ See docs/AVA_FEATURE_ADDITIONS_2026-05.md §1 for the framework.
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 import threading
 import time
 from datetime import datetime, time as dt_time
@@ -79,6 +81,106 @@ def _cfg(*keys: str, default: Any = None) -> Any:
 
 
 # ── State accessors ────────────────────────────────────────────────────
+
+
+def _now_local() -> datetime:
+    """Timezone-aware local now (code review 2026-10-29). Uses
+    config schedule.timezone (an IANA name) when set, else the system zone
+    (the server is America/New_York). Falls back to the system zone if the
+    name is bad - availability over strictness."""
+    tz_name = _cfg("schedule", "timezone", default=None)
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo(str(tz_name)))
+        except Exception:
+            pass
+    return datetime.now().astimezone()
+
+
+def _iso_local(ts: Optional[float] = None) -> str:
+    d = _now_local() if ts is None else datetime.fromtimestamp(ts, tz=_now_local().tzinfo)
+    return d.isoformat(timespec="seconds")
+
+
+# ── Persisted sleep state (code review 2026-10-29) ─────────────────────
+# All sleep state lived only in g, so a restart mid-sleep forgot it and a
+# session that started at 01:00 could re-enter sleep (and re-announce it).
+# We persist the state machine's durable fields on every transition and
+# restore them once on the first tick of a new process.
+
+_PERSIST_KEYS = (
+    "_sleep_state", "_sleep_started_ts", "_sleep_target_ts", "_sleep_trigger",
+    "_sleep_schedule_last_fire_ts", "_sleep_fullness_last_fire_ts",
+)
+
+
+def _sleep_state_path(g: dict[str, Any]) -> Path:
+    return Path(g.get("BASE_DIR") or ".") / "state" / "sleep_mode_state.json"
+
+
+def _persist_sleep_state(g: dict[str, Any]) -> None:
+    """Atomic best-effort write; never breaks the state machine."""
+    try:
+        p = _sleep_state_path(g)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        data = {k: g.get(k) for k in _PERSIST_KEYS}
+        data["saved_ts"] = time.time()
+        data["saved_iso"] = _iso_local()
+        fd, tmp = tempfile.mkstemp(prefix=p.name + ".", suffix=".tmp", dir=str(p.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, p)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception as e:  # noqa: BLE001
+        print(f"[sleep_mode] state persist failed: {e!r}")
+
+
+def _restore_sleep_state_once(g: dict[str, Any]) -> None:
+    """First tick of a process: restore anti-flap timestamps, and resume a
+    sleep that was still in progress (as SLEEPING/learning - the awake
+    handoff is not re-run, so a restart doesn't re-announce or re-summarise).
+    A sleep whose target already passed is dropped (we stay AWAKE)."""
+    if g.get("_sleep_state_restored"):
+        return
+    g["_sleep_state_restored"] = True
+    # Just-booted guard needs a process start; bootstrap_all sets it, this
+    # covers any other caller (it used to be set only by a verify script).
+    g.setdefault("_process_start_ts", time.time())
+    try:
+        p = _sleep_state_path(g)
+        if not p.is_file():
+            return
+        data = json.loads(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return
+    for k in ("_sleep_schedule_last_fire_ts", "_sleep_fullness_last_fire_ts"):
+        if not g.get(k) and data.get(k):
+            try:
+                g[k] = float(data[k])
+            except (TypeError, ValueError):
+                pass
+    prev_state = str(data.get("_sleep_state") or STATE_AWAKE)
+    try:
+        target = float(data.get("_sleep_target_ts") or 0.0)
+    except (TypeError, ValueError):
+        target = 0.0
+    if (get_state(g) == STATE_AWAKE
+            and prev_state in (STATE_ENTERING_SLEEP, STATE_SLEEPING)
+            and target > time.time() + 60.0):
+        g["_sleep_state"] = STATE_SLEEPING
+        g["_sleep_started_ts"] = float(data.get("_sleep_started_ts") or time.time())
+        g["_sleep_target_ts"] = target
+        g["_sleep_trigger"] = data.get("_sleep_trigger")
+        g["_sleep_phase"] = "learning"
+        g["_sleep_phase_started_ts"] = time.time()
+        print(f"[sleep_mode] restored SLEEPING across restart (wake target {_iso_local(target)})")
 
 
 def get_state(g: dict[str, Any]) -> str:
@@ -217,7 +319,7 @@ def _check_schedule_trigger(g: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         return False, {"reason": "schedule_disabled"}
     start_h = int(_cfg("schedule", "start_hour", default=23))
     end_h = int(_cfg("schedule", "end_hour", default=5))
-    now = datetime.now()
+    now = _now_local()
     in_window = _hour_in_window(now.hour, start_h, end_h)
     if not in_window:
         return False, {"reason": "outside_window", "now": now.strftime("%H:%M")}
@@ -318,6 +420,7 @@ def _enter_sleep(g: dict[str, Any], duration_s: float, trigger: str, trigger_sum
         g["_sleep_fullness_last_fire_ts"] = now
     elif trigger == "schedule":
         g["_sleep_schedule_last_fire_ts"] = now
+    _persist_sleep_state(g)
 
     # TTS announcement
     msg = _entering_sleep_message(trigger, duration_s)
@@ -356,6 +459,7 @@ def _enter_waking(g: dict[str, Any], *, reason: str) -> None:
     except Exception:
         pass
     g["_sleep_wake_estimate_s"] = estimate
+    _persist_sleep_state(g)
 
     # TTS announcement based on path.
     if reason == "voice_provocation":
@@ -378,6 +482,7 @@ def _enter_awake(g: dict[str, Any]) -> None:
     g["_sleep_phase"] = None
     # Reset turn counter so fullness scoring restarts from this awake epoch.
     g["_sleep_turn_count"] = 0
+    _persist_sleep_state(g)
     # Confirmation TTS if Zeke is present (best-effort: face_recognizer last seen).
     try:
         person = g.get("_recognized_person_id")
@@ -589,8 +694,8 @@ def _run_phase3_sleep_handoff(g: dict[str, Any]) -> dict[str, Any]:
     summary = _llm_summarize(g, prompt_user, max_seconds=60.0)
 
     out_path.write_text(
-        f"# Sleep-session handoff\n\nWritten at {datetime.now().isoformat(timespec='seconds')}\n"
-        f"Wake target: {datetime.fromtimestamp(wake_target).isoformat(timespec='seconds')}\n\n{summary}\n",
+        f"# Sleep-session handoff\n\nWritten at {_iso_local()}\n"
+        f"Wake target: {_iso_local(wake_target)}\n\n{summary}\n",
         encoding="utf-8",
     )
 
@@ -615,7 +720,7 @@ def _write_handoff(out_path: Path, body: str, *, provisional: bool) -> None:
     mark = "  _(provisional — awaiting Iris's summary)_\n" if provisional else ""
     out_path.write_text(
         f"# Awake-session handoff\n\n"
-        f"Written at {datetime.now().isoformat(timespec='seconds')}\n{mark}\n{body}\n",
+        f"Written at {_iso_local()}\n{mark}\n{body}\n",
         encoding="utf-8",
     )
 
@@ -632,7 +737,7 @@ def _bump_handoff_stat(base_dir: Path, key: str) -> None:
     except Exception:  # noqa: BLE001 - a corrupt counter must not break sleep
         stats = {}
     stats[key] = int(stats.get(key, 0)) + 1
-    stats["last_" + key] = datetime.now().isoformat(timespec="seconds")
+    stats["last_" + key] = _iso_local()
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(stats, indent=2), encoding="utf-8")
@@ -727,6 +832,7 @@ def tick(g: dict[str, Any]) -> dict[str, Any]:
 
 
 def _tick_impl(g: dict[str, Any]) -> dict[str, Any]:
+    _restore_sleep_state_once(g)
     state = get_state(g)
 
     # Honor pending requests first.
@@ -787,6 +893,7 @@ def _tick_impl(g: dict[str, Any]) -> dict[str, Any]:
         g["_sleep_state"] = STATE_SLEEPING
         g["_sleep_phase"] = "learning"
         g["_sleep_phase_started_ts"] = time.time()
+        _persist_sleep_state(g)
         # Clear thread refs so next sleep cycle starts clean.
         g.pop("_sleep_phase1_thread", None)
         g.pop("_sleep_phase1_done", None)
@@ -889,7 +996,7 @@ def _wind_down_duration(g: dict[str, Any]) -> float:
 def _seconds_until_schedule_end() -> float:
     """Compute seconds until the configured end_hour."""
     end_h = int(_cfg("schedule", "end_hour", default=5))
-    now = datetime.now()
+    now = _now_local()
     end_dt = now.replace(hour=end_h, minute=0, second=0, microsecond=0)
     if end_dt <= now:
         # Wrap to tomorrow

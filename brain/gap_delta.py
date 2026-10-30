@@ -30,6 +30,65 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 
+_BLOCK = 64 * 1024
+# The files are append-only, so entries are (nearly) in time order. Reading
+# from the END and stopping once we are past the cutoff makes these calls cost
+# O(entries since the cutoff) instead of O(whole file) (code review
+# 2026-10-29: the Stop hook and time_awareness slowed down as logs grew).
+# A few out-of-order lines near the cutoff are tolerated: we stop only after
+# _STOP_AFTER_OLDER consecutive entries at/before the cutoff.
+_STOP_AFTER_OLDER = 5
+
+
+def _iter_lines_reverse(p: Path, block: int = _BLOCK):
+    """Yield the file's lines (decoded, stripped) last-to-first."""
+    with p.open("rb") as f:
+        f.seek(0, 2)
+        pos = f.tell()
+        tail = b""
+        while pos > 0:
+            step = min(block, pos)
+            pos -= step
+            f.seek(pos)
+            chunk = f.read(step) + tail
+            parts = chunk.split(b"\n")
+            tail = parts[0]          # may be a partial line; finish it next round
+            for raw in reversed(parts[1:]):
+                line = raw.strip()
+                if line:
+                    yield line.decode("utf-8", errors="replace")
+        if tail.strip():
+            yield tail.strip().decode("utf-8", errors="replace")
+
+
+def _scan_since(p: Path, since_ts: float, ts_field: str,
+                predicate: Callable[[dict], bool] | None):
+    """Yield matching entries newest-first, stopping past the cutoff."""
+    older_run = 0
+    for line in _iter_lines_reverse(p):
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(e, dict):
+            continue
+        try:
+            ts = float(e.get(ts_field) or 0)
+        except (TypeError, ValueError):
+            continue
+        if ts <= 0:
+            continue                      # no timestamp: skipped, doesn't end the scan
+        if ts <= since_ts:
+            older_run += 1
+            if older_run >= _STOP_AFTER_OLDER:
+                return
+            continue
+        older_run = 0
+        if predicate is not None and not predicate(e):
+            continue
+        yield e
+
+
 def read_since(
     path: str | Path,
     since_ts: float,
@@ -47,37 +106,20 @@ def read_since(
             filtering by status, sender, type, etc. Should return True to keep.
 
     Returns:
-        List of dict entries. Empty list on any read/parse failure (silent
-        — this is meant to be called from hot paths like the Stop hook).
+        List of dict entries, oldest first (file order). Empty list on any
+        read/parse failure (silent — this is meant to be called from hot
+        paths like the Stop hook).
     """
     p = Path(path)
     if not p.is_file():
         return []
     if since_ts <= 0:
         return []
-    out: list[dict] = []
     try:
-        with p.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    e = json.loads(line)
-                except Exception:
-                    continue
-                if not isinstance(e, dict):
-                    continue
-                try:
-                    if float(e.get(ts_field) or 0) <= since_ts:
-                        continue
-                except (TypeError, ValueError):
-                    continue
-                if predicate is not None and not predicate(e):
-                    continue
-                out.append(e)
+        out = list(_scan_since(p, since_ts, ts_field, predicate))
     except Exception:
         return []
+    out.reverse()
     return out
 
 
@@ -97,25 +139,8 @@ def count_since(
         return 0
     n = 0
     try:
-        with p.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    e = json.loads(line)
-                except Exception:
-                    continue
-                if not isinstance(e, dict):
-                    continue
-                try:
-                    if float(e.get(ts_field) or 0) <= since_ts:
-                        continue
-                except (TypeError, ValueError):
-                    continue
-                if predicate is not None and not predicate(e):
-                    continue
-                n += 1
+        for _ in _scan_since(p, since_ts, ts_field, predicate):
+            n += 1
     except Exception:
         return 0
     return n
