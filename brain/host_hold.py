@@ -37,6 +37,11 @@ HELD_FLAG = os.path.join(ROOT, "state", "cognition_held.json")
 VOICE_OFF_FLAG = os.path.join(ROOT, "state", "voice_deliberately_off.json")
 HOLD_AFTER_S = float(os.environ.get("IRIS_HOLD_AFTER_S", "180"))
 HOLD_FAST_AFTER_S = float(os.environ.get("IRIS_HOLD_FAST_AFTER_S", "30"))
+# Code review 10-29 (heads-down awareness): with a tool in flight check() said nothing at all, so a
+# single tool call stuck for hours never counted as held. Past this much silence a running tool is
+# reported too (kind="tool", its own wording). 45 min: under the host's 60 min turn-idle interrupt
+# (IRIS_TURN_IDLE_MAX_S), well over any normal foreground tool (Bash caps at 10 min). 0 = off.
+HOLD_TOOL_STUCK_AFTER_S = float(os.environ.get("IRIS_HOLD_TOOL_STUCK_AFTER_S", "2700"))
 DISCORD_API = "https://discord.com/api/v10"
 
 # Substrings (lower-cased) in a CLI stderr line that name a quota/overload condition.
@@ -107,9 +112,11 @@ class HoldDetector:
     """Pure state machine — no I/O, injectable clock, transitions reported ONCE each."""
 
     def __init__(self, hold_after_s: float = HOLD_AFTER_S, fast_after_s: float = HOLD_FAST_AFTER_S,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 tool_stuck_after_s: float = HOLD_TOOL_STUCK_AFTER_S) -> None:
         self.hold_after_s = float(hold_after_s)
         self.fast_after_s = float(fast_after_s)
+        self.tool_stuck_after_s = float(tool_stuck_after_s)
         self.clock = clock
         self.turn_active = False
         self.source: str | None = None
@@ -191,7 +198,16 @@ class HoldDetector:
             ev, self._pending = self._pending, None
             return ev
         if self.held_since is None:
-            if not self.turn_active or self.tools_in_flight > 0:
+            if not self.turn_active:
+                return None
+            if self.tools_in_flight > 0:
+                silent = self.silent_for(now)
+                if self.tool_stuck_after_s > 0 and silent >= self.tool_stuck_after_s:
+                    self.held_since = now
+                    self.hold_count += 1
+                    return {"event": "held", "kind": "tool", "since": now, "silent_s": round(silent, 1),
+                            "source": self.source, "hint": None,
+                            "reason": f"one tool call running {int(silent)}s with no output on an active turn"}
                 return None
             silent = self.silent_for(now)
             hint_recent = bool(self.stderr_hint) and (now - self.stderr_hint_ts) <= self.hold_after_s
@@ -287,8 +303,15 @@ def format_held_message(info: dict[str, Any]) -> str:
     src = info.get("source") or "a"
     hint = info.get("hint")
     why = f" — the CLI said: `{hint}`" if hint else " (usage cap or API overload, most likely)"
-    return (f"⏳ Held — no model output for {human_duration(float(info.get('silent_s') or 0))} on a {src} turn{why}. "
-            "Your messages are queued, not lost; I'll answer the moment it releases.")
+    dur = human_duration(float(info.get('silent_s') or 0))
+    # Code review 10-29: say RECEIVED, not read - and only promise what is durable (the Discord inbox
+    # persists across a host restart since 99d397c; this DM goes to Discord, so that is what it covers).
+    inbox = "Your Discord messages are saved in my inbox (received, not read yet)"
+    if info.get("kind") == "tool":
+        return (f"⏳ Busy — one tool call has been running {dur} with no output on a {src} turn. "
+                f"{inbox}; I'll see them when it finishes.")
+    return (f"⏳ Held — no model output for {dur} on a {src} turn{why}. "
+            f"{inbox}; I'll answer the moment it releases.")
 
 
 def format_released_message(info: dict[str, Any]) -> str:

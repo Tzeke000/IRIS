@@ -63,6 +63,30 @@ def test_tool_in_flight_is_not_a_hold() -> None:
     assert ev and ev["event"] == "held", ev
 
 
+def test_tool_stuck_far_past_normal_is_reported_once_then_released() -> None:
+    """Code review 10-29: a tool call stuck for hours used to be invisible (check() returned None
+    whenever a tool was in flight)."""
+    c = Clock()
+    d = hh.HoldDetector(hold_after_s=180, clock=c, tool_stuck_after_s=2700)
+    d.turn_started("discord")
+    d.tool_started()
+    c.tick(2699)
+    assert d.check() is None
+    c.tick(2)
+    ev = d.check()
+    assert ev and ev["event"] == "held" and ev["kind"] == "tool" and ev["silent_s"] >= 2700, ev
+    assert d.check() is None, "reported ONCE"
+    c.tick(600)
+    d.tool_finished()          # the tool finally returns -> activity -> released
+    rel = d.check()
+    assert rel and rel["event"] == "released" and rel["how"] == "output resumed", rel
+    off = hh.HoldDetector(hold_after_s=180, clock=c, tool_stuck_after_s=0)
+    off.turn_started("voice")
+    off.tool_started()
+    c.tick(99999)
+    assert off.check() is None, "0 disables the stuck-tool report"
+
+
 def test_turn_end_releases_a_hold() -> None:
     c = Clock()
     d = hh.HoldDetector(hold_after_s=60, clock=c)
@@ -190,7 +214,10 @@ def test_discord_send_never_raises() -> None:
 
 def test_messages_read_right() -> None:
     held = hh.format_held_message({"silent_s": 181, "source": "discord", "hint": None})
-    assert held.startswith("⏳ Held") and "3m 01s" in held and "queued, not lost" in held
+    assert held.startswith("⏳ Held") and "3m 01s" in held and "received, not read" in held
+    assert "not lost" not in held, "a restart used to make that untrue - promise only the durable inbox"
+    stuck = hh.format_held_message({"silent_s": 2700, "source": "discord", "kind": "tool"})
+    assert stuck.startswith("⏳ Busy") and "45m" in stuck and "received, not read" in stuck
     held2 = hh.format_held_message({"silent_s": 35, "source": "voice", "hint": "429 rate limit"})
     assert "`429 rate limit`" in held2
     rel = hh.format_released_message({"duration_s": 3.4 * 3600})
