@@ -48,8 +48,8 @@ pkill -u "$(id -u)" -f "$ROOT/iris_body_host.py" 2>/dev/null && log "  killed st
 log "sweep 2/3: orphan cognition (claude with the Agent-SDK BODY host prompt)"
 pkill -u "$(id -u)" -f "Agent-SDK BODY host" 2>/dev/null && log "  killed orphan claude"
 rm -f "$ROOT/state/iris.pid"
-log "sweep 3/3: freeing ports 5876 8769 8770"
-for p in 5876 8769 8770; do fuser -k -n tcp "$p" >/dev/null 2>&1 && log "  freed :$p"; done
+log "sweep 3/3: freeing port 5876 (NOT 8769/8770 — those are the systemd iris-mouth/iris-ears units; killing them forced a ~10 min Fish re-warm every launch — code review 10-29 fix-first #2)"
+fuser -k -n tcp 5876 >/dev/null 2>&1 && log "  freed :5876"
 sleep 2
 
 # Services the tower's .bat starts that are NOT ported yet - named so nobody assumes they run:
