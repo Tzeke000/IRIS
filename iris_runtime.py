@@ -3976,6 +3976,46 @@ def plan_advance(plan_id: str) -> dict:
 
 
 @mcp.tool()
+def task_checkpoint(goal: str = "", steps_done: list[str] | None = None,
+                    outstanding: list[str] | None = None, files: list[str] | None = None,
+                    running_jobs: list[str] | None = None, locks: list[str] | None = None,
+                    next_safe_action: str = "", task_id: str = "", mode: str = "write",
+                    n: int = 5) -> dict:
+    """Record WHERE I AM before I switch away (V3 P1-H1): goal, steps done, outstanding work,
+    files touched, running jobs, locks held, the next SAFE action. Stored as the task's
+    checkpoint in the V3 event store (state/v3/events.sqlite).
+
+    mode='write' (default): no task_id -> a new task (kind 'checkpoint') is created; returns task_id.
+    mode='read': task_id -> that task's checkpoint; no task_id -> the latest n checkpoints of open tasks.
+    Call it BEFORE a restart, a context switch, or handing work to a helper."""
+    try:
+        from brain import iris_events
+        store = iris_events.get_store()
+        if mode == "read":
+            if task_id:
+                return {"ok": True, "task_id": task_id, "checkpoint": store.read_checkpoint(task_id)}
+            rows = [t for t in store.open_tasks() if t.get("checkpoint")]
+            rows.sort(key=lambda t: (t["checkpoint"] or {}).get("_ts") or 0, reverse=True)
+            return {"ok": True, "checkpoints": [
+                {"task_id": t["task_id"], "kind": t.get("kind"), "status": t.get("status"),
+                 "checkpoint": t["checkpoint"]} for t in rows[:max(1, int(n))]]}
+        cp = {"goal": goal, "steps_done": list(steps_done or []), "outstanding": list(outstanding or []),
+              "files": list(files or []), "running_jobs": list(running_jobs or []),
+              "locks": list(locks or []), "next_safe_action": next_safe_action}
+        if not task_id:
+            r = store.create_task(goal or "checkpoint", kind="checkpoint", actor="iris")
+            if r is None or not store.write_checkpoint(r.id, cp):  # write_checkpoint stamps _ts
+                return {"ok": False, "error": f"event store: {store.last_error}"}
+            return {"ok": True, "task_id": r.id, "created": True}
+        if not store.write_checkpoint(task_id, cp):
+            return {"ok": False, "task_id": task_id,
+                    "error": f"no such task, or store error: {store.last_error}"}
+        return {"ok": True, "task_id": task_id, "created": False}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def system_stats() -> dict:
     """System resource stats — CPU, RAM, GPU, disk usage. Useful for
     knowing whether something's bogging down the machine."""

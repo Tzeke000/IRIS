@@ -15,3 +15,14 @@ TasksMax=4096
 # Zeke 10-11: I always get priority - workers get a small share of CPU/IO when we compete.
 CPUWeight=20
 IOWeight=20
+# 2026-10-30 (V3 P2-R4b): a hard CPU ceiling for ALL workers together. The VM sees 36 vCPUs (one virtual
+# socket of the 2-socket R740). 2400% = 24 vCPUs, so even with every worker spinning, 12 vCPUs stay free
+# for the live stack (host + runtime + Claude CLI + ears/mouth CPU threads + STT pre/post-processing),
+# whose latency is what Zeke hears. CPUWeight=20 (vs the core's default 100) still decides who wins
+# inside the shared part. Per job, worker.py adds CPUQuota=1200% (12 vCPUs) so one render can't starve
+# its siblings under the 3-worker cap. Renders via render.sh run in the child iris-workers-render.slice
+# and inherit this ceiling.
+# !! Inert until the cpu controller is delegated to the user manager - see
+#    scripts/server/systemd/system/user@.service.d/iris-delegate.conf (10-30: only memory+pids were, so
+#    the CPUWeight=20 above has never actually applied).
+CPUQuota=2400%
