@@ -1384,6 +1384,14 @@ async def _inbox_post_tool_hook(input_data, tool_use_id, context):
     must not break a tool call)."""
     try:
         _INBOX["last_tool_ts"] = time.time()
+        # 10-30 bug: SDK hooks ALSO fire for sub-agent tool calls (Workflow/Agent helpers), so
+        # Zeke's DMs were drained into a helper's context and never reached me. agent_id is
+        # present only inside a sub-agent - leave the inbox for the main thread.
+        try:
+            if (input_data or {}).get("agent_id"):
+                return {}
+        except AttributeError:
+            pass
         turn = _INBOX["turn"]
         if turn is None or not turn.active:
             return {}
