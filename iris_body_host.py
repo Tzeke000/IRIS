@@ -2230,7 +2230,16 @@ async def llm_pending_poller(queue, loop, turn):
                 except Exception:
                     _past_dl = False
                 if _past_dl:
-                    continue                   # caller's deadline passed; it marks itself abandoned
+                    # caller's deadline passed; a live caller marks itself abandoned - but one whose process
+                    # DIED (e.g. a scene caption filed 1 min before a restart, 10-30) never does, and the file
+                    # sat 'pending' for hours. Past deadline + 60 s grace => expire it (CAS, never clobbers).
+                    try:
+                        if now > float(d["deadline_ts"]) + 60.0:
+                            from brain import iris_llm as _il
+                            _il._set_status_if_pending(path, "expired", "host: past caller deadline")
+                    except Exception:
+                        pass
+                    continue
                 if age > LLM_PENDING_TTL_S:
                     # dead request: caller gave up long ago — mark expired (iris_llm prunes
                     # terminal-status files after 1h) and never nudge about it.
