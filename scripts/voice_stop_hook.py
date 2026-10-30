@@ -424,6 +424,20 @@ def _check_and_auto_forward(transcript_path: str) -> None:
     # of this feature. For now, only Discord is auto-forwarded.
 
 
+_HOOK_OWNER = "stop_hook"
+
+
+def _claim_chat(req: dict) -> bool:
+    """Claim the chat for this rewake so the host's queued copy is dropped at fire time
+    (10-29 code review: both paths could deliver one chat). FAIL-OPEN: any error = deliver."""
+    try:
+        from brain import iris_chat as _ic
+        _ic.configure(ROOT)
+        return bool(_ic.claim(str(req.get("id")), _HOOK_OWNER))
+    except Exception:
+        return True
+
+
 def _next_pending_chat() -> dict | None:
     """Return the OLDEST pending chat request (FIFO across modalities), or None."""
     if not CHAT_DIR.exists():
@@ -441,6 +455,12 @@ def _next_pending_chat() -> dict | None:
             continue
         if data.get("trusted") is False:
             continue   # 10-29: untrusted senders are the HOST's (talk-only turn), never a full-tool rewake
+        try:   # 10-29 code review: the host already claimed it (live lease) -> it delivers, not me
+            if (data.get("claimed_by") and data.get("claimed_by") != _HOOK_OWNER
+                    and float(data.get("claimed_until") or 0.0) > _t.time()):
+                continue
+        except Exception:
+            pass
         ts = float(data.get("ts") or 0.0)
         # Phase 41: TTL bumped 300→600s. Orb's HTTP long-poll is 60s; a
         # 5min cap meant a request could expire from the hook before the
@@ -846,7 +866,11 @@ def _next_pending_llm() -> dict | None:
                 continue
         except Exception:
             pass
-        candidates.append((ts, data))
+        try:   # 10-29 code review: priority (lower = sooner), then age - not strict FIFO
+            pri = int(data.get("priority", 5))
+        except Exception:
+            pri = 5
+        candidates.append(((pri, ts), data))
     if not candidates:
         return None
     candidates.sort(key=lambda kv: kv[0])
@@ -1177,6 +1201,9 @@ def _main_locked() -> int:
         f"esc={bool(pending_escalation)} runtime_alive={runtime_alive}"
     )
     sections: list[str] = []
+    if pending_chat and runtime_alive and not _claim_chat(pending_chat):
+        _hook_log("chat " + str(pending_chat.get("id")) + " claimed by the host meanwhile - skipped")
+        pending_chat = None
     if pending_chat:
         sections.append(_chat_rewake(pending_chat))
     if pending_escalation:
@@ -1188,13 +1215,12 @@ def _main_locked() -> int:
 
     if sections:
         if not runtime_alive:
-            # Same per-type semantics as the unbatched hook: chat + llm expire so
-            # their long-polls fail cleanly; sibling letters sit and wait for the
-            # runtime to come back (no expiry path).
-            if pending_chat:
-                _expire_pending(CHAT_DIR, pending_chat.get("id"))
-            if pending_llm:
-                _expire_pending(LLM_DIR, pending_llm.get("id"))
+            # 10-29 code review: a slow /health used to EXPIRE Zeke's pending orb chat (and the
+            # brain/* request) - a slow runtime dropped his message instead of holding it. Now
+            # everything stays PENDING: no rewake this fire (the backoff), and the next Stop
+            # fire or the host's orb poller retries. Expiry happens only once a request's own
+            # deadline/TTL passes (iris_chat/iris_llm scanners).
+            _hook_log("runtime not reachable - left pending, will retry on the next Stop")
             return 0
         if len(sections) > 1:
             header = (
@@ -1218,12 +1244,21 @@ def _main_locked() -> int:
     return 0
 
 
+_HOOK_LOG_MAX_BYTES = 1_000_000   # rotate stop_hook.log -> stop_hook.log.1 past ~1 MB (10-29 review)
+
+
 def _hook_log(msg: str) -> None:
     """Append one line per hook run to state/stop_hook.log (2026-09-10, Iris). The hook had
-    no log at all, so 'nudged but never delivered' could not be diagnosed. Best-effort."""
+    no log at all, so 'nudged but never delivered' could not be diagnosed. Best-effort.
+    Size-rotated (one .1 generation) so it can't grow forever."""
     try:
         import datetime as _dt
         log_path = LLM_DIR.parent / "stop_hook.log"
+        try:
+            if log_path.stat().st_size > _HOOK_LOG_MAX_BYTES:
+                os.replace(str(log_path), str(log_path) + ".1")
+        except Exception:
+            pass
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(_dt.datetime.now().isoformat(timespec="seconds") + " " + msg + chr(10))
     except Exception:
@@ -1231,19 +1266,20 @@ def _hook_log(msg: str) -> None:
 
 
 def _expire_pending(dir_path: Path, request_id: str | None) -> None:
-    """Mark a pending request as expired so its long-poll fails cleanly
-    rather than waiting the full timeout."""
+    """Mark a pending request as expired so its long-poll fails cleanly rather than waiting the
+    full timeout. 10-29: compare-and-set under the bridge's cross-process lock + atomic replace
+    (an answer that landed meanwhile is never clobbered). No longer called on a slow runtime."""
     if not request_id:
         return
     p = dir_path / f"{request_id}.json"
     if not p.is_file():
         return
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and data.get("status") == "pending":
-            data["status"] = "expired"
-            data["expired_reason"] = "iris_runtime not reachable"
-            p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        if dir_path == CHAT_DIR:
+            from brain import iris_chat as _mod
+        else:
+            from brain import iris_llm as _mod
+        _mod._set_status_if_pending(p, "expired", "iris_runtime not reachable")
     except Exception:
         pass
 

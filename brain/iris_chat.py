@@ -21,15 +21,96 @@ run.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import tempfile
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+try:
+    import fcntl as _fcntl
+except Exception:            # non-POSIX (the old Windows tower): thread lock only, as before
+    _fcntl = None
 
-_LOCK = threading.Lock()
+
+# 10-29 code review (message bridges): the orb server, the runtime (chat_reply), the body host and
+# the Stop hook are separate PROCESSES writing state/iris_chat. Every write + flag refresh now runs
+# under _xlock(): this re-entrant thread lock PLUS an fcntl.flock on state/iris_chat/.lock. If the
+# flock can't be had within ~2 s it fails OPEN (the old behaviour) rather than wedging the caller.
+_LOCK = threading.RLock()
+_TL = threading.local()
+_XLOCK_WAIT_S = 2.0
+_LOCK_NAME = ".lock"
+# Claim lease (10-29 code review): the host poller and the Stop hook could BOTH deliver one chat.
+# Whoever delivers first claims it (status stays "pending" so chat_reply/wait_for_reply are
+# unchanged); a different owner skips it until the lease runs out.
+_CLAIM_LEASE_S = 180.0
+
+
+@contextlib.contextmanager
+def _xlock(dir_path: Optional[Path] = None):
+    with _LOCK:
+        depth = getattr(_TL, "depth", 0)
+        fh = None
+        if depth == 0 and _fcntl is not None:
+            try:
+                d = Path(dir_path) if dir_path is not None else _chat_dir()
+                d.mkdir(parents=True, exist_ok=True)
+                fh = open(d / _LOCK_NAME, "a+")
+                t_end = time.monotonic() + _XLOCK_WAIT_S
+                while True:
+                    try:
+                        _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() > t_end:
+                            raise
+                        time.sleep(0.01)
+            except Exception:
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except Exception:
+                        pass
+                fh = None        # fail-open
+        _TL.depth = depth + 1
+        try:
+            yield
+        finally:
+            _TL.depth = depth
+            if fh is not None:
+                try:
+                    _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+                except Exception:
+                    pass
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Unique tmp name + fsync + os.replace (readers never see half-written JSON)."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.stem, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False))
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        raise
 _BASE: Path | None = None
 _DIR_NAME = "state/iris_chat"
 _FLAG_NAME = ".pending"
@@ -75,7 +156,13 @@ def _request_path(request_id: str) -> Path:
 
 
 def _refresh_flag() -> None:
-    """Set or clear the .pending flag file based on current state on disk."""
+    """Set or clear the .pending flag file based on current state on disk. Under _xlock(), so a
+    submit in another process can't land between the scan and the unlink (10-29 flag race)."""
+    with _xlock():
+        _refresh_flag_locked()
+
+
+def _refresh_flag_locked() -> None:
     has_pending = False
     for path in _chat_dir().glob("*.json"):
         try:
@@ -124,16 +211,84 @@ def submit(user_text: str, source: str = "orb", trusted: bool = True,
         "answered_ts": None,
     }
     path = _request_path(request_id)
-    tmp = path.with_suffix(".json.tmp")
-    with _LOCK:
-        tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(path)
-        _refresh_flag()
+    with _xlock():
+        _atomic_write_json(path, entry)
+        _refresh_flag_locked()
     return request_id
+
+
+def _set_status_if_pending(path: Path, status: str, reason: Optional[str] = None) -> bool:
+    """Compare-and-set under the cross-process lock: pending -> status, atomic replace. An answer
+    that landed in between is never overwritten (the 10-29 lost-reply race)."""
+    path = Path(path)
+    with _xlock(path.parent):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if not isinstance(data, dict) or data.get("status") != "pending":
+            return False
+        data["status"] = status
+        data[status + "_ts"] = time.time()
+        if reason:
+            data[status + "_reason"] = str(reason)
+        try:
+            _atomic_write_json(path, data)
+        except Exception:
+            return False
+        if path.parent == _chat_dir():
+            _refresh_flag_locked()
+    return True
+
+
+def claim(request_id: str, owner: str, lease_s: float = _CLAIM_LEASE_S) -> bool:
+    """Atomically claim a pending request for delivery: True iff it is still pending AND unclaimed,
+    claimed by this same owner (renewal), or its lease has run out. Status stays "pending", so
+    chat_reply / wait_for_reply / is_pending behave exactly as before."""
+    path = _request_path(str(request_id))
+    with _xlock():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if not isinstance(data, dict) or data.get("status") != "pending":
+            return False
+        now = time.time()
+        holder = data.get("claimed_by")
+        try:
+            until = float(data.get("claimed_until") or 0.0)
+        except Exception:
+            until = 0.0
+        if holder and holder != owner and until > now:
+            return False
+        data["claimed_by"] = str(owner)
+        data["claimed_until"] = now + float(lease_s)
+        try:
+            _atomic_write_json(path, data)
+        except Exception:
+            return True      # fail-open: deliver (the pre-claim behaviour) rather than drop
+    return True
+
+
+def claimed_by_other(data: dict, owner: str) -> bool:
+    """For scanners: is this request under a live lease held by someone else?"""
+    try:
+        holder = data.get("claimed_by")
+        return bool(holder) and holder != owner and float(data.get("claimed_until") or 0.0) > time.time()
+    except Exception:
+        return False
 
 
 def next_pending() -> Optional[dict[str, Any]]:
     """Return the OLDEST pending request (FIFO across all modalities)."""
+    pend = list_pending()
+    return pend[0] if pend else None
+
+
+def list_pending() -> list[dict[str, Any]]:
+    """Every live pending request, oldest first (10-29 code review: the host used to see only the
+    oldest one, so one stale request it had already 'seen' hid every newer one). Expires (CAS,
+    atomic) anything past the TTL."""
     candidates: list[tuple[float, dict[str, Any]]] = []
     for path in _chat_dir().glob("*.json"):
         try:
@@ -146,18 +301,12 @@ def next_pending() -> Optional[dict[str, Any]]:
             continue
         ts = float(data.get("ts") or 0.0)
         if (time.time() - ts) > _REQUEST_TTL_S:
-            # mark as expired so we don't keep trying
-            data["status"] = "expired"
-            try:
-                path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-            except Exception:
-                pass
+            # mark as expired so we don't keep trying (compare-and-set: an answer wins)
+            _set_status_if_pending(path, "expired", "ttl")
             continue
         candidates.append((ts, data))
-    if not candidates:
-        return None
     candidates.sort(key=lambda kv: kv[0])
-    return candidates[0][1]
+    return [d for _ts, d in candidates]
 
 
 def is_pending(request_id: str) -> bool:
@@ -185,7 +334,7 @@ def mark_answered(request_id: str, reply: str) -> bool:
     two concurrent mark_answered calls on the same id both succeed.
     """
     path = _request_path(request_id)
-    with _LOCK:
+    with _xlock():
         if not path.exists():
             return False
         try:
@@ -200,10 +349,8 @@ def mark_answered(request_id: str, reply: str) -> bool:
         data["status"] = "answered"
         data["reply"] = str(reply or "")
         data["answered_ts"] = time.time()
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(path)
-        _refresh_flag()
+        _atomic_write_json(path, data)
+        _refresh_flag_locked()
     return True
 
 
@@ -222,8 +369,7 @@ def wait_for_reply(request_id: str, timeout_s: float = 60.0) -> Optional[str]:
             data = None
             for _ in range(3):
                 try:
-                    with _LOCK:
-                        raw = path.read_text(encoding="utf-8")
+                    raw = path.read_text(encoding="utf-8")   # writes are atomic replaces
                     data = json.loads(raw)
                     break
                 except json.JSONDecodeError:

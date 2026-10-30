@@ -52,6 +52,7 @@ Fallback contract with the Stop hook (scripts/voice_stop_hook.py):
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 import threading
 import time
@@ -78,6 +79,12 @@ except ImportError as e:
 # from here; calls before a session is attached are dropped (logged).
 _session: Any = None
 _session_lock = threading.Lock()
+# The event loop that OWNS the session's anyio write stream (FastMCP's main loop, captured at
+# record_session time). 10-29 code review, verified: iris_attention_sources runs emit() on its own
+# "iris-attention-loop" thread, and anyio memory streams are not thread-safe - so a send from
+# that loop is handed to the owning loop instead (run_coroutine_threadsafe).
+_session_loop: Any = None
+_CROSS_LOOP_SEND_TIMEOUT_S = 5.0
 
 # Per-source rate limiters: {source_name: (last_emit_ts, min_interval_s)}.
 # Configured via configure_rate_limit(); enforced inside emit().
@@ -114,10 +121,15 @@ def record_session(session: Any) -> None:
     successful call wins; later calls are no-ops as long as the session is
     still attached. If the session goes away (CC disconnects), the next tool
     call will refresh it."""
-    global _session
+    global _session, _session_loop
+    try:
+        _loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _loop = None          # recorded from a worker thread: emit() falls back to a direct send
     with _session_lock:
         if _session is None:
             _session = session
+            _session_loop = _loop
             print(f"[iris_channel] session attached id={id(session)}",
                   file=sys.stderr, flush=True)
 
@@ -247,7 +259,7 @@ async def emit(content: str, source: str = "iris", **meta: str) -> bool:
         # Bypasses BaseSession.send_notification() because that requires a
         # typed ClientNotification/ServerNotification union member, and
         # claude/channel isn't one.
-        await session._write_stream.send(SessionMessage(message=msg))
+        await _send_on_owner_loop(session, SessionMessage(message=msg))
         return True
     except Exception as e:
         # Don't raise — losing one event should not crash the producer.
@@ -260,6 +272,26 @@ async def emit(content: str, source: str = "iris", **meta: str) -> bool:
             with _session_lock:
                 _session = None
         return False
+
+
+async def _send_on_owner_loop(session: Any, message: Any) -> None:
+    """Write to the session stream ON THE LOOP THAT OWNS IT. Same loop (or owner unknown) = the old
+    direct await; another thread's loop = schedule on the owner and await the result here."""
+    with _session_lock:
+        owner = _session_loop if session is _session else None
+    try:
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        current = None
+    if owner is None or owner is current or not owner.is_running():
+        await session._write_stream.send(message)
+        return
+    fut = asyncio.run_coroutine_threadsafe(session._write_stream.send(message), owner)
+    try:
+        await asyncio.wait_for(asyncio.wrap_future(fut), timeout=_CROSS_LOOP_SEND_TIMEOUT_S)
+    except BaseException:
+        fut.cancel()
+        raise
 
 
 def apply_channel_capability(mcp: Any) -> None:

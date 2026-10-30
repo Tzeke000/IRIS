@@ -126,11 +126,53 @@ def host_eyes_alive(g: Optional[dict[str, Any]] = None, *, now: Optional[float] 
 _CACHE: dict[str, Any] = {"path": "", "mtime": -1.0, "rows": []}
 
 
+# 10-29 code review: situations.jsonl grew without bound (readers only ever look at the last
+# TAIL_LINES rows / MAX_AGE_S). Past LEDGER_MAX_BYTES the file is compacted to its newest
+# LEDGER_KEEP_LINES lines (atomic replace, under an flock shared with other appenders). Fail-open.
+LEDGER_MAX_BYTES = 4 * 1024 * 1024
+LEDGER_KEEP_LINES = TAIL_LINES
+
+
+def _compact(p: str) -> None:
+    with open(p, "rb") as f:
+        lines = f.read().split(b"\n")
+    keep = [ln for ln in lines if ln.strip()][-LEDGER_KEEP_LINES:]
+    tmp = p + ".compact.tmp"
+    with open(tmp, "wb") as f:
+        f.write(b"\n".join(keep) + b"\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, p)
+
+
 def _append(row: dict[str, Any]) -> None:
     p = ledger_path()
     os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    data = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
+    lk = None
+    try:
+        import fcntl as _fcntl
+        lk = open(p + ".lock", "a+")
+        _fcntl.flock(lk.fileno(), _fcntl.LOCK_EX)
+    except Exception:
+        lk = None
+    try:
+        fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, data)          # one write on an O_APPEND fd: lines can't interleave
+        finally:
+            os.close(fd)
+        try:
+            if os.path.getsize(p) > LEDGER_MAX_BYTES:
+                _compact(p)
+        except Exception:
+            pass
+    finally:
+        if lk is not None:
+            try:
+                lk.close()                  # releases the flock
+            except Exception:
+                pass
     _CACHE["mtime"] = -1.0
 
 

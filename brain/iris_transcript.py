@@ -51,39 +51,69 @@ def append(
     entry = {
         "id": uuid.uuid4().hex[:12],
         "ts": time.time(),
-        "iso": datetime.now().isoformat(timespec="seconds"),
+        # 10-29 code review: aware local time (RFC 3339 with offset), not a naive string.
+        "iso": datetime.now().astimezone().isoformat(timespec="seconds"),
         "role": str(role),
         "source": str(source),
         "modality": str(modality),
         "content": str(content or "")[:8000],
     }
     p = _path()
+    # 10-29 code review: ONE os.write on an O_APPEND fd. A buffered text write of a long line can
+    # be split across syscalls, so two processes (runtime + body host) could interleave lines.
+    data = (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
     with _LOCK:
         p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        fd = os.open(str(p), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            n = os.write(fd, data)
+            if n < len(data):          # practically never for a regular file; finish the line
+                os.write(fd, data[n:])
             # Round-2 fix 3.9 (2026-10-01): fsync each turn. The power-loss zero-fill that left
             # 12,889 NUL bytes mid-file (every reader silently skipped them) came from unflushed
             # pages; one fsync per conversation turn bounds the loss to the last entry.
             try:
-                f.flush()
-                os.fsync(f.fileno())
+                os.fsync(fd)
             except Exception:
                 pass
+        finally:
+            os.close(fd)
     return entry
+
+
+_TAIL_CHUNK = 64 * 1024
+
+
+def _tail_lines(p: Path, n: int) -> list[str]:
+    """Last n lines without reading the whole file (10-29 code review: recent() re-read the
+    entire, ever-growing transcript on every call). Reads backwards in 64 KB chunks."""
+    with open(p, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        end = f.tell()
+        pos = end
+        data = b""
+        while pos > 0 and data.count(b"\n") <= n:
+            step = min(_TAIL_CHUNK, pos)
+            pos -= step
+            f.seek(pos)
+            data = f.read(step) + data
+    lines = data.decode("utf-8", "replace").splitlines()
+    if pos > 0 and lines:
+        lines = lines[1:]          # first line may be partial
+    return lines[-n:]
 
 
 def recent(n: int = 100) -> list[dict[str, Any]]:
     p = _path()
     if not p.is_file():
         return []
-    with _LOCK:
-        try:
-            lines = p.read_text(encoding="utf-8").splitlines()
-        except Exception:
-            return []
+    n = max(1, int(n))
+    try:
+        lines = _tail_lines(p, n)
+    except Exception:
+        return []
     out: list[dict[str, Any]] = []
-    for line in lines[-max(1, int(n)) :]:
+    for line in lines:
         line = line.strip()
         if not line:
             continue

@@ -30,7 +30,7 @@ optional rather than required (matches the "optional" entries in the brain
 catalog).
 
 Concurrency note: a single Iris CC session handles one request at a time.
-Requests queue (FIFO across kinds). For per-turn use cases (extract preferences
+Requests queue by (priority, age) - see _KIND_PRIORITY. For per-turn use cases (extract preferences
 mid-turn), expect 5-30s latency. For background use cases (inner monologue,
 journal reflection), latency doesn't matter.
 
@@ -42,20 +42,118 @@ level audit trail. Plain functions + explicit kind tags are cleaner.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import tempfile
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+try:
+    import fcntl as _fcntl
+except Exception:            # non-POSIX (the old Windows tower): thread lock only, as before
+    _fcntl = None
 
-_LOCK = threading.Lock()
+
+# 10-29 code review (message bridges): _LOCK used to be a process-local threading.Lock while the
+# runtime, the body host, the Stop hook and brain/* callers all write state/iris_llm. Now every
+# write + every flag refresh runs under _xlock(): this thread lock (re-entrant, so nested helpers
+# don't deadlock) PLUS an fcntl.flock on state/iris_llm/.lock shared by every process. If the
+# flock can't be taken within ~2 s it fails OPEN (old behaviour) rather than wedging a caller.
+_LOCK = threading.RLock()
+_TL = threading.local()
+_XLOCK_WAIT_S = 2.0
+_LOCK_NAME = ".lock"
+
+
+@contextlib.contextmanager
+def _xlock(dir_path: Optional[Path] = None):
+    with _LOCK:
+        depth = getattr(_TL, "depth", 0)
+        fh = None
+        if depth == 0 and _fcntl is not None:
+            try:
+                d = Path(dir_path) if dir_path is not None else _llm_dir()
+                d.mkdir(parents=True, exist_ok=True)
+                fh = open(d / _LOCK_NAME, "a+")
+                t_end = time.monotonic() + _XLOCK_WAIT_S
+                while True:
+                    try:
+                        _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() > t_end:
+                            raise
+                        time.sleep(0.01)
+            except Exception:
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except Exception:
+                        pass
+                fh = None        # fail-open
+        _TL.depth = depth + 1
+        try:
+            yield
+        finally:
+            _TL.depth = depth
+            if fh is not None:
+                try:
+                    _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+                except Exception:
+                    pass
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+
+
+def _atomic_write_json(path: Path, data: dict, indent: Optional[int] = 2) -> None:
+    """Unique tmp name + fsync + os.replace: readers never see half-written JSON and two writers
+    never share a tmp file."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.stem, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False, indent=indent))
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        raise
 _BASE: Path | None = None
 _DIR_NAME = "state/iris_llm"
 _FLAG_NAME = ".pending"
 _REQUEST_TTL_S = 600.0  # 10 min — longer than chat because some kinds (reflection) take time
+
+# 10-29 code review: the queue was strictly FIFO, so a 3-min reflect held up a 30 s classify_intent
+# a live turn was waiting on. Each request now carries `priority` (lower = sooner); scanners sort by
+# (priority, ts). Callers may pass priority=; otherwise it comes from the kind (default 5).
+_DEFAULT_PRIORITY = 5
+_KIND_PRIORITY = {
+    "classify_intent": 1,
+    "extract_preferences": 4,
+    "summarize": 4,
+    "extract_facts": 6,
+    "describe_image": 5,
+    "reflect": 8,
+}
+
+
+def _priority_of(data: dict) -> int:
+    try:
+        return int(data.get("priority", _DEFAULT_PRIORITY))
+    except Exception:
+        return _DEFAULT_PRIORITY
 
 
 def configure(base_dir: Path | str) -> None:
@@ -128,6 +226,13 @@ def _prune_old() -> int:
 
 
 def _refresh_flag() -> None:
+    """Set/clear .pending from what is on disk. Runs under _xlock() (re-entrant), so a submit in
+    another process can't land between this scan and the unlink (the 10-29 flag-delete race)."""
+    with _xlock():
+        _refresh_flag_locked()
+
+
+def _refresh_flag_locked() -> None:
     has_pending = False
     for path in _llm_dir().glob("*.json"):
         try:
@@ -159,11 +264,11 @@ def _past_deadline(data: dict) -> bool:
     return (now - float(data.get("ts") or 0.0)) > _REQUEST_TTL_S
 
 
-def _set_status_if_pending(path: Path, status: str) -> bool:
-    """Compare-and-set under the lock: flip pending -> status, atomically (unique tmp name, replace).
-    Never overwrites an answer that landed in between."""
-    import tempfile
-    with _LOCK:
+def _set_status_if_pending(path: Path, status: str, reason: Optional[str] = None) -> bool:
+    """Compare-and-set under the cross-process lock: flip pending -> status, atomically (unique
+    tmp name, replace). Never overwrites an answer that landed in between. Refreshes the flag."""
+    path = Path(path)
+    with _xlock(path.parent):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
@@ -172,13 +277,14 @@ def _set_status_if_pending(path: Path, status: str) -> bool:
             return False
         data["status"] = status
         data[status + "_ts"] = time.time()
+        if reason:
+            data[status + "_reason"] = str(reason)
         try:
-            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.stem, suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps(data, ensure_ascii=False, indent=2))
-            os.replace(tmp, path)
+            _atomic_write_json(path, data)
         except Exception:
             return False
+        if path.parent == _llm_dir():
+            _refresh_flag_locked()
     return True
 
 
@@ -192,7 +298,8 @@ def submit(prompt: str, kind: str = "general",
            requester: str = "brain",
            image_b64: Optional[str] = None,
            image_path: Optional[str] = None,
-           deadline_s: Optional[float] = None) -> str:
+           deadline_s: Optional[float] = None,
+           priority: Optional[int] = None) -> str:
     """Write a new pending LLM request, return request_id.
 
     If image_b64 or image_path is given, the request is multimodal — Iris
@@ -208,6 +315,7 @@ def submit(prompt: str, kind: str = "general",
         # so every scanner skips it (and the caller marks it "abandoned" when it gives up).
         "deadline_ts": _now + float(deadline_s if deadline_s else _REQUEST_TTL_S),
         "kind": str(kind),
+        "priority": int(priority) if priority is not None else _KIND_PRIORITY.get(str(kind), _DEFAULT_PRIORITY),
         "requester": str(requester),
         "prompt": str(prompt or "")[:16000],
         "context": dict(context or {}),
@@ -224,11 +332,9 @@ def submit(prompt: str, kind: str = "general",
     else:
         entry["has_image"] = False
     path = _request_path(request_id)
-    tmp = path.with_suffix(".json.tmp")
-    with _LOCK:
-        tmp.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
-        _refresh_flag()
+    with _xlock():
+        _atomic_write_json(path, entry)
+        _refresh_flag_locked()
     # Opportunistic bounded prune (outside the lock) so terminal files can't accumulate
     # unbounded — each new request cleans a little of the old. (2026-06-29 fix.)
     _prune_old()
@@ -236,8 +342,8 @@ def submit(prompt: str, kind: str = "general",
 
 
 def next_pending() -> Optional[dict[str, Any]]:
-    """Return the OLDEST pending LLM request (FIFO across kinds)."""
-    candidates: list[tuple[float, dict[str, Any]]] = []
+    """Return the most urgent pending LLM request: lowest priority number, then oldest."""
+    candidates: list[tuple[tuple[int, float], dict[str, Any]]] = []
     for path in _llm_dir().glob("*.json"):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -251,7 +357,7 @@ def next_pending() -> Optional[dict[str, Any]]:
         if _past_deadline(data):
             _set_status_if_pending(path, "expired")
             continue
-        candidates.append((ts, data))
+        candidates.append(((_priority_of(data), ts), data))
     if not candidates:
         return None
     candidates.sort(key=lambda kv: kv[0])
@@ -265,7 +371,7 @@ def mark_answered(request_id: str, reply: str) -> bool:
     where two concurrent mark_answered calls on the same id both succeed.
     """
     path = _request_path(request_id)
-    with _LOCK:
+    with _xlock():
         if not path.exists():
             return False
         try:
@@ -279,10 +385,8 @@ def mark_answered(request_id: str, reply: str) -> bool:
         data["status"] = "answered"
         data["reply"] = str(reply or "")
         data["answered_ts"] = time.time()
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
-        _refresh_flag()
+        _atomic_write_json(path, data)
+        _refresh_flag_locked()
     return True
 
 
@@ -296,8 +400,7 @@ def wait_for_reply(request_id: str, timeout_s: float = 120.0) -> Optional[str]:
             data = None
             for _ in range(3):
                 try:
-                    with _LOCK:
-                        raw = path.read_text(encoding="utf-8")
+                    raw = path.read_text(encoding="utf-8")   # writes are atomic replaces
                     data = json.loads(raw)
                     break
                 except json.JSONDecodeError:
@@ -310,9 +413,7 @@ def wait_for_reply(request_id: str, timeout_s: float = 120.0) -> Optional[str]:
         time.sleep(0.5)
     # Caller is giving up: say so on disk, so I never spend a turn answering nobody (fix-first #5).
     try:
-        if _set_status_if_pending(path, "abandoned"):
-            with _LOCK:
-                _refresh_flag()
+        _set_status_if_pending(path, "abandoned")    # refreshes the flag itself
     except Exception:
         pass
     return None
@@ -367,6 +468,7 @@ def ask_iris(
     context: Optional[dict] = None,
     requester: str = "brain",
     timeout_s: float = 120.0,
+    priority: Optional[int] = None,
 ) -> Optional[str]:
     """Synchronous: submit a prompt, block for the reply, return text or None.
 
@@ -390,7 +492,8 @@ def ask_iris(
         # Module not configured yet; refuse rather than silently fail.
         return None
     try:
-        rid = submit(prompt, kind=kind, context=context, requester=requester, deadline_s=timeout_s)
+        rid = submit(prompt, kind=kind, context=context, requester=requester, deadline_s=timeout_s,
+                     priority=priority)
         return wait_for_reply(rid, timeout_s=timeout_s)
     except Exception as e:
         print(f"[iris_llm] ask_iris error: {e!r}")
