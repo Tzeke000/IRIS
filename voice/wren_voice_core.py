@@ -1290,7 +1290,56 @@ def _self_voice_score(audio, bar: float) -> "float | None":
     return None
 
 
-def _voice_id_line(audio) -> str:
+def _voice_id_verdict(audio) -> dict:
+    """STRUCTURED speaker verdict for one captured utterance (2026-10-29 security,
+    code review HIGH). The host decides who a voice turn is from using THESE fields,
+    never the in-band '[voice-id: ...]' text tag (anything in the text could be said
+    out loud). Measures only - a voiceprint is a hint, the host owns the policy.
+
+    {"speaker": enrolled name | "unknown" | None, "score": float | None,
+     "closest": nearest enrolled name | None, "threshold": float | None,
+     "status": "matched" | "unknown" | "skipped" | "cold", "reason": str}
+      matched - closest enrolled print scored >= the voice_id.json threshold
+      unknown - prints are enrolled, none scored >= threshold
+      skipped - no verdict possible: feature off (no scratch/voice_id.json), module
+                missing, nothing enrolled, utterance too short, or an ID error
+      cold    - model still loading (warm_async kicked; verdict available later)
+    """
+    v = {"speaker": None, "score": None, "closest": None, "threshold": None,
+         "status": "skipped", "reason": ""}
+    cfg = _voice_id_cfg()
+    if cfg is None:
+        v["reason"] = "voice-id off (scratch/voice_id.json absent/disabled/invalid)"
+        return v
+    if not _HAVE_VOICEID:
+        v["reason"] = "wren_voiceid not importable"
+        return v
+    v["threshold"] = float(cfg["threshold"])
+    try:
+        if getattr(audio, "size", 0) < int(cfg["min_seconds"] * SAMPLE_RATE):
+            v["reason"] = "utterance too short for a reliable embedding"
+            return v
+        if not _voiceid.warm_async():
+            v["status"], v["reason"] = "cold", "voice-id model still loading"
+            return v
+        r = _voiceid.identify(audio)
+        if not r.get("n_profiles"):
+            v["reason"] = "no voiceprints enrolled"
+            return v
+        name, score = r.get("best"), float(r.get("score", 0.0))
+        v["closest"], v["score"] = name, score
+        if name and score >= cfg["threshold"]:
+            v["speaker"], v["status"] = name, "matched"
+        else:
+            v["speaker"], v["status"] = "unknown", "unknown"
+        return v
+    except Exception as e:
+        print(f"[voice-id] verdict failed (non-fatal): {e!r}", file=sys.stderr)
+        v["status"], v["reason"] = "skipped", f"voice-id error: {e!r}"[:200]
+        return v
+
+
+def _voice_id_line(audio, verdict: "dict | None" = None) -> str:
     """Best-effort speaker tag for a captured utterance. '' = no tag.
 
     Sticky mode (default, Zeke spec): silence means SAME SPEAKER — a tag appears
@@ -1298,20 +1347,18 @@ def _voice_id_line(audio) -> str:
     Set {"sticky": false} in voice_id.json for the old per-turn tags.
     Never blocks a turn on a cold model: warm_async() kicks a background load and
     we skip tagging until it's ready (the model warms behind the first turns).
+    `verdict` (10-29): pass the _voice_id_verdict already computed for this audio so
+    the embedding runs once per utterance.
     """
     cfg = _voice_id_cfg()
     if cfg is None or not _HAVE_VOICEID:
         return ""
     try:
-        if getattr(audio, "size", 0) < int(cfg["min_seconds"] * SAMPLE_RATE):
-            return ""   # too short for a reliable embedding
-        if not _voiceid.warm_async():
-            return ""   # still loading — tag next turn
-        r = _voiceid.identify(audio)
-        if r["n_profiles"] == 0:
-            return ""   # nothing enrolled yet
-        name, score = r["best"], r["score"]
-        speaker = name if (name and score >= cfg["threshold"]) else "unknown"
+        v = verdict if verdict is not None else _voice_id_verdict(audio)
+        if v.get("status") not in ("matched", "unknown"):
+            return ""   # too short / still loading / nothing enrolled / error
+        name, score = v["closest"], float(v["score"] or 0.0)
+        speaker = v["speaker"]
         if not cfg.get("sticky", True):
             if speaker != "unknown":
                 return f"[voice-id: {name} {score:.2f}]"
@@ -1385,6 +1432,19 @@ def _smart_extend_cfg():
         return {"max_seconds": max_s, "recheck_seconds": recheck}
     except Exception:
         return None   # fail-open: bad config must never change ear behavior
+
+
+def _with_speaker(text: str, verdict: dict, args: dict):
+    """Opt-in structured return (10-29 security): a caller that sends
+    {"structured": true} gets {"text", "speaker", "score", "status", "threshold",
+    "closest", "reason"} for a REAL utterance; everyone else (MCP tools, old clients)
+    keeps the plain string. '[voice_listen]' / '[bargein_watch]' markers stay strings."""
+    if not (args or {}).get("structured"):
+        return text
+    out = {"text": text}
+    for k in ("speaker", "score", "status", "threshold", "closest", "reason"):
+        out[k] = (verdict or {}).get(k)
+    return out
 
 
 def cmd_listen(ctx, args: dict) -> str:
@@ -1644,7 +1704,8 @@ def cmd_listen(ctx, args: dict) -> str:
         _save_utt_wav(audio, "listen")
         return f"[voice_listen] self_voice_dropped (iris {_svs:.2f})"
     # ── Step 9b: voice-id tag + rolling utterance wav (2026-07-13) ─────────────
-    vid = _voice_id_line(audio)
+    verdict = _voice_id_verdict(audio)
+    vid = _voice_id_line(audio, verdict)
     if vid:
         result = f"{result}\n{vid}"
     _save_utt_wav(audio, "listen")
@@ -1654,7 +1715,7 @@ def cmd_listen(ctx, args: dict) -> str:
     # (no point bridging a turn where Zeke just asked to end the call).
     if in_call and not end_call_intent:
         _arm_stall_bridge(ctx)
-    return result
+    return _with_speaker(result, verdict, args)
 
 
 def cmd_speak_interruptible(ctx, args: dict) -> str:
@@ -2033,9 +2094,10 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
         # this gap and whole replies died silently while the marker said "finished".)
         marker = ("[barge landed before the reply started playing — nothing had been "
                   "spoken; the pending reply was dropped unheard]")
-    vid = _voice_id_line(audio)
+    verdict = _voice_id_verdict(audio)
+    vid = _voice_id_line(audio, verdict)
     _save_utt_wav(audio, "barge")
-    return f"[barge-in] {marker}{(' ' + vid) if vid else ''} {heard}"
+    return _with_speaker(f"[barge-in] {marker}{(' ' + vid) if vid else ''} {heard}", verdict, args)
 
 
 def cmd_call_start(ctx, args: dict) -> dict:
