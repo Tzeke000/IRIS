@@ -1,5 +1,6 @@
 """Scoped Proxmox control for Zeke's desktop VMs (101 windows10, 102 zorin) via token iris@pve!vmctl.
 Secrets in ~/.iris_private.env (PVE_TOKEN_ID / PVE_TOKEN_SECRET / PVE_HOST). Zeke's rule: only ONE of 101/102 runs.
+status lists EVERY VM + CT the token can see (Zeke 10-30: "for every VM or CT you should at least know if it's on").
 usage: pve_vm.py status | start <vmid> | shutdown <vmid> | exec <vmid> <powershell or bash command...>
 """
 import json, os, ssl, sys, time, urllib.parse, urllib.request
@@ -8,14 +9,15 @@ env = {}
 for line in open(os.path.expanduser("~/.iris_private.env")):
     if "=" in line and not line.startswith("#"):
         k, v = line.strip().split("=", 1); env[k] = v
-BASE = f"https://{env['PVE_HOST']}:8006/api2/json/nodes/r740/qemu"
+NODE = f"https://{env['PVE_HOST']}:8006/api2/json/nodes/r740"
+BASE = NODE + "/qemu"
 HDR = {"Authorization": f"PVEAPIToken={env['PVE_TOKEN_ID']}={env['PVE_TOKEN_SECRET']}"}
 CTX = ssl._create_unverified_context()
 
 
-def call(path, method="GET", data=None):
+def call(path, method="GET", data=None, base=None):
     body = urllib.parse.urlencode(data, doseq=True).encode() if data else None
-    req = urllib.request.Request(BASE + path, data=body, method=method, headers=HDR)
+    req = urllib.request.Request((base or BASE) + path, data=body, method=method, headers=HDR)
     with urllib.request.urlopen(req, context=CTX, timeout=60) as r:
         return json.load(r)["data"]
 
@@ -39,8 +41,15 @@ def run(v, cmd, timeout=900):
 if __name__ == "__main__":
     a = sys.argv[1:]
     if a[0] == "status":
-        for v in (101, 102):
-            print(v, status(v))
+        rows = []
+        for kind in ("qemu", "lxc"):
+            try:
+                for g in call("/" + kind, base=NODE):
+                    rows.append((int(g["vmid"]), "VM" if kind == "qemu" else "CT", g.get("name", "?"), g.get("status", "?")))
+            except Exception as e:  # noqa: BLE001
+                print(f"{kind}: list failed ({e!r})", file=sys.stderr)
+        for vmid, k, name, st in sorted(rows):
+            print(vmid, k, name, st)
     elif a[0] == "start":
         v = int(a[1]); other = 102 if v == 101 else 101
         if status(other) == "running":
