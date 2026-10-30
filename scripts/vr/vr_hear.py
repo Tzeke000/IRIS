@@ -74,6 +74,8 @@ HALLUCINATIONS = {"you", "thank you", "thanks", "thank you very much", "thanks f
 MERGE_GAP_S = 1.2     # join same-speaker clips closer than this
 MERGE_WAIT_S = 1.3    # transcribe once the speaker has been quiet this long
 MERGE_MAX_S = 20.0    # never merge past this length
+LIVE_CADENCE_S = 0.5  # 10-29 live words: min seconds between display partial decodes per speaker
+LIVE_KEEP_S = 120.0   # drop a speaker's live entry from the file this long after it went final
 
 
 def log(*a) -> None:
@@ -155,6 +157,12 @@ class Ears:
         self.out = Path(a.out)
         self.state_path = Path(a.state)
         self.keep_wav = Path(a.keep_wav) if a.keep_wav else None
+        # 10-29 live words: per-speaker DISPLAY-ONLY partials (state/vr_temple/live_partial.json), the same
+        # shape as the room daemon's state/voice/live_partial.json. Never feeds heard.jsonl or wakes me.
+        self.live_on = not getattr(a, "no_live", False)
+        self.live_path = self.out.parent / "live_partial.json"
+        self.live: dict[str, dict] = {}
+        self.live_last: dict[str, float] = {}
         self.out.parent.mkdir(parents=True, exist_ok=True)
         self.spool.mkdir(parents=True, exist_ok=True)
         self.attn: dict[str, float] = {}           # speaker → attending until (wall clock)
@@ -279,7 +287,10 @@ class Ears:
         meta = dict(b["meta"]); meta["t_end"] = b["t_end"]
         if b["n"] > 1:
             log("merged %d clips from %s (%.1f s)" % (b["n"], who, b["x"].size / 16000.0))
-        return self._emit(self.transcribe(meta, b["x"], b["stem"]))
+        line = self.transcribe(meta, b["x"], b["stem"])
+        if self.live_on and (line or (self.live.get(who) or {}).get("utterance_id") == "vr-%s" % b["stem"]):
+            self._live_set(who, b, line["text"] if line else "", final=True, dropped=None if line else "dropped")
+        return self._emit(line)
 
     def activity(self, who: str, t0: float, t1: float, meta: dict, x: np.ndarray) -> None:
         """10-29 full-duplex: who is TALKING right now, written the moment a clip lands (~0.7 s after a
@@ -302,6 +313,48 @@ class Ears:
             os.replace(tmp, p)
         except Exception as e:  # noqa: BLE001
             log("activity write failed: %r" % (e,))
+
+    # ------------------------------------------------------------------------------------------ live words
+    def _live_write(self) -> None:
+        now = time.time()
+        self.live = {k: v for k, v in self.live.items() if not (v.get("final") and now - v.get("ts", 0) > LIVE_KEEP_S)}
+        try:
+            tmp = self.live_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(self.live, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self.live_path)
+        except Exception as e:  # noqa: BLE001  display-only
+            log("live partial write failed: %r" % (e,))
+
+    def _live_set(self, who: str, b: dict, text: str, final: bool, dropped: str | None = None) -> None:
+        prev = self.live.get(who) or {}
+        uid = "vr-%s" % b["stem"]
+        seq = (prev.get("seq", 0) + 1) if prev.get("utterance_id") == uid else 1
+        if not final and prev.get("utterance_id") == uid and prev.get("final"):
+            return                                   # never overwrite a final with a late partial
+        self.live[who] = {"utterance_id": uid, "source": "vr", "speaker": who,
+                          "display_name": b["meta"].get("display_name"), "text": text, "final": bool(final),
+                          "ts": round(time.time(), 3), "started_ts": round(float(b["meta"].get("t_start", time.time())), 3),
+                          "seq": seq, "mouth_busy": None, "dropped": dropped, "dist_m": b["meta"].get("dist_m")}
+        self._live_write()
+
+    def live_partial(self, who: str) -> None:
+        """Greedy text-only decode of the speaker's merge buffer so far (the clip(s) already landed), published
+        BEFORE the merge wait + the final beam-5 pass. Throttled per speaker; audible speech only."""
+        b = self.buf.get(who)
+        if not self.live_on or not b or time.time() - self.live_last.get(who, 0.0) < LIVE_CADENCE_S:
+            return
+        try:
+            lvl = speech_dbfs(b["x"])
+            if lvl < MIN_SPEECH_DBFS or lvl + float(b["meta"].get("atten_db", 0.0)) < MIN_EFFECTIVE_DBFS:
+                return
+            self.live_last[who] = time.time()
+            segs, _ = self.model.transcribe(b["x"], language="en", beam_size=1, vad_filter=True,
+                                            condition_on_previous_text=False, without_timestamps=True)
+            text = " ".join(s.text.strip() for s in segs).strip()
+            if norm(text) and norm(text) not in HALLUCINATIONS:
+                self._live_set(who, b, text, final=False)
+        except Exception as e:  # noqa: BLE001
+            log("live partial failed: %r" % (e,))
 
     def run(self, once: bool, poll: float) -> int:
         n = 0
@@ -330,6 +383,7 @@ class Ears:
                 else:
                     n += self._flush(who)
                     self.buf[who] = {"x": x.astype(np.float32), "meta": meta, "t_end": t1, "n": 1, "stem": side.stem}
+                self.live_partial(who)
             now = time.time()
             for who in [w for w, b in self.buf.items() if now - b["t_end"] >= MERGE_WAIT_S or once]:
                 n += self._flush(who)
@@ -350,6 +404,7 @@ def main() -> int:
     ap.add_argument("--keep-wav", default="", help="debug: also write each decoded 16 kHz clip here")
     ap.add_argument("--poll", type=float, default=0.25)
     ap.add_argument("--once", action="store_true", help="process what's in the spool, then exit (tests)")
+    ap.add_argument("--no-live", action="store_true", help="don't publish display partials (live_partial.json)")
     a = ap.parse_args()
     ears = Ears(a)
     n = ears.run(a.once, a.poll)

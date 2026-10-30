@@ -747,6 +747,36 @@ def voice_input_toggle(payload: dict = Body(default={})) -> dict:
     return {"ok": True, "muted": muted}
 
 
+# Live words (10-29 full-duplex chunk 3): the rolling, DISPLAY-ONLY transcript of what he is
+# saying right now. The voice daemon writes state/voice/live_partial.json (room mic: listen +
+# barge-in); vr_hear writes state/vr_temple/live_partial.json (per temple speaker). Read-only GET,
+# same guards as every other GET (Host allow-list + CORS app origins). Never triggers a turn.
+_LIVE_ROOM_FILE = Path(__file__).resolve().parent.parent / "state" / "voice" / "live_partial.json"
+_LIVE_VR_FILE = Path(__file__).resolve().parent.parent / "state" / "vr_temple" / "live_partial.json"
+_LIVE_MAX_BYTES = 65536
+
+
+def _read_live_partial(path: Path):
+    """Parsed JSON dict, or None when missing/unreadable/oversized (fail-soft for the poller)."""
+    try:
+        if path.stat().st_size > _LIVE_MAX_BYTES:
+            return None
+        d = json.loads(path.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+@app.get("/api/v1/voice/live_partial")
+def voice_live_partial() -> dict:
+    """{"ok", "now", "room": {utterance_id, source, text, final, ts, started_ts, seq,
+    mouth_busy, dropped} | null, "vr": {<speaker>: {...same...}} | null}. Poll ~4-5 Hz;
+    show `text` while final is false, settle on final=true (empty text + dropped => clear)."""
+    return {"ok": True, "now": round(time.time(), 3),
+            "room": _read_live_partial(_LIVE_ROOM_FILE),
+            "vr": _read_live_partial(_LIVE_VR_FILE)}
+
+
 # Tier 2 — identity files (read-only)
 @app.get("/api/v1/identity/{name}", response_class=PlainTextResponse)
 def identity(name: str) -> str:

@@ -26,6 +26,7 @@ Dispatch table:
   call_start          → core.cmd_call_start(ctx, args)
   call_end            → core.cmd_call_end(ctx, args)
   backend             → core.cmd_backend(ctx, args)
+  live_partial        → core.cmd_live_partial(ctx, args)  (last display-only live words, read-only)
   <unknown>           → {"ok": false, "error": "unknown cmd: <name>"}
 """
 from __future__ import annotations

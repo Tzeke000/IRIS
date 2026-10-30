@@ -59,6 +59,15 @@ except ImportError:
     print("[wren-voice-core] wren_prosody not importable — prosody disabled",
           file=sys.stderr)
 
+# Live words (10-29 full-duplex chunk 3): display-only rolling partials -> state/voice/live_partial.json
+try:
+    import iris_live_words as _live
+    _HAVE_LIVE = True
+except ImportError:
+    _HAVE_LIVE = False
+    print("[wren-voice-core] iris_live_words not importable — live partials disabled",
+          file=sys.stderr)
+
 import numpy as np
 import sounddevice as sd
 # 2026-10-07 server port: the mic may be a NETWORK source (Zeke's headset on the tower,
@@ -378,17 +387,75 @@ class _StreamingPartials:
     buffer that partial covered — so the consumer can check whether the tail past it is
     just silence (partial complete) or unheard speech (must fall back to a full pass)."""
 
-    def __init__(self) -> None:
+    def __init__(self, live=None) -> None:
         self._lock = threading.Lock()
         self._latest = None          # (text, words_data, n_samples) | None
         self.passes = 0              # diagnostics: how many partial passes ran
         self.last_pass_s = 0.0       # diagnostics: duration of the last pass (measure cost)
+        self.live = live             # iris_live_words.LiveWords | None — display mirror (10-29)
 
     def update(self, text: str, words_data, n_samples: int, pass_s: float) -> None:
         with self._lock:
             self._latest = (text, words_data, n_samples)
             self.passes += 1
             self.last_pass_s = pass_s
+        # Live words (10-29): mirror each partial to the display file. Display-only — the
+        # Route-1 shortcut above still decides from _latest exactly as before.
+        if self.live is not None and text:
+            try:
+                self.live.publish(text)
+            except Exception:
+                pass
+
+
+# ── Live words (10-29 full-duplex chunk 3, Zeke: "hear my words live, in VR and on the app") ──
+# Rolling DISPLAY-ONLY partials of the current utterance → state/voice/live_partial.json (see
+# voice/iris_live_words.py). Listen path: the existing Route-1 partial worker mirrors each pass.
+# Barge path (he talks over my mouth): a throttled worker re-decodes the growing capture with the
+# ALREADY-WARM whisper. Hot knobs in scratch/voice_control.json:
+#   live_partials (default true)               — master switch for publishing
+#   live_partials_while_speaking (default true) — listen-path partials keep running while the mouth
+#       is busy (was: skipped as a GPU-contention guard). Headphones assumed; set false to restore.
+BARGE_LIVE_CADENCE_S = 0.6     # min seconds between barge-path partial decodes (floor 0.5 in module)
+BARGE_LIVE_MIN_AUDIO_S = 0.5   # first barge partial once this much of his speech is captured
+
+
+def _live_ctl() -> tuple:
+    """(enabled, while_speaking) from voice_control.json; fail-open to (True, True)."""
+    try:
+        from wren_voice_status import read_control
+        c = read_control()
+    except Exception:
+        c = {}
+    return (bool(c.get("live_partials", True)) and _HAVE_LIVE,
+            bool(c.get("live_partials_while_speaking", True)))
+
+
+def _new_live(source: str, ctx, transcribe_fn=None, cadence_s: float = BARGE_LIVE_CADENCE_S):
+    """A LiveWords for one utterance, or None when the feature is off/unavailable."""
+    enabled, _ = _live_ctl()
+    if not enabled:
+        return None
+    try:
+        return _live.LiveWords(source, transcribe_fn=transcribe_fn, cadence_s=cadence_s,
+                               min_audio_s=BARGE_LIVE_MIN_AUDIO_S, sample_rate=SAMPLE_RATE,
+                               lock=_WHISPER_LOCK,
+                               mouth_busy_fn=(lambda: bool(getattr(ctx, "speaking", False))))
+    except Exception as e:
+        print(f"[live_words] init failed (non-fatal): {e!r}", file=sys.stderr)
+        return None
+
+
+def _live_whisper_text(audio) -> str:
+    """Greedy text-only decode on the ALREADY-LOADED whisper singleton. Never loads a model
+    (a cold/absent whisper → no live partial), never touches wl._LAST_RICH (pop_last_rich)."""
+    model = getattr(wl, "_WHISPER", None)
+    if model is None:
+        return ""
+    segs, _ = model.transcribe(np.ascontiguousarray(audio, dtype=np.float32), beam_size=1,
+                               language="en", condition_on_previous_text=False,
+                               without_timestamps=True)
+    return " ".join(seg.text.strip() for seg in segs).strip()
 
     def latest(self):
         with self._lock:
@@ -496,8 +563,9 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                 # contend with early-finalize's smart-turn pass + tax the turn-end join).
                 if pause_evt.is_set():
                     continue
-                # GPU-contention guard: don't run whisper while the mouth is speaking.
-                if mouth_busy_fn is not None and mouth_busy_fn():
+                # GPU-contention guard: don't run whisper while the mouth is speaking —
+                # unless live words want partials to keep flowing (10-29, default on).
+                if mouth_busy_fn is not None and mouth_busy_fn() and not _live_ctl()[1]:
                     continue
                 with buf_lock:
                     snap = collected[:] if collected else None
@@ -713,7 +781,8 @@ def _bargein_accumulate(frame_prob_iter, is_speaking, on_barge, *,
                         threshold: float, need: int, preroll_chunks: int,
                         end_silence_chunks: int, max_chunks: int,
                         on_event=None, min_rms: float = 0.0,
-                        stats: "dict | None" = None) -> "np.ndarray | None":
+                        stats: "dict | None" = None,
+                        on_capture=None) -> "np.ndarray | None":
     """PURE accumulation core — no audio I/O, testable with a synthetic (frame, prob)
     sequence.
 
@@ -726,9 +795,19 @@ def _bargein_accumulate(frame_prob_iter, is_speaking, on_barge, *,
     Phase 2 (capture): keep appending chunks until end_silence_chunks of continuous sub-
     threshold audio (end-of-speech) or max_chunks (hard cap).
 
+    on_capture (10-29 live words): optional callback handed every CAPTURED chunk (pre-roll seed
+    + phase 2) as it lands, for display-only rolling partials. Errors in it are swallowed.
+
     Returns concatenated captured audio (pre-roll + onset → end), or None if is_speaking()
     went False with no interruption."""
     from collections import deque
+
+    def _tap(chunk) -> None:
+        if on_capture is not None:
+            try:
+                on_capture(chunk)
+            except Exception:
+                pass
     # Pre-roll must be at least as long as the debounce, or onset chunks would fall out.
     preroll = deque(maxlen=max(preroll_chunks, need))
     collected: list = []
@@ -763,9 +842,12 @@ def _bargein_accumulate(frame_prob_iter, is_speaking, on_barge, *,
                 if on_event:
                     on_event("stopped", prob)
                 collected.extend(preroll)   # seed with pre-roll incl. onset chunks
+                for _c in preroll:
+                    _tap(_c)
                 silence_run = 0
         else:
             collected.append(f)
+            _tap(f)
             if is_voiced:
                 silence_run = 0
             else:
@@ -788,7 +870,8 @@ def _bargein_watch_and_capture(ctx, model, is_speaking, on_barge, *,
                                end_silence_ms: int = BARGEIN_END_SILENCE_MS,
                                max_capture_s: float = BARGEIN_MAX_CAPTURE_S,
                                on_event=None, min_rms: float = 0.0,
-                               stats: "dict | None" = None) -> "np.ndarray | None":
+                               stats: "dict | None" = None,
+                               on_capture=None) -> "np.ndarray | None":
     """ONE continuous mic stream that watches for a barge-in via Silero VAD AND captures
     the interrupting utterance on the same stream (no second open).
 
@@ -825,7 +908,7 @@ def _bargein_watch_and_capture(ctx, model, is_speaking, on_barge, *,
                                    preroll_chunks=preroll_chunks,
                                    end_silence_chunks=end_silence_chunks,
                                    max_chunks=max_chunks, on_event=on_event,
-                                   min_rms=min_rms, stats=stats)
+                                   min_rms=min_rms, stats=stats, on_capture=on_capture)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -862,6 +945,18 @@ def _rich_health(ctx) -> list:
     except Exception:
         degraded.append("prosody")
     return degraded
+
+
+def cmd_live_partial(ctx, args: dict) -> dict:
+    """Live words (10-29): the last display-only partial/final this daemon published, read from
+    memory (same shape as state/voice/live_partial.json). {} when nothing yet / feature off.
+    Read-only, never touches the mic or the model."""
+    if not _HAVE_LIVE:
+        return {}
+    try:
+        return _live.last()
+    except Exception:
+        return {}
 
 
 def cmd_status(ctx, args: dict) -> str:
@@ -1447,7 +1542,27 @@ def _with_speaker(text: str, verdict: dict, args: dict):
     return out
 
 
-def cmd_listen(ctx, args: dict) -> str:
+def cmd_listen(ctx, args: dict):
+    """Listen for Zeke to speak and return what he said (see _cmd_listen_impl).
+
+    Live words (10-29): wraps the listen in a display-only LiveWords — partials stream to
+    state/voice/live_partial.json while he talks; at the end the file gets final=True with the
+    text that became the turn, or an empty final + the drop marker. The return value is
+    exactly _cmd_listen_impl's — this wrapper never changes what becomes a turn."""
+    live = _new_live("room-listen", ctx)
+    result = None
+    try:
+        result = _cmd_listen_impl(ctx, args, live)
+        return result
+    finally:
+        if live is not None:
+            try:
+                live.finish(dropped=(result if isinstance(result, str) else None))
+            except Exception:
+                pass
+
+
+def _cmd_listen_impl(ctx, args: dict, live=None):
     """Listen for Zeke to speak and return what he said.
 
     args: {
@@ -1501,7 +1616,7 @@ def cmd_listen(ctx, args: dict) -> str:
     # during it. Partials reuse the warm whisper via _prosody.transcribe (word-timestamped,
     # same as the final pass), and skip while the mouth speaks (GPU-contention guard).
     in_call = getattr(ctx, "call_warm", False) and _HAVE_PROSODY
-    partials = _StreamingPartials() if (in_call and STREAMING_PARTIALS) else None
+    partials = _StreamingPartials(live=live) if (in_call and STREAMING_PARTIALS) else None
     ef_state: dict = {}   # _capture_utterance sets {"fired": True} if early-finalize triggered
     # Smart-extend (read per-listen, same hot pattern as the pace file): when enabled,
     # a turn that reaches the fast window but SOUNDS unfinished holds the mic open up
@@ -1703,6 +1818,9 @@ def cmd_listen(ctx, args: dict) -> str:
               f"{text[:80]!r}", flush=True)
         _save_utt_wav(audio, "listen")
         return f"[voice_listen] self_voice_dropped (iris {_svs:.2f})"
+    # Live words: the turn passed every gate above → this is the display's final text.
+    if live is not None:
+        live.final_text = text
     # ── Step 9b: voice-id tag + rolling utterance wav (2026-07-13) ─────────────
     verdict = _voice_id_verdict(audio)
     vid = _voice_id_line(audio, verdict)
@@ -1938,7 +2056,27 @@ def cmd_bargein_hold(ctx, args: dict) -> dict:
     return {"hold": hold}
 
 
-def cmd_bargein_watch(ctx, args: dict) -> str:
+def cmd_bargein_watch(ctx, args: dict):
+    """Barge-in watch (see _cmd_bargein_watch_impl) + live words (10-29).
+
+    Once a barge is confirmed, his words stream as display-only partials to
+    state/voice/live_partial.json (throttled re-decode on the warm whisper); the final entry
+    carries the text that became the turn, or empty + the marker if it was dropped (self-voice,
+    unclear, error). The return value is exactly the impl's — the wrapper never changes a turn."""
+    live = _new_live("room-barge", ctx, transcribe_fn=_live_whisper_text)
+    result = None
+    try:
+        result = _cmd_bargein_watch_impl(ctx, args, live)
+        return result
+    finally:
+        if live is not None:
+            try:
+                live.finish(dropped=(result if isinstance(result, str) else None))
+            except Exception:
+                pass
+
+
+def _cmd_bargein_watch_impl(ctx, args: dict, live=None):
     """Blocking: watch the mic for Zeke talking over me (headphones barge-in).
 
     args: {"cap_s": float = BARGEIN_WATCH_CAP_S}
@@ -2020,7 +2158,8 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
         with ctx.mic_lock:
             audio = _bargein_watch_and_capture(ctx, model, _active, _on_barge,
                                                device_substr=wl.DEFAULT_MIC_SUBSTR,
-                                               min_rms=min_rms, stats=watch_stats)
+                                               min_rms=min_rms, stats=watch_stats,
+                                               on_capture=(live.feed if live is not None else None))
     except Exception as e:
         # If the onset already cut the mouth before the watcher died, give the
         # reply back (no-op when no barge fired — barge_cut is None).
@@ -2039,8 +2178,11 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
         set_state("thinking", "heard you")
     except Exception:
         pass
+    if live is not None:
+        live.stop()   # partial worker idle BEFORE the final pass (whisper isn't reentrant)
     try:
-        heard = (wl._transcribe_array(audio) or "").strip()
+        with _WHISPER_LOCK:   # belt-and-braces vs a partial pass that overran the join
+            heard = (wl._transcribe_array(audio) or "").strip()
     except Exception as e:
         # False-alarm path (2026-07-19): the cut already happened but we can't
         # prove it was speech — give the reply back to the mouth.
@@ -2068,6 +2210,8 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
         # My own echo cut my own mouth — definitionally a false barge; resume.
         _restore_after_false_barge(ctx, f"self-voice echo (iris {_svs:.2f})")
         return f"[bargein_watch] self_voice_dropped (iris {_svs:.2f})"
+    if live is not None:
+        live.final_text = heard   # passed the self-voice gate → the display's final words
     # Playback-cursor marker (2026-07-08): tell the host (and me) exactly where the
     # cut landed. Host only checks startswith('[barge-in]'), so extra info is safe.
     info = getattr(ctx, "barge_cut", None) or {}
@@ -2482,6 +2626,13 @@ def reload_helpers() -> list:
             reloaded.append("wren_prosody")
         except Exception as e:
             print(f"[reload_helpers] wren_prosody reload failed: {e!r}", file=sys.stderr)
+
+    if _HAVE_LIVE:
+        try:
+            importlib.reload(_live)
+            reloaded.append("iris_live_words")
+        except Exception as e:
+            print(f"[reload_helpers] iris_live_words reload failed: {e!r}", file=sys.stderr)
 
     if _HAVE_VOICEID:
         try:
