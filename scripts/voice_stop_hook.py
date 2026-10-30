@@ -3,7 +3,7 @@
 Fires after every assistant turn ends. Decides whether to rewake the model,
 and what to tell it via the rewake message. Two triggers:
 
-1. **Voice mode** — D:\\Wren-Companion\\.tmp\\voice_session.flag exists.
+1. **Voice mode** — <repo>/.tmp/voice_session.flag exists.
    Reads the last assistant text block, POSTs it to Kokoro for TTS, then
    rewakes with the voice-loop directive.
 
@@ -50,6 +50,21 @@ except Exception:
 # 2026-10-07 server port: the repo root is wherever this file lives (scripts/ is one level
 # under it) — was a D: literal, which made the hook blind on Linux.
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _auto_memory_dir() -> Path:
+    """Claude Code keys a project's memory dir by the repo path with every
+    non-alphanumeric char turned into '-' (/home/iris/IRIS -> -home-iris-IRIS).
+    Override: IRIS_AUTO_MEMORY_DIR. (Was a hard-coded tower path, C:\\Users\\...,
+    which doesn't exist on the server — code review 10-29, docs vs code.)"""
+    env = os.environ.get("IRIS_AUTO_MEMORY_DIR", "").strip()
+    if env:
+        return Path(env).expanduser()
+    key = re.sub(r"[^A-Za-z0-9]", "-", str(ROOT))
+    return Path.home() / ".claude" / "projects" / key / "memory"
+
+
+_AUTO_MEMORY_DIR = _auto_memory_dir()
 _LOCK_PATH = ROOT / ".tmp" / "stop_hook.lock"
 
 
@@ -567,7 +582,7 @@ def _fresh_session_directive(payload: dict) -> str:
         "\n\nFresh session detected (first Stop hook fire with this "
         "CLAUDE_CODE_SESSION_ID). Before answering the user's first message, "
         "scan your auto-memory directory at "
-        "C:\\Users\\Owner\\.claude\\projects\\D--Wren-Companion\\memory\\ — "
+        f"{_AUTO_MEMORY_DIR} — "
         "specifically read MEMORY.md for the index, then read the 4-6 most "
         "recent .md files (by mtime) to pick up context that auto-loads "
         "only as titles. The auto-memory mechanism gives you the index in "
@@ -936,8 +951,7 @@ def _escalation_rewake(esc: dict) -> str:
         "Handle it now: resolve what you can yourself; if it needs Zeke, DM him "
         "on Discord (chat_id " + _priv("zeke_dm_chat_id") + "). THEN clear it so it stops "
         "re-waking you:\n"
-        "  D:\\Wren-Companion\\.venv\\Scripts\\python.exe "
-        "D:\\Wren-Companion\\scripts\\check_escalations.py --resolve-all "
+        f"  {sys.executable} {ROOT / 'scripts' / 'check_escalations.py'} --resolve-all "
         "\"<one line on what you did>\"\n"
         "(Use --resolve <line#> to clear just one if several are pending.)"
     )
@@ -947,12 +961,12 @@ _VOICE_REWAKE = (
     "Voice mode active. Call mcp__iris__voice_next_input(timeout=300) to "
     "listen for the next utterance. Then reply by calling "
     "mcp__iris__voice_say_chunk(text=...) ONCE PER SENTENCE as you generate "
-    "— do NOT emit plain text. Each chunk queues to Kokoro and returns "
+    "— do NOT emit plain text. Each chunk queues to the mouth and returns "
     "instantly; the first sentence starts playing while you generate the "
     "second. Keep chunks tight (one sentence, 5-15 words) for low first-word "
     "latency. After your final chunk, just stop — the next rewake fires this "
     "loop again. To exit voice mode, delete the flag at "
-    "D:\\Wren-Companion\\.tmp\\voice_session.flag (or have Zeke ask you to)."
+    f"{VOICE_FLAG} (or have Zeke ask you to)."
 )
 
 
