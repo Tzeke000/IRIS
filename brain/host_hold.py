@@ -235,6 +235,7 @@ def write_held_flag(info: dict[str, Any], path: str = HELD_FLAG) -> dict[str, An
         "since": since,
         "since_iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(since)),
         "source": info.get("source"),
+        "kind": info.get("kind") or ("api" if info.get("hint") else "silent"),
         "silent_s": info.get("silent_s"),
         "reason": info.get("reason"),
         "hint": info.get("hint"),

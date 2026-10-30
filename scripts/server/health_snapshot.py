@@ -378,7 +378,17 @@ def probe_sdk_stream(ctx: dict) -> dict:
         return _stack_red(ctx, probe, "body host has no claude child", **det)
     held = _load(root / "state" / "cognition_held.json", None)
     if held is not None:
-        return _r("red", probe, "cognition HELD (state/cognition_held.json): " + str(held)[:160], age=age, **det)
+        # 10-30: only a SILENT hold (active turn, no tool, no limit named) is red - that is the shape a broken
+        # stream has. A hold by one long tool call (kind "tool", e.g. a render) or by an API/rate limit (a
+        # hint) is cognition busy or throttled upstream: a v3->v2 rollback could not fix it, so it must not
+        # count toward stack_rollback's 10-min red window. Pre-"kind" flags are classified from their text.
+        hk = held.get("kind") if isinstance(held, dict) else None
+        if hk is None and isinstance(held, dict):
+            hk = ("tool" if "tool call running" in str(held.get("reason") or "")
+                  else "api" if held.get("hint") or "API error" in str(held.get("reason") or "") else "silent")
+        det["held_kind"] = hk
+        sev = "red" if hk == "silent" else "warn"
+        return _r(sev, probe, "cognition HELD (state/cognition_held.json): " + str(held)[:160], age=age, **det)
     if not det["proxy"] and det["turn_active"] and age is not None and age > STREAM_TURN_WARN_S:
         return _r("warn", probe, f"turn active but no SDK stream message for {age:.0f}s", age=age, **det)
     return _r("ok", probe, age=age, **det)

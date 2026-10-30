@@ -327,3 +327,27 @@ def test_sdk_stream_prefers_host_heartbeat_file(hs, monkeypatch):
     assert r["status"] == "warn" and "turn active" in r["error"]
     hb.write_text(json.dumps({"ts": now - 5, "pid": 9999, "turn_active": False}))   # previous process
     assert hs.probe_sdk_stream(ctx(hs, now=now))["detail"]["proxy"] is True
+
+
+def test_sdk_stream_held_kind_severity(hs, monkeypatch):
+    """10-30: only a SILENT hold is red (counts toward v3 auto-rollback); a long-tool or API-limit hold warns."""
+    now = time.time()
+    me = os.getpid()
+    monkeypatch.setattr(hs, "find_pids", lambda needle: [4242])
+    monkeypatch.setattr(hs, "_proc_cmdline", lambda pid: "python iris_body_host.py")
+    monkeypatch.setattr(hs, "_proc_stat", lambda pid: ("claude", 4242) if pid == me else None)
+    monkeypatch.setattr(hs, "proc_age_s", lambda pid: 1000.0)
+    (hs.ROOT / "state" / "host_stream.json").write_text(json.dumps({"ts": now - 5, "pid": 4242, "turn_active": True}))
+    held = hs.ROOT / "state" / "cognition_held.json"
+    cases = [({"held": True, "kind": "tool"}, "warn"),
+             ({"held": True, "kind": "api", "hint": "rate_limit (429)"}, "warn"),
+             ({"held": True, "kind": "silent"}, "red"),
+             ({"held": True, "reason": "one tool call running 2800s with no output on an active turn"}, "warn"),
+             ({"held": True, "reason": "API error on an active turn: overloaded"}, "warn"),
+             ({"held": True, "reason": "no model output for 200s on an active turn, no tool in flight"}, "red")]
+    try:
+        for flag, want in cases:
+            held.write_text(json.dumps(flag))
+            assert hs.probe_sdk_stream(ctx(hs, now=now))["status"] == want, flag
+    finally:
+        held.unlink(missing_ok=True)
