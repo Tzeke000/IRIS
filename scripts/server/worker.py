@@ -107,8 +107,15 @@ def user_cgroup_root() -> Path:
 
 
 def slice_dir() -> Path:
-    # iris-workers.slice lives at the top of the user manager; children nest by dashes
-    return user_cgroup_root() / SLICE
+    # systemd nests slices by dashes: iris-workers.slice lives under iris.slice. Ask systemd.
+    cg = unit_cgroup(SLICE)
+    if cg:
+        return cg
+    parts = SLICE[:-len(".slice")].split("-")
+    p = user_cgroup_root()
+    for i in range(1, len(parts) + 1):
+        p = p / ("-".join(parts[:i]) + ".slice")
+    return p
 
 
 def _read_int(p: Path) -> int | None:
