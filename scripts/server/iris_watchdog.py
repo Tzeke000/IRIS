@@ -13,6 +13,10 @@ Two jobs, both found missing by the 10-07 audit:
    a service unit failed. One DM per problem per ALERT_EVERY_S, plus one "recovered" DM.
 
 Never restarts during a deliberate stop: no ~/LIVE => nothing is supposed to be running, stay quiet.
+ONE exception (2026-10-29 code review CRITICAL): the BACKUP check runs even without ~/LIVE - a timer that
+was never enabled never fails, so "no backup ok in state/backup.log for BACKUP_STALE_S" (or the timer not
+enabled/active) is its own alert. Every subprocess call has a timeout (the unit has TimeoutStartSec) so one
+hang under memory pressure can't stop the watchdog for good.
 """
 from __future__ import annotations
 
@@ -36,6 +40,9 @@ STALE_ALERT_S = 600.0    # tell Zeke if there's been no heartbeat this long (any
 REFIRE_S = 900.0
 ALERT_EVERY_S = 3600.0
 BOOT_GRACE_S = 600.0     # the body takes minutes to come up after a boot/restart
+BACKUP_LOG = ROOT / "state" / "backup.log"
+BACKUP_STALE_S = 36 * 3600.0   # nightly at 03:40 (+ catch-up): a day and a half without "backup ok" = broken
+MAX_DMS_PER_RUN = 3      # each DM can take up to its timeout; the rest go out next minute
 # 10-09 away-readiness (Zeke on vacation 10-11..~10-21): every iris unit that can fail, incl. the nightly
 # backup (a oneshot that ends "failed" when the copy to the tower fails) and the Vector stack.
 UNITS = ("iris-mouth", "iris-ears", "iris-postoffice", "iris-postoffice-monitor", "iris-presence",
@@ -64,17 +71,95 @@ def save_state(st: dict) -> None:
     tmp.replace(STATE)
 
 
-def pid_alive(pid: int) -> bool:
+def pid_alive(pid: int, needle: str | None = None) -> bool:
+    """kill -0, plus (when `needle` is given) the pid's cmdline must still contain it: a heartbeat pid that
+    a NEWER, unrelated process reused must not count as my runtime being alive (10-29 code review)."""
     try:
         os.kill(pid, 0)
-        return True
     except Exception:
         return False
+    if not needle:
+        return True
+    try:
+        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return True                      # can't read it (not Linux /proc?): keep the old kill -0 answer
+    return needle in cmd
 
 
 def proc_running(pattern: str) -> bool:
-    r = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True)
+    try:
+        r = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        log(f"pgrep {pattern!r} timed out - assuming it is running this round (no false alarm)")
+        return True
     return r.returncode == 0
+
+
+def last_backup_ok_ts(path: Path | None = None):
+    """Epoch of the newest 'YYYY-mm-dd HH:MM:SS backup ok: ...' line in state/backup.log, or None."""
+    path = path or BACKUP_LOG
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return None
+    for ln in reversed(lines):
+        if " backup ok" in ln:
+            try:
+                return time.mktime(time.strptime(ln[:19], "%Y-%m-%d %H:%M:%S"))
+            except Exception:
+                continue
+    return None
+
+
+def unit_state(unit: str, verb: str) -> str:
+    """`systemctl --user <verb> <unit>` stdout ('enabled', 'active', ...); '' on timeout/error."""
+    try:
+        r = subprocess.run(["systemctl", "--user", verb, unit], capture_output=True, text=True, timeout=10)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def backup_problems(now: float) -> dict:
+    """The backup check - runs every minute, ~/LIVE or not."""
+    out: dict[str, str] = {}
+    ts = last_backup_ok_ts()
+    if ts is None:
+        out["backup"] = "no successful backup is on record (state/backup.log has no 'backup ok')"
+    elif now - ts > BACKUP_STALE_S:
+        out["backup"] = f"my last successful backup to the tower was {(now - ts)/3600:.0f} h ago"
+    en = unit_state("iris-backup.timer", "is-enabled")
+    if en and en != "enabled":
+        out["backup-timer"] = f"the nightly backup timer is {en}, not enabled"
+    elif en == "enabled" and unit_state("iris-backup.timer", "is-active") not in ("active", ""):
+        out["backup-timer"] = "the nightly backup timer is enabled but not active"
+    return out
+
+
+def send_alerts(st: dict, problems: dict, now: float, scope=None) -> None:
+    """DM new problems (one per key per ALERT_EVERY_S) + one 'recovered' DM; state saved after each DM so a
+    run killed by TimeoutStartSec never repeats what it already sent. `scope` limits which keys may
+    count as recovered (the no-~/LIVE path only owns the backup keys)."""
+    sent = st.get("alerted", {})
+    n = 0
+    for key, why in problems.items():
+        if n >= MAX_DMS_PER_RUN:
+            break
+        if now - float(sent.get(key) or 0.0) > ALERT_EVERY_S:
+            n += 1
+            if dm(f"⚠️ Iris server watchdog: {why}. (automatic message — I may not be able to answer)"):
+                sent[key] = now
+                st["alerted"] = sent
+                save_state(st)
+    recovered = [k for k in (st.get("problems") or {}) if k not in problems and (scope is None or scope(k))]
+    if recovered and any(k in sent for k in recovered):
+        dm("✅ Iris server watchdog: recovered (" + ", ".join(recovered) + ").")
+        for k in recovered:
+            sent.pop(k, None)
+    st["alerted"] = sent
 
 
 def unit_active_seconds(unit: str):
@@ -116,7 +201,7 @@ def dm(text: str) -> bool:
             return False
         env = dict(os.environ, USERPROFILE=str(HOME))
         r = subprocess.run([str(HOME / "venvs/iris-v100/bin/python"), str(ROOT / "scripts/discord_dm_user.py"),
-                            str(uid), text], capture_output=True, text=True, timeout=30, env=env)
+                            str(uid), text], capture_output=True, text=True, timeout=20, env=env)
         ok = r.returncode == 0
         log(f"alert {'sent' if ok else 'FAILED'}: {text[:80]} {'' if ok else r.stderr[-160:]}")
         return ok
@@ -128,11 +213,14 @@ def dm(text: str) -> bool:
 def main() -> int:
     now = time.time()
     st = load(STATE, {})
+    bk = backup_problems(now)
     if not (HOME / "LIVE").exists():
-        st["problems"] = {}
+        # deliberately not running here: stay quiet about everything EXCEPT backups
+        send_alerts(st, bk, now, scope=lambda k: k.startswith("backup"))
+        st.update({"checked_ts": now, "problems": bk})
         save_state(st)
-        return 0                                   # deliberately not running here: stay quiet
-    problems: dict[str, str] = {}
+        return 0
+    problems: dict[str, str] = dict(bk)
 
     # 10-10: a read that lands mid-write gives {} -> ts 0 -> "no heartbeat for 29 million min" -> a false
     # alarm + "recovered" pair DM'd to Zeke at 05:44 and 05:47 while he slept. Retry; if the file still
@@ -148,7 +236,7 @@ def main() -> int:
     if not hb_known:
         log("heartbeat file unreadable/empty this round - treating as unknown, not stale")
     rt_pid = int(hb.get("pid") or 0)
-    rt_alive = bool(rt_pid) and pid_alive(rt_pid)
+    rt_alive = bool(rt_pid) and pid_alive(rt_pid, "iris_runtime")
     sup_alive = proc_running("iris_supervise.sh")
     boot_age = float(open("/proc/uptime").read().split()[0])   # seconds since the VM booted
     sup_tail = ""
@@ -213,17 +301,8 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             log(f"log cap failed for {path.name}: {e!r}")
 
-    sent = st.get("alerted", {})
-    for key, why in problems.items():
-        if now - float(sent.get(key) or 0.0) > ALERT_EVERY_S:
-            if dm(f"⚠️ Iris server watchdog: {why}. (automatic message — I may not be able to answer)"):
-                sent[key] = now
-    recovered = [k for k in (st.get("problems") or {}) if k not in problems]
-    if recovered and any(k in sent for k in recovered):
-        dm("✅ Iris server watchdog: recovered (" + ", ".join(recovered) + ").")
-        for k in recovered:
-            sent.pop(k, None)
-    st.update({"checked_ts": now, "problems": problems, "alerted": sent,
+    send_alerts(st, problems, now)
+    st.update({"checked_ts": now, "problems": problems,
                "hb_age_s": round(hb_age, 1), "runtime_alive": rt_alive, "supervisor_alive": sup_alive})
     save_state(st)
     return 0

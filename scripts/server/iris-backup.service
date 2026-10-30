@@ -1,4 +1,6 @@
 # iris-backup - nightly off-VM tarball to the tower (scripts/server/backup_to_tower.sh). 2026-10-07.
+# 2026-10-29: a hard ceiling so a hung ssh/scp can't hold the oneshot "activating" forever (a stuck
+# run never fails, so the watchdog's "last backup ok" age check is what catches it).
 [Unit]
 Description=Iris nightly backup to the tower
 After=network-online.target
@@ -7,5 +9,6 @@ After=network-online.target
 Type=oneshot
 WorkingDirectory=%h/IRIS
 ExecStart=%h/IRIS/scripts/server/backup_to_tower.sh
+TimeoutStartSec=3h
 Nice=10
 IOSchedulingClass=idle

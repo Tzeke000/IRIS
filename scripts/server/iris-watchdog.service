@@ -1,5 +1,9 @@
 # iris-watchdog - outside-of-me watchdog (scripts/server/iris_watchdog.py): wedge -> restart flag,
 # down -> Discord DM to Zeke. 2026-10-07 hardening pass.
+# 2026-10-29 code review: TimeoutStartSec so one hang under memory pressure can't wedge the oneshot (the
+# timer never re-fires a unit that is still "activating"); every subprocess in the script has a timeout too.
+# OOMScoreAdjust=-900 was asked for but a USER unit can't lower its own score (measured 10-29: silently
+# stays 0) - that would need the root iris-oom-protect helper, which is Zeke's 10-11 OOM policy. Not here.
 [Unit]
 Description=Iris server watchdog (wedge restart + down alerts)
 
@@ -7,3 +11,4 @@ Description=Iris server watchdog (wedge restart + down alerts)
 Type=oneshot
 WorkingDirectory=%h/IRIS
 ExecStart=%h/venvs/iris-v100/bin/python %h/IRIS/scripts/server/iris_watchdog.py
+TimeoutStartSec=90

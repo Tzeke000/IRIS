@@ -6,6 +6,9 @@
 Description=Iris ears (voice daemon: VAD + whisper on the V100, mic from the tower)
 After=network-online.target iris-mouth.service
 Wants=network-online.target iris-mouth.service
+# 2026-10-29 code review: a crash loop must end in "failed" so the watchdog alerts (5 starts / 15 min).
+StartLimitIntervalSec=900
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -16,6 +19,8 @@ Environment=HF_HOME=%h/IRIS/.cache/huggingface
 ExecStart=%h/venvs/iris-v100/bin/python %h/IRIS/voice/wren_voice_daemon.py
 Restart=always
 RestartSec=10
+# 2026-10-29: protect my voice's memory from workers/renders under pressure (memory_recursiveprot is on)
+MemoryLow=6G
 
 [Install]
 WantedBy=default.target

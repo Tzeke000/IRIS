@@ -14,6 +14,9 @@ ExecStart=/usr/bin/tmux new-session -d -s iris %h/IRIS/scripts/server/iris_super
 # HUP to everything in the session -> the launcher's trap stops host, claude and runtime cleanly
 ExecStop=-/usr/bin/tmux kill-session -t iris
 TimeoutStopSec=40
+# 2026-10-29 code review: protect the core's memory under pressure. NOTE: only processes that live IN this
+# unit's cgroup are protected - a stack started from the app path (tmux in an ssh scope) is outside it.
+MemoryLow=6G
 
 [Install]
 WantedBy=default.target

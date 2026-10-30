@@ -7,6 +7,10 @@
 Description=Iris mouth (selected engine: Fish S2 Pro / StyleTTS2, on the V100, sound out of the tower)
 After=network-online.target
 Wants=network-online.target
+# 2026-10-29 code review: a crash loop (e.g. CUDA OOM) must end in "failed" so the watchdog alerts -
+# with Restart=always + RestartSec=10 it never hit the default limit. 5 starts in 15 min, then failed.
+StartLimitIntervalSec=900
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -16,6 +20,8 @@ ExecStart=%h/IRIS/scripts/server/mouth_launch.sh
 TimeoutStopSec=30
 Restart=always
 RestartSec=10
+# 2026-10-29: protect my voice's memory from workers/renders under pressure (memory_recursiveprot is on)
+MemoryLow=6G
 
 [Install]
 WantedBy=default.target
