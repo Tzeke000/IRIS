@@ -4958,12 +4958,42 @@ def _eager_init_engines() -> None:
 _IRIS_PID_FILE = ROOT / "state" / "iris.pid"
 
 
+_IRIS_PID_LOCK_FD: "int | None" = None   # held for the process lifetime (kernel drops it on death)
+
+
+def _pid_is_iris_runtime(pid: int) -> bool:
+    """True if `pid` is a live process whose command line names iris_runtime (PID-reuse safe).
+    psutil when present; otherwise /proc/<pid>/cmdline (code review 10-29: a missing psutil used to
+    mean 'treat the old process as dead')."""
+    try:
+        import psutil  # type: ignore
+    except ImportError:
+        try:
+            raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+        except Exception:
+            return False
+        return b"iris_runtime" in raw
+    try:
+        return "iris_runtime" in " ".join(psutil.Process(pid).cmdline() or [])
+    except Exception:
+        return False
+
+
 def _check_existing_iris_instance() -> None:
     """Hard-exit if another iris_runtime is already running.
 
     Called once during startup, immediately before mcp.run(). No retries —
     single instance is a hard rule.
+
+    Code review 10-29 (memory, Low-Med): the PID check was check-then-write, so two runtimes
+    starting together could both pass and share one Chroma dir. Now an exclusive flock on
+    state/iris.pid.lock is taken FIRST and held for the process lifetime (the kernel releases it
+    when we die, so it can never go stale). A busy lock is waited on for up to
+    IRIS_INSTANCE_LOCK_WAIT_S (default 8 s: covers the old runtime's 3 s force-exit during a
+    restart). The PID-file check still runs after that, so a runtime from before this change
+    (which takes no flock) is still caught.
     """
+    global _IRIS_PID_LOCK_FD
     if os.environ.get("IRIS_SKIP_INSTANCE_CHECK", "0").strip() == "1":
         print(
             "[iris_runtime] WARNING: IRIS_SKIP_INSTANCE_CHECK=1 — single-instance "
@@ -4972,46 +5002,75 @@ def _check_existing_iris_instance() -> None:
             flush=True,
         )
         return
+    got_lock = True   # no fcntl (Windows) => PID-file check only, as before
     try:
+        import fcntl  # type: ignore
+    except ImportError:
+        fcntl = None  # type: ignore
+    if fcntl is not None:
+        if _IRIS_PID_LOCK_FD is not None:
+            try:
+                os.close(_IRIS_PID_LOCK_FD)
+            except OSError:
+                pass
+            _IRIS_PID_LOCK_FD = None
+        got_lock = False
+        try:
+            _IRIS_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(_IRIS_PID_FILE.with_name(_IRIS_PID_FILE.name + ".lock")),
+                         os.O_RDWR | os.O_CREAT, 0o644)
+            try:
+                wait_s = float(os.environ.get("IRIS_INSTANCE_LOCK_WAIT_S", "8"))
+            except ValueError:
+                wait_s = 8.0
+            deadline = time.monotonic() + max(0.0, wait_s)
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    got_lock = True
+                    break
+                except (BlockingIOError, PermissionError):
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.25)
+            if got_lock:
+                _IRIS_PID_LOCK_FD = fd
+            else:
+                os.close(fd)
+        except OSError as e:
+            got_lock = True   # can't even open the lock file: fall back to the PID-file check
+            print(f"[iris_runtime] WARNING: instance lock unavailable ({e!r}); PID-file check only",
+                  file=sys.stderr, flush=True)
+    try:
+        existing_pid = 0
         if _IRIS_PID_FILE.is_file():
             try:
                 existing_pid = int(_IRIS_PID_FILE.read_text(encoding="utf-8").strip())
             except Exception:
                 existing_pid = 0
-            if existing_pid and existing_pid != os.getpid():
-                # Check if the PID is actually alive.
-                alive = False
-                try:
-                    import psutil  # type: ignore
-
-                    p = psutil.Process(existing_pid)
-                    # Match on cmdline reference to iris_runtime.py to avoid
-                    # killing an unrelated process that happens to have the
-                    # same PID after PID reuse.
-                    cmdline = " ".join(p.cmdline() or [])
-                    if "iris_runtime" in cmdline:
-                        alive = True
-                except Exception:
-                    # psutil unavailable or process doesn't exist — treat as
-                    # not-alive. Fallback: try os.kill(pid, 0) but that's
-                    # POSIX-only; on Windows it raises OSError for any PID.
-                    alive = False
-                if alive:
-                    print(
-                        f"[iris_runtime] ERROR: another iris_runtime is already "
-                        f"running (PID {existing_pid}). Shut it down first or set "
-                        f"IRIS_SKIP_INSTANCE_CHECK=1 to bypass.",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    sys.exit(1)
-                # Stale lockfile — overwrite silently.
+        if existing_pid and existing_pid != os.getpid():
+            if _pid_is_iris_runtime(existing_pid):
                 print(
-                    f"[iris_runtime] note: cleaning stale lockfile "
-                    f"(PID {existing_pid} no longer running iris_runtime)",
+                    f"[iris_runtime] ERROR: another iris_runtime is already "
+                    f"running (PID {existing_pid}). Shut it down first or set "
+                    f"IRIS_SKIP_INSTANCE_CHECK=1 to bypass.",
                     file=sys.stderr,
                     flush=True,
                 )
+                _release_instance_flock()
+                sys.exit(1)
+            # Stale lockfile — overwrite silently.
+            print(
+                f"[iris_runtime] note: cleaning stale lockfile "
+                f"(PID {existing_pid} no longer running iris_runtime)",
+                file=sys.stderr,
+                flush=True,
+            )
+        if not got_lock:
+            # Someone holds the flock but the PID file names no live runtime: an orphaned child that
+            # inherited the descriptor, most likely. Fail open (the pre-flock behaviour) - loudly.
+            print("[iris_runtime] WARNING: instance lock is held but no live iris_runtime owns the "
+                  "PID file - continuing WITHOUT the lock", file=sys.stderr, flush=True)
         # Write our PID.
         _IRIS_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
         _IRIS_PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
@@ -5024,6 +5083,16 @@ def _check_existing_iris_instance() -> None:
             file=sys.stderr,
             flush=True,
         )
+
+
+def _release_instance_flock() -> None:
+    global _IRIS_PID_LOCK_FD
+    if _IRIS_PID_LOCK_FD is not None:
+        try:
+            os.close(_IRIS_PID_LOCK_FD)   # closing the descriptor drops the flock
+        except OSError:
+            pass
+        _IRIS_PID_LOCK_FD = None
 
 
 def _release_iris_pid_lock() -> None:
@@ -5041,6 +5110,7 @@ def _release_iris_pid_lock() -> None:
                 _IRIS_PID_FILE.unlink(missing_ok=True)
     except OSError:
         pass
+    _release_instance_flock()   # the .lock file itself stays (unlinking lock files races)
 
 
 def _force_exit_after_mcp_run() -> None:
