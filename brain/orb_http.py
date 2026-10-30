@@ -148,12 +148,28 @@ def _foreign_origin(origin: str | None) -> bool:
 # Host allow-list (hardening 10-07): blocks DNS rebinding — a web page on the tower whose domain
 # re-resolves to this machine would otherwise read GETs (camera frames, chat, memories) because a
 # same-origin GET carries no Origin header. Allowed: loopback + IRIS_ORB_ALLOWED_HOSTS (comma list
-# in ~/.config/iris/stack.env, kept out of the repo). Unset => no host check (fail-open, logged once).
-_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]"} | {
-    h.strip().lower() for h in os.environ.get("IRIS_ORB_ALLOWED_HOSTS", "").split(",") if h.strip()}
-_HOST_CHECK = bool(os.environ.get("IRIS_ORB_ALLOWED_HOSTS", "").strip())
+# in ~/.config/iris/stack.env, kept out of the repo).
+# Code review 10-29 (security, High): unset used to mean NO host check (fail-open). Now unset =>
+# FAIL CLOSED to loopback only, logged loudly; the explicit opt-out is IRIS_ORB_ALLOWED_HOSTS=*.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]"})
+
+
+def _parse_allowed_hosts(raw: str | None) -> tuple[bool, set[str]]:
+    """(check_enabled, allowed_hosts) from the env value. '' => loopback only; '*' => no check."""
+    items = [h.strip().lower() for h in (raw or "").split(",") if h.strip()]
+    if "*" in items:
+        return False, set(_LOOPBACK_HOSTS)
+    return True, set(_LOOPBACK_HOSTS) | set(items)
+
+
+_HOST_CHECK, _ALLOWED_HOSTS = _parse_allowed_hosts(os.environ.get("IRIS_ORB_ALLOWED_HOSTS"))
 if not _HOST_CHECK:
-    print("[orb_http] IRIS_ORB_ALLOWED_HOSTS unset - Host header NOT checked", file=sys.stderr, flush=True)
+    print("[orb_http] IRIS_ORB_ALLOWED_HOSTS=* - Host header NOT checked (explicit opt-out)",
+          file=sys.stderr, flush=True)
+elif not os.environ.get("IRIS_ORB_ALLOWED_HOSTS", "").strip():
+    print("[orb_http] WARNING: IRIS_ORB_ALLOWED_HOSTS unset - only LOOPBACK hosts are accepted "
+          "(the tower app will get 421 until it is set in ~/.config/iris/stack.env)",
+          file=sys.stderr, flush=True)
 
 
 def _host_ok(host: str | None) -> bool:
