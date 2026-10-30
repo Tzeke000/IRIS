@@ -105,7 +105,8 @@ fi
 echo "Starting Iris here ($ROLE). This window IS her — leave it open."
 # the launcher refuses a LIVE start without this pass (scripts/server/start_iris_linux.sh)
 export IRIS_START_GATE="$ROLE"
-"$SCRIPT"
+# V3 step 1.6 (2026-10-30): the v2/v3 chooser (~/.config/iris/active_stack; missing = v2) runs the launcher; without it, v2 as before.
+if [ -x "$HOME/IRIS/scripts/server/stack_launch.sh" ]; then "$HOME/IRIS/scripts/server/stack_launch.sh" "$MODE"; else "$SCRIPT"; fi
 RC=$?
 echo "Iris exited (rc=$RC)."
 pause_close

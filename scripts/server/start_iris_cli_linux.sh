@@ -12,8 +12,11 @@ if [ -z "${IRIS_START_GATE:-}" ]; then
   echo "REFUSED: not started through ~/iris_start.sh (IRIS_START_GATE unset)."; exit 3
 fi
 mkdir -p "$ROOT/.tmp"
-exec 9>"$ROOT/.tmp/launcher.lock"
-flock -n 9 || { echo "another launcher holds .tmp/launcher.lock - standing down"; exit 10; }
+# V3 step 1.6: ONE lock for every tree (~/IRIS/.tmp/launcher.lock; stack_launch.sh exports IRIS_LAUNCHER_LOCK)
+LOCK="${IRIS_LAUNCHER_LOCK:-$HOME/IRIS/.tmp/launcher.lock}"
+mkdir -p "$(dirname "$LOCK")"
+exec 9>"$LOCK"
+flock -n 9 || { echo "another launcher holds $LOCK - standing down"; exit 10; }
 pkill -u "$(id -u)" -f "$ROOT/iris_runtime.py" 2>/dev/null
 for p in 5876; do fuser -k -n tcp "$p" >/dev/null 2>&1; done
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
