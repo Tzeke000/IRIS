@@ -80,6 +80,36 @@ const SINK_PYTHONW: &str = r"D:\Wren-Companion\.venv\Scripts\pythonw.exe";
 const SINK_SCRIPT: &str = r"D:\Wren-Companion\scripts\audio_sink.py";
 
 struct VoicePlayer(std::sync::Mutex<Option<std::process::Child>>);
+// 2026-10-30: the player was spawned ONCE; when it died (PortAudio crash) my voice played nowhere while
+// the app looked fine. A watchdog thread now respawns a dead player (at most once per 30 s), and stops
+// respawning once the app is exiting.
+static APP_EXITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn spawn_voice_player_watchdog(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let mut last_spawn = std::time::Instant::now();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            if APP_EXITING.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let Some(vp) = app.try_state::<VoicePlayer>() else { continue };
+            let Ok(mut g) = vp.0.lock() else { continue };
+            let dead = match g.as_mut() {
+                Some(child) => !matches!(child.try_wait(), Ok(None)),
+                None => true,
+            };
+            if dead && last_spawn.elapsed() >= std::time::Duration::from_secs(30)
+                && !APP_EXITING.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                if let Some(mut old) = g.take() {
+                    let _ = old.wait();
+                }
+                *g = start_voice_player();
+                last_spawn = std::time::Instant::now();
+            }
+        }
+    });
+}
 
 #[cfg(windows)]
 fn start_voice_player() -> Option<std::process::Child> {
@@ -745,6 +775,7 @@ fn main() {
         // a hand-off, so a relaunch never spawns (and orphans) a second player
         .setup(|app| {
             app.manage(VoicePlayer(std::sync::Mutex::new(start_voice_player())));
+            spawn_voice_player_watchdog(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![server_vms, server_vm_power, server_reach, server_open, server_close, server_start_iris,
@@ -762,6 +793,7 @@ fn main() {
                 }
             }
             if let tauri::RunEvent::Exit = event {
+                APP_EXITING.store(true, std::sync::atomic::Ordering::SeqCst);
                 if let Some(vp) = app.try_state::<VoicePlayer>() {
                     if let Ok(mut g) = vp.0.lock() {
                         if let Some(mut child) = g.take() {
