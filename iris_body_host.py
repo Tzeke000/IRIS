@@ -173,6 +173,7 @@ DAEMON_DRAIN_CAP_S = float(os.environ.get("IRIS_DAEMON_DRAIN_CAP_S", "180"))
 # bargein_hold(True/False) around the turn + playback tail. IRIS_BARGEIN=0 restores the
 # old closed-mic behavior (required if this box ever moves to speakers — see
 # barge_in_scoped_two_layer_2026-06-29 for the AEC+voiceprint stack that needs).
+BARGEIN_STOPS_TURN = os.environ.get("IRIS_BARGEIN_STOPS_TURN", "1").strip().lower() not in ("0", "off", "false", "no")
 BARGEIN_ON = os.environ.get("IRIS_BARGEIN", "1").strip().lower() not in ("0", "off", "false", "no")
 # Socket timeout for one watch window: must exceed the daemon-side cap (900s backstop;
 # in practice the host ends the window at turn end via bargein_hold False).
@@ -982,6 +983,17 @@ async def voice_reader(queue, loop, mic_gate):
                 print("\n[voice <- Zeke, BARGE-IN] " + barge, flush=True)
                 _blog("ears", barge, {"bargein": True})
                 await _enqueue(queue, ("voice", barge, None))
+                # 10-29 full-duplex: the daemon only stopped the MOUTH - I kept generating the
+                # rest of a reply he had already cut off. Stop the turn too, so his words are
+                # the very next thing I answer (interrupt verified live: session survives).
+                _t, _c = _INBOX.get("turn"), _INBOX.get("client")
+                if BARGEIN_STOPS_TURN and _t is not None and _c is not None and _t.active and _t.speak_out:
+                    try:
+                        await _c.interrupt()
+                        print("[host] barge-in: interrupted the speaking turn.", flush=True)
+                        _blog("ears", "barge-in interrupted the turn")
+                    except Exception as _ie:  # noqa: BLE001
+                        print("\n[host] barge-in interrupt failed (non-fatal): " + repr(_ie), file=sys.stderr)
             else:
                 # Window closed with no interruption (or hold not set yet — the main
                 # loop opens it right after clearing the gate). Brief sleep so the
