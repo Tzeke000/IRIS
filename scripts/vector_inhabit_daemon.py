@@ -104,11 +104,16 @@ COOLDOWN = {
 }
 
 
+_LOG_MAX_BYTES = 5_000_000   # code review 10-29: the log grew forever
+
+
 def log(msg: str) -> None:
     line = f"{time.strftime('%H:%M:%S')} {msg}"
     print(line, flush=True)
     try:
         LOG.parent.mkdir(parents=True, exist_ok=True)
+        if LOG.exists() and LOG.stat().st_size > _LOG_MAX_BYTES:
+            LOG.replace(LOG.with_suffix(".log.1"))   # one generation kept
         with LOG.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
@@ -152,13 +157,31 @@ POSSESSION_CTL = REPO / "state" / "vector" / "possession.json"
 POSSESSION_STATUS = REPO / "state" / "vector" / "possession_status.json"
 
 
+_possession_last_good: "bool | None" = None
+
+
 def _possession_wanted() -> bool:
+    """hold flag from possession.json. Missing file = POSSESSED (the default).
+    Code review 10-29: an UNPARSEABLE file (torn mid-write) used to read as
+    'hold' too — which re-possessed the robot mid-dock, the documented failure
+    that broke docking. Now a bad read keeps the LAST GOOD value."""
+    global _possession_last_good
+    try:
+        raw = POSSESSION_CTL.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        _possession_last_good = None
+        return True    # default: POSSESSED
+    except Exception:
+        return True if _possession_last_good is None else _possession_last_good
     try:
         import json as _json
-        return bool(_json.loads(
-            POSSESSION_CTL.read_text(encoding="utf-8")).get("hold", True))
+        d = _json.loads(raw)
+        if not isinstance(d, dict):
+            raise ValueError("possession.json is not an object")
+        _possession_last_good = bool(d.get("hold", True))
+        return _possession_last_good
     except Exception:
-        return True    # default: POSSESSED
+        return True if _possession_last_good is None else _possession_last_good
 
 
 def _battery_emergency() -> bool:
@@ -1049,45 +1072,81 @@ def _nervous_loop(robot, alive: dict) -> None:
     log("nervous system offline (connection closing)")
 
 
+def _conn_thread_dead(robot) -> bool:
+    """True when the SDK's own connection thread has exited. After a silent
+    disconnect the cached robot.status keeps returning the LAST values and every
+    sensor file we write is stamped fresh — frozen data that passes every
+    freshness check (code review 10-29). The thread dying is the observable."""
+    th = getattr(getattr(robot, "conn", None), "_thread", None)
+    return th is not None and not th.is_alive()
+
+
+def _bounded_disconnect(robot, timeout_s: float = 10.0) -> None:
+    """robot.disconnect() can block forever on a dead loop (close_camera_feed
+    is a blocking gRPC call — see the 10-05 py-spy note). Run it detached with
+    a deadline so a reconnect is never wedged behind a dead connection."""
+    import threading as _threading
+
+    def _d():
+        try:
+            robot.disconnect()
+        except Exception:
+            pass
+    t = _threading.Thread(target=_d, daemon=True, name="vector-disconnect")
+    t.start()
+    t.join(timeout=timeout_s)
+    if t.is_alive():
+        log(f"disconnect still blocking after {timeout_s:.0f}s — detached; "
+            "reconnecting anyway")
+
+
 def run_once() -> None:
     import anki_vector
 
-    with anki_vector.Robot(SERIAL, behavior_control_level=None,
-                           cache_animation_lists=False) as robot:
-        log("connected — nerves online (observe mode, his brain still runs)")
-        # enable marker detection so robot.world.charger (+ cube) populate — the
-        # native 'go home' pose (Zeke 2026-07-14). FIXED 2026-07-17: SDK 0.8.1 has
-        # NO enable_marker_detection (that's newer forks) — this call silently
-        # failed since 07-14. The real switch is enable_custom_object_detection.
-        try:
-            v = robot.vision
-            if hasattr(v, "enable_marker_detection"):
-                try:
-                    v.enable_marker_detection(detect_markers=True)
-                except TypeError:
-                    v.enable_marker_detection()
-            else:
-                v.enable_custom_object_detection(True)
-            log("marker detection ON — charger/cube pose available once seen")
-        except Exception as e:
-            log(f"marker-vision enable failed (non-fatal): {e!r}")
-        alive = {"ok": True}
-        import threading as _threading
-        if os.environ.get("IRIS_VECTOR_EARS", "1") != "0":
-            _threading.Thread(target=_ears_loop, args=(robot, alive),
-                              daemon=True, name="vector-ears").start()
-        _threading.Thread(target=_nav_map_loop, args=(robot, alive),
-                          daemon=True, name="vector-navmap").start()
-        if os.environ.get("IRIS_VECTOR_POSSESSION", "1") != "0":
-            _threading.Thread(target=_possession_loop, args=(alive,),
-                              daemon=True, name="vector-possession").start()
-        if os.environ.get("IRIS_NS", "1") != "0":
-            _threading.Thread(target=_nervous_loop, args=(robot, alive),
-                              daemon=True, name="vector-nervous").start()
-        try:
-            _poll_loop(robot)
-        finally:
-            alive["ok"] = False
+    robot = anki_vector.Robot(SERIAL, behavior_control_level=None,
+                              cache_animation_lists=False)
+    robot.connect(robot.behavior_activation_timeout)   # == Robot.__enter__
+    try:
+        _run_connected(robot)
+    finally:
+        _bounded_disconnect(robot)                    # == Robot.__exit__, bounded
+
+
+def _run_connected(robot) -> None:
+    log("connected — nerves online (observe mode, his brain still runs)")
+    # enable marker detection so robot.world.charger (+ cube) populate — the
+    # native 'go home' pose (Zeke 2026-07-14). FIXED 2026-07-17: SDK 0.8.1 has
+    # NO enable_marker_detection (that's newer forks) — this call silently
+    # failed since 07-14. The real switch is enable_custom_object_detection.
+    try:
+        v = robot.vision
+        if hasattr(v, "enable_marker_detection"):
+            try:
+                v.enable_marker_detection(detect_markers=True)
+            except TypeError:
+                v.enable_marker_detection()
+        else:
+            v.enable_custom_object_detection(True)
+        log("marker detection ON — charger/cube pose available once seen")
+    except Exception as e:
+        log(f"marker-vision enable failed (non-fatal): {e!r}")
+    alive = {"ok": True}
+    import threading as _threading
+    if os.environ.get("IRIS_VECTOR_EARS", "1") != "0":
+        _threading.Thread(target=_ears_loop, args=(robot, alive),
+                          daemon=True, name="vector-ears").start()
+    _threading.Thread(target=_nav_map_loop, args=(robot, alive),
+                      daemon=True, name="vector-navmap").start()
+    if os.environ.get("IRIS_VECTOR_POSSESSION", "1") != "0":
+        _threading.Thread(target=_possession_loop, args=(alive,),
+                          daemon=True, name="vector-possession").start()
+    if os.environ.get("IRIS_NS", "1") != "0":
+        _threading.Thread(target=_nervous_loop, args=(robot, alive),
+                          daemon=True, name="vector-nervous").start()
+    try:
+        _poll_loop(robot)
+    finally:
+        alive["ok"] = False
 
 
 def _poll_loop(robot) -> None:
@@ -1106,6 +1165,9 @@ def _poll_loop(robot) -> None:
         was_charging = None
         while True:
             time.sleep(POLL_S)
+            if _conn_thread_dead(robot):
+                raise RuntimeError("SDK connection thread DIED — sensor data "
+                                   "would be frozen; reconnecting")
             st = robot.status
 
             # petting: touched continuously for >1.5s — announce ONCE per touch
@@ -1175,6 +1237,15 @@ def _poll_loop(robot) -> None:
             _append_trail(robot, charging)  # continuous pose tape (all drivers)
 
 
+def _ping_cmd(host: str) -> list:
+    """One ping, ~2s wait. `-n/-w ms` is Windows syntax; on Linux `-n` means
+    numeric and `-w` a deadline in SECONDS, so the old argv never got a reply
+    and the alarm always said 'does NOT even ping' (code review 10-29)."""
+    if os.name == "nt":
+        return ["ping", "-n", "1", "-w", "2000", host]
+    return ["ping", "-c", "1", "-W", "2", host]
+
+
 def _battery_watch_loop() -> None:
     """Poll the body's battery every ~45s, expose it (state/vector/battery.json),
     and fire guardrail nudges. Two reflexes for the drain-to-death failure:
@@ -1241,7 +1312,7 @@ def _battery_watch_loop() -> None:
             pingable = False
             try:
                 pingable = _sp.run(
-                    ["ping", "-n", "1", "-w", "2000", ROBOT_IP],
+                    _ping_cmd(ROBOT_IP),
                     capture_output=True, timeout=6).returncode == 0
             except Exception:
                 pass

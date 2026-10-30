@@ -7,6 +7,12 @@ After=iris-wirepod.service
 [Service]
 Type=simple
 WorkingDirectory=%h/IRIS
+# Code review 10-29: with no Environment= the server silently fell back to
+# llama3.2:3b with the tool loop OFF. Pin the production little brain
+# (iris-little-v16, see profiles/iris/little_iris.md) + her tools. Still inert
+# while state/little_brain/pilot_deliberately_off.json is off:true.
+Environment=IRIS_LOCAL_MODEL=iris-little-v16
+Environment=IRIS_LB_TOOLS=1
 ExecStart=%h/venvs/iris-v100/bin/python -u %h/IRIS/scripts/vector_brain_server.py
 Restart=always
 RestartSec=10

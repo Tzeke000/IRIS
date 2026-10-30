@@ -44,6 +44,36 @@ CRUMBS = REPO / "state" / "vector" / "breadcrumbs.jsonl"
 BATTERY_JSON = REPO / "state" / "vector" / "battery.json"
 CRUMB_SPACING_MM = 25.0     # min distance between logged breadcrumbs
 CRUMB_KEEP = 400            # file trimmed to this many recent crumbs
+_JSONL_TRIM_BYTES = 256_000  # code review 10-29: crumbs/hazards grew forever
+
+
+def _trim_tail(path: Path, keep_lines: int, max_bytes: int = _JSONL_TRIM_BYTES) -> None:
+    """Bound an append-only JSONL to its newest `keep_lines` lines once it
+    passes max_bytes (atomic tmp + replace). Readers only ever use that tail,
+    so what they can see is unchanged."""
+    try:
+        if not path.exists() or path.stat().st_size <= max_bytes:
+            return
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        tmp = path.with_name(path.name + ".trim.tmp")
+        tmp.write_text("\n".join(lines[-keep_lines:]) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
+POSSESSION_JSON = REPO / "state" / "vector" / "possession.json"
+
+
+def _write_possession(hold: bool, by: str) -> None:
+    """Atomic possession.json write (code review 10-29): the inhabit daemon
+    reads it every 3s, and a torn read of a bare write_text used to count as
+    'hold' — re-possessing the robot mid-dock."""
+    POSSESSION_JSON.parent.mkdir(parents=True, exist_ok=True)
+    tmp = POSSESSION_JSON.with_name(POSSESSION_JSON.name + ".tmp")
+    tmp.write_text(json.dumps({"hold": bool(hold), "set_ts": time.time(),
+                               "by": by}), encoding="utf-8")
+    tmp.replace(POSSESSION_JSON)
 
 
 def _battery_low_off_charger() -> bool:
@@ -70,6 +100,7 @@ def log_hazard(kind: str, x, y, origin, note: str = "") -> None:
         return
     try:
         HAZARDS.parent.mkdir(parents=True, exist_ok=True)
+        _trim_tail(HAZARDS, HAZARD_KEEP)
         with HAZARDS.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"t": round(time.time(), 2), "kind": kind,
                                 "x": round(float(x), 1), "y": round(float(y), 1),
@@ -115,6 +146,36 @@ def _return_margin(target_xy=None) -> dict:
     return {"ok": True}
 
 
+def _session_priority():
+    """Control priority of the open body session, or None if none is open."""
+    try:
+        from brain import vector_session
+        s = vector_session.get_session(create=False)
+        if s is None or not getattr(s, "connected", False):
+            return None
+        return str(getattr(s, "_priority", "default")).lower()
+    except Exception:
+        return None
+
+
+def _guarded_backoff(s, speed_mm_s: float, secs: float) -> bool:
+    """Straight back-off THROUGH the session's drive() (code review 10-29):
+    the old raw set_wheel_motors pokes bypassed the guard entirely — no edge
+    check before reversing, no setpoint expiry if this thread died mid-sleep.
+    drive() refuses on a live cliff/pickup and the guard owns the setpoint
+    (it expires on its own after `secs`). Returns False if refused/failed."""
+    ok = False
+    with contextlib.suppress(Exception):
+        r = s.drive(float(speed_mm_s), float(speed_mm_s),
+                    hold=float(secs), accel=0.0)
+        ok = bool(r.get("ok"))
+        if ok:
+            time.sleep(float(secs))
+    with contextlib.suppress(Exception):
+        s.drive(0.0, 0.0, hold=0.3, accel=0.0)
+    return ok
+
+
 def _session():
     from brain import vector_session
     s = vector_session.get_session(create=False)
@@ -127,7 +188,14 @@ class Pilot:
     def __init__(self):
         self.thread: threading.Thread | None = None
         self.mission: dict | None = None
-        self.abort_evt = threading.Event()
+        # PER-MISSION ABORT (code review 10-29, HIGH): there used to be ONE shared
+        # event that a new mission set, waited 2.5s on, then CLEARED — an old
+        # mission still inside a 10s scan / 90s dock never saw it and kept
+        # driving alongside the new one. Now every mission owns its event; the
+        # mission thread reads its own (thread-local), outside callers (abort)
+        # hit the current mission's.
+        self._cur_evt = threading.Event()
+        self._tl = threading.local()
         self.events: collections.deque = collections.deque(maxlen=48)
         self.state = "idle"                      # idle | running
         self.started_ts = 0.0
@@ -151,8 +219,22 @@ class Pilot:
                 )
         return ev
 
+    @property
+    def abort_evt(self) -> threading.Event:
+        evt = getattr(self._tl, "evt", None)
+        return evt if evt is not None else self._cur_evt
+
     # ------------------------------------------------------------ control
     def start(self, mission: dict) -> dict:
+        # OVERRIDE GATE (code review 10-29): missions issue SDK turn/straight
+        # calls the session guard never sees, so the firmware cliff stop is
+        # their last net — and OVERRIDE priority switches that off. Override is
+        # for Zeke-present emergencies; no background missions under it.
+        if _session_priority() == "override":
+            return {"ok": False,
+                    "refused": "body session is at OVERRIDE priority (firmware "
+                               "cliff-stop OFF) — missions refused. body_close + "
+                               "body_open at default priority first"}
         # BATTERY GATE (2026-07-17): low battery off-charger = dock or nothing.
         if str(mission.get("kind")) != "dock" and _battery_low_off_charger():
             return {"ok": False,
@@ -165,18 +247,30 @@ class Pilot:
                 return {"ok": False, "refused": mg.get("refused")}
             margin_warn = mg.get("warn")
         with _LOCK:
-            if self.state == "running":
-                # preempt: newest goal wins (cognition changed its mind)
-                self.abort_evt.set()
-                if self.thread is not None:
-                    self.thread.join(timeout=2.5)
+            old = self.thread
+            if old is not None and old.is_alive():
+                # preempt: newest goal wins (cognition changed its mind) — but
+                # ONLY once the old mission has actually let go of the wheels.
+                self._cur_evt.set()
+                old.join(timeout=2.5)
+                if old.is_alive():
+                    self._event("preempt_refused",
+                                {"old": (self.mission or {}).get("kind"),
+                                 "new": mission.get("kind")})
+                    return {"ok": False,
+                            "refused": "previous mission "
+                                       f"({(self.mission or {}).get('kind')}) is "
+                                       "still unwinding inside a blocking SDK call "
+                                       "— it has been told to abort; retry shortly "
+                                       "(two missions must never drive at once)"}
                 self._event("preempted", {"old": (self.mission or {}).get("kind")})
-            self.abort_evt.clear()
+            evt = threading.Event()
+            self._cur_evt = evt
             self.mission = dict(mission)
             self.state = "running"
             self.started_ts = time.time()
             self.thread = threading.Thread(
-                target=self._run, args=(dict(mission),),
+                target=self._run, args=(dict(mission), evt),
                 name="body-pilot", daemon=True)
             self.thread.start()
         out = {"ok": True, "started": mission.get("kind"),
@@ -209,6 +303,7 @@ class Pilot:
     # the pose origin_id: a frame reset (pickup/sleep) makes old crumbs alien.
     def _crumb_loop(self, stop_evt: threading.Event) -> None:
         last_xy = None
+        _trim_tail(CRUMBS, CRUMB_KEEP)
         while not stop_evt.is_set():
             with contextlib.suppress(Exception):
                 s = _session()
@@ -240,7 +335,9 @@ class Pilot:
         return out
 
     # ------------------------------------------------------------ missions
-    def _run(self, m: dict) -> None:
+    def _run(self, m: dict, evt: threading.Event | None = None) -> None:
+        if evt is not None:
+            self._tl.evt = evt          # this thread only ever sees ITS abort
         kind = str(m.get("kind") or "")
         crumb_stop = threading.Event()
         try:
@@ -265,8 +362,11 @@ class Pilot:
             self._event("error", repr(e)[:220], nudge=True)
         finally:
             crumb_stop.set()
-            self.state = "idle"
-            self.mission = None
+            # only the CURRENT mission may mark the pilot idle — a preempted
+            # one finishing late must not reset state under its successor.
+            if self.thread is threading.current_thread():
+                self.state = "idle"
+                self.mission = None
 
     # ------------------------------------------------- obstacle avoidance
     def _tof_read(self, s) -> float:
@@ -346,14 +446,14 @@ class Pilot:
         to a 7-stop polar scan + VFH-lite valley pick — research playbook):
         back off, sweep the forward arc, steer into the valley nearest the
         goal bearing, sidestep. Returns False if aborted."""
+        if _session_priority() == "override":
+            # session re-opened at OVERRIDE mid-mission: no unguarded SDK moves
+            self._event("detour_refused", "session at OVERRIDE priority")
+            return False
         self._event("detour", {"why": str(why)[:140]})
         st = dict(s._latest or {})
         log_hazard("detour", st.get("x"), st.get("y"), st.get("origin"), why)
-        with contextlib.suppress(Exception):        # back off nose-on-obstacle
-            s._raw_wheels(-70.0, -70.0)
-            time.sleep(0.9)
-            s._raw_wheels(0.0, 0.0)
-            s._wheels = (0.0, 0.0)
+        _guarded_backoff(s, -70.0, 0.9)              # back off nose-on-obstacle
         if self.abort_evt.is_set():
             return False
         scan = self.polar_scan(s, arc_deg=150.0, steps=7)
@@ -440,10 +540,7 @@ class Pilot:
             st = dict(s._latest or {})
             log_hazard("blocked", st.get("x"), st.get("y"), st.get("origin"),
                        str(r.get("refused") or "")[:100])
-            with contextlib.suppress(Exception):
-                s._raw_wheels(-60.0, -60.0)
-                time.sleep(0.5)
-                s._raw_wheels(0.0, 0.0)
+            _guarded_backoff(s, -60.0, 0.5)
             self._event("blocked", r, nudge=True)
 
     def _m_route(self, m: dict) -> None:
@@ -661,10 +758,8 @@ class Pilot:
                 return
         self._event("smart_park", "handing the last stretch to the stock brain "
                                   "(possession released, session closed)")
-        ctl = REPO / "state" / "vector" / "possession.json"
         with contextlib.suppress(Exception):
-            ctl.write_text(json.dumps({"hold": False, "set_ts": time.time(),
-                                       "by": "smart_park"}), encoding="utf-8")
+            _write_possession(False, "smart_park")
         with contextlib.suppress(Exception):
             from brain import vector_session as vs
             vs.close_session(reason="smart-park handoff to stock brain")
@@ -698,8 +793,7 @@ class Pilot:
         # finish, and tell cognition exactly how to re-hold.
         if docked:
             with contextlib.suppress(Exception):
-                ctl.write_text(json.dumps({"hold": True, "set_ts": time.time(),
-                                           "by": "smart_park"}), encoding="utf-8")
+                _write_possession(True, "smart_park")
         self._event("smart_park_result",
                     {"docked": docked,
                      "note": ("stock brain parked me; possession re-held; "

@@ -77,12 +77,32 @@ NERVES = FRAME_DIR / "nerves.json"
 _LB_ACTIONS = REPO / "state" / "little_brain" / "big_iris_actions.jsonl"
 
 
+_LB_ACTIONS_MAX_BYTES = 1_000_000   # code review 10-29: logs grew forever
+_LB_ACTIONS_KEEP_LINES = 2000       # readers only ever look at the recent tail
+
+
+def _trim_jsonl_tail(path: Path, max_bytes: int, keep_lines: int) -> None:
+    """Keep an append-only JSONL bounded: once it passes max_bytes, rewrite it
+    (tmp + replace, atomic for readers) to its newest keep_lines lines. The
+    tail is what every reader uses, so the trim never loses live history."""
+    try:
+        if not path.exists() or path.stat().st_size <= max_bytes:
+            return
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        tmp = path.with_name(path.name + ".trim.tmp")
+        tmp.write_text("\n".join(lines[-keep_lines:]) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
 def _log_big_action(action: str, **params) -> None:
     """Append a big-Iris body command to the little brain's watch feed. Best-effort;
     a logging failure must NEVER break a real body command."""
     try:
         import json as _json
         _LB_ACTIONS.parent.mkdir(parents=True, exist_ok=True)
+        _trim_jsonl_tail(_LB_ACTIONS, _LB_ACTIONS_MAX_BYTES, _LB_ACTIONS_KEEP_LINES)
         with _LB_ACTIONS.open("a", encoding="utf-8") as f:
             f.write(_json.dumps({"ts": time.time(), "action": action,
                                  "params": params}, ensure_ascii=False) + "\n")
@@ -499,11 +519,22 @@ class BodySession:
             try:
                 now = time.time()
                 l, r = self._wheels
-                translating = (l + r) != 0
+                # CODE REVIEW 10-29 (HIGH): this was `(l + r) != 0`, so a spin in
+                # place (lw = -rw) summed to 0 and the guard treated it as "not
+                # moving" — the setpoint never expired and the cliff/stuck checks
+                # were skipped; a frozen cognition loop mid-spin span him until the
+                # idle release. ANY non-zero wheel is motion.
+                translating = (l != 0 or r != 0)
+                spinning = translating and (l + r) == 0
 
                 # a) EDGE-GUARD FIRST — stop instantly on a real cliff/fall/pickup.
+                #    A pure spin keeps drive()'s documented escape (spin away from
+                #    an edge): only a CLIFF is tolerated while spinning in place —
+                #    pickup/fall still stop it.
                 if translating:
                     danger = self._edge_danger()
+                    if danger and spinning and danger.startswith("cliff"):
+                        danger = None
                     if danger:
                         self._raw_wheels(0.0, 0.0)
                         self._wheels = (0.0, 0.0)
