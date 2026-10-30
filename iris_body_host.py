@@ -1123,6 +1123,149 @@ def _vr_coalesce(queue, entry):
     return entry
 
 
+# ── MID-TURN INBOX CHECKPOINT (2026-10-29, Zeke: "multitask, so we can still talk while you're
+# working"; code review "heads-down awareness"). The main loop is the ONLY queue consumer and it
+# waits for a turn's ResultMessage, so every message that arrived during a long working turn sat
+# unseen until the work ended (hours, 10-29). Now an SDK PostToolUse hook runs at every tool
+# boundary of a host turn and HANDS ME the waiting live inputs as additionalContext. Items handed
+# over are REMOVED from the queue (they are mine now - they don't come back as separate turns);
+# I choose per item: answer now, say I'll answer after the task, or defer. No work is killed.
+# "Iris, look up for a moment" from Zeke is flagged PRIORITY; if no tool boundary comes within
+# LOOKUP_INTERRUPT_S, the look-up watcher interrupt()s the turn so the queue gets served.
+_INBOX = {"queue": None, "turn": None, "client": None, "last_tool_ts": 0.0}
+INBOX_SOURCES = ("discord", "orb", "voice", "vr", "letter")
+INBOX_MAX_CHARS = 6000
+LOOKUP_INTERRUPT_S = float(os.environ.get("IRIS_LOOKUP_INTERRUPT_S", "90"))
+_LOOKUP_RE = re.compile(r"\biris\W{0,3}\s*look\s+up\b", re.I)
+
+
+def _inbox_line(source, text, msg_id, sender, age_s):
+    age = (" (" + str(int(age_s)) + "s ago)") if age_s is not None and age_s >= 5 else ""
+    pri = "★ PRIORITY (look-up phrase) ★ " if source in ("discord", "voice", "orb") and _LOOKUP_RE.search(text or "") else ""
+    if source == "discord":
+        return (pri + "DISCORD from Zeke" + age + ", message_id " + str(msg_id) + " - reply with the discord "
+                "reply tool, chat_id " + str(DISCORD_CHANNEL_ID) + ":\n" + text)
+    if source == "orb":
+        return (pri + "ORB/app from Zeke" + age + " - answer via the iris chat_reply tool with id='" + str(msg_id)
+                + "':\n" + text)
+    if source == "voice":
+        return (pri + "VOICE - said OUT LOUD in the room" + age + " (I was mid-task, so nothing auto-speaks: "
+                "answer with voice_speak if the mouth is on, else Discord):\n" + text)
+    if source == "vr":
+        return "VR TEMPLE" + age + " (answer with vr_temple speak):\n" + text
+    if source == "letter":
+        return ("LETTER from " + (sender or "a sibling").capitalize() + age + " (letter_id " + str(msg_id)
+                + ") - sibling letter tool if it wants a reply:\n" + text)
+    return source + age + ": " + text
+
+
+def _inbox_drain():
+    """Take every waiting live input off the queue (others go back untouched). Same get_nowait /
+    put-back pattern as _vr_coalesce. Returns [(source, text, msg_id, sender, age_s)]."""
+    q = _INBOX["queue"]
+    if q is None:
+        return []
+    taken, held = [], []
+    while True:
+        try:
+            e = q.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        (taken if e[2][0] in INBOX_SOURCES else held).append(e)
+    for e in held:
+        q.put_nowait(e)
+    out = []
+    for e in taken:
+        item = e[2]
+        source, text, msg_id = item[0], item[1], item[2]
+        sender = item[3] if len(item) > 3 else None
+        if source == "orb":
+            try:   # the Stop hook may already have answered it (same fire-time check as the main loop)
+                from brain import iris_chat as _ic
+                if msg_id and not _ic.is_pending(str(msg_id)):
+                    continue
+            except Exception:
+                pass
+        age = (time.time() - e[3]) if len(e) > 3 and e[3] else None
+        out.append((source, text, msg_id, sender, age))
+    return out
+
+
+async def _inbox_post_tool_hook(input_data, tool_use_id, context):
+    """PostToolUse: hand waiting live inputs to the CURRENT host turn. Never raises (a hook error
+    must not break a tool call)."""
+    try:
+        _INBOX["last_tool_ts"] = time.time()
+        turn = _INBOX["turn"]
+        if turn is None or not turn.active:
+            return {}
+        items = _inbox_drain()
+        if not items:
+            return {}
+        lines = []
+        for source, text, msg_id, sender, age in items:
+            print("\n[host] INBOX CHECKPOINT -> handing " + source + " item to the working turn: "
+                  + repr((text or "")[:80]), flush=True)
+            t_mod = _TRANSCRIPT_MODALITY.get(source or "")
+            if t_mod:
+                try:
+                    transcript_append("user", text, t_mod)
+                except Exception:
+                    pass
+            lines.append(_inbox_line(source, text, msg_id, sender, age))
+        _blog("inbox", "checkpoint delivered", {"n": len(items), "sources": [i[0] for i in items]})
+        body = "\n\n".join(lines)
+        if len(body) > INBOX_MAX_CHARS:
+            body = body[:INBOX_MAX_CHARS] + "\n[... truncated]"
+        ctx = ("[INBOX CHECKPOINT - " + str(len(items)) + " message(s) arrived while I was mid-task. They are "
+               "now MINE: removed from the queue, they will NOT come back as separate turns. For each one, "
+               "decide: answer now (short), or tell them I'll answer after this task, then CONTINUE the work. "
+               "A PRIORITY item means Zeke asked me to look up - answer it before the next work step.]\n\n" + body)
+        return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": ctx}}
+    except Exception as e:  # noqa: BLE001
+        print("\n[host] inbox hook error (non-fatal): " + repr(e), file=sys.stderr)
+        return {}
+
+
+def _inbox_hooks():
+    try:
+        from claude_agent_sdk import HookMatcher  # type: ignore
+        return {"PostToolUse": [HookMatcher(matcher=None, hooks=[_inbox_post_tool_hook])]}
+    except Exception as e:  # noqa: BLE001
+        print("[host] note: SDK hooks unavailable (" + repr(e) + "); no mid-turn inbox.", file=sys.stderr)
+        return None
+
+
+async def lookup_watcher():
+    """If Zeke's look-up phrase is waiting and the working turn hasn't reached a tool boundary
+    within LOOKUP_INTERRUPT_S (a long tool call or a long think), interrupt() the turn - the
+    main loop then serves the queue. Only for the explicit phrase; ordinary messages wait for
+    the next checkpoint."""
+    seen_since = {}
+    while True:
+        await asyncio.sleep(5.0)
+        try:
+            q, turn, client = _INBOX["queue"], _INBOX["turn"], _INBOX["client"]
+            if q is None or turn is None or client is None or not turn.active:
+                seen_since.clear()
+                continue
+            pri = [e for e in list(q._queue) if e[2][0] in ("discord", "voice", "orb")
+                   and _LOOKUP_RE.search(e[2][1] or "")]
+            if not pri:
+                seen_since.clear()
+                continue
+            key = pri[0][1]
+            first = seen_since.setdefault(key, time.time())
+            if (time.time() - max(first, _INBOX["last_tool_ts"])) >= LOOKUP_INTERRUPT_S:
+                print("\n[host] LOOK-UP: priority phrase waited " + str(int(LOOKUP_INTERRUPT_S))
+                      + "s with no tool boundary - interrupting the working turn.", flush=True)
+                _blog("inbox", "look-up interrupt", {"waited_s": LOOKUP_INTERRUPT_S})
+                seen_since.clear()
+                await client.interrupt()
+        except Exception as e:  # noqa: BLE001
+            print("\n[host] lookup_watcher error (non-fatal): " + repr(e), file=sys.stderr)
+
+
 async def vr_heard_reader(queue, loop):
     pos = os.path.getsize(VR_HEARD_PATH) if os.path.exists(VR_HEARD_PATH) else 0
     while True:
@@ -2036,6 +2179,11 @@ async def stream_consumer(client, turn, boundary):
                 segment_open = False
                 boundary.set()
                 print("\n", flush=True)
+        # 10-29 code review fix-first #1: the stream ENDING CLEANLY (CLI crash, OOM kill, auth
+        # expiry) used to fall out of the loop with turn.done never set - the main loop waited
+        # forever, the process stayed alive, so the supervisor never restarted it. Treat a
+        # finished stream as fatal: release the main loop and raise so the host exits + restarts.
+        raise RuntimeError("SDK message stream ended (CLI process gone?)")
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -2165,6 +2313,7 @@ async def main():
         system_prompt=SYSTEM_PROMPT,
         model=model,
         cli_path=cli_path,
+        hooks=_inbox_hooks(),   # 10-29: mid-turn inbox checkpoint (see _inbox_post_tool_hook)
     )
 
     wait_for_mouth()
@@ -2188,6 +2337,7 @@ async def main():
             # it with the main loop - see stream_consumer docstring.
             turn = _TurnState()
             boundary = asyncio.Event()
+            _INBOX.update(queue=queue, turn=turn, client=client)
             tasks = [
                 asyncio.create_task(stream_consumer(client, turn, boundary)),
                 # 2026-10-07 server port: under systemd/nohup stdin is not a tty, input()
@@ -2198,7 +2348,17 @@ async def main():
                 asyncio.create_task(orb_reader(queue, loop, start_ts)),
                 # Self-heal the iris MCP attach (reconnect instead of human restart).
                 asyncio.create_task(_ensure_iris_attached(client)),
+                asyncio.create_task(lookup_watcher()),   # 10-29: "Iris, look up" -> interrupt if stuck
             ]
+            # 10-29 fix-first #1: if the stream consumer dies, the main loop must not carry on into a
+            # session nobody reads (every later turn would wait forever). Wake it with a sentinel.
+            _consumer_task = tasks[0]
+            def _on_consumer_done(_t):
+                try:
+                    queue.put_nowait((-1, 0, ("consumer_dead", "", None), time.time()))
+                except Exception:
+                    pass
+            _consumer_task.add_done_callback(_on_consumer_done)
 
             # Ears-in: the voice_reader bridges the daemon's rich listen to my event queue.
             # Gated on EARS_ON and the daemon actually answering, so a down daemon just means
@@ -2335,6 +2495,8 @@ async def main():
                         text = " ".join(_stale_bits) + " " + text
                 if source == "quit":
                     break
+                if source == "consumer_dead":
+                    raise RuntimeError("stream consumer is gone - exiting so the supervisor restarts the host")
                 if source == "discord":
                     print("\n[discord <- Zeke] " + text, flush=True)
                     prompt = (
@@ -2460,6 +2622,8 @@ async def main():
                           flush=True)
                     await client.query(prompt)
                     await turn.done.wait()
+                    if _consumer_task.done():
+                        raise RuntimeError("stream consumer is gone - exiting so the supervisor restarts the host")
                 finally:
                     turn.active = False
                     if speak_out:
