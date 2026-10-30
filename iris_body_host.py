@@ -67,6 +67,11 @@ if REPO_ROOT not in sys.path:
 # Diagnosed + fixed 2026-06-28 (Zeke: "your body should be attached at startup").
 os.environ.setdefault("MCP_TIMEOUT", "120000")        # 120s server startup
 os.environ.setdefault("MCP_TOOL_TIMEOUT", "180000")   # 180s per-tool call
+# 10-29 code review: my core is OOM-protected at -1000 and children INHERIT it, so every shell/worker I
+# spawned was unkillable. Non-interactive bash sources BASH_ENV: it resets MY children to 0 (core stays -1000).
+_bash_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "server", "bash_env_oom.sh")
+if os.path.isfile(_bash_env):
+    os.environ.setdefault("BASH_ENV", _bash_env)
 
 try:
     from claude_agent_sdk import (
