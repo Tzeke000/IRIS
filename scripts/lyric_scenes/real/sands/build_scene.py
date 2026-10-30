@@ -38,7 +38,7 @@ def args():
     p.add_argument("--out", required=True)
     p.add_argument("--report", required=True)
     p.add_argument("--map", required=True)
-    p.add_argument("--samples", type=int, default=24)
+    p.add_argument("--samples", type=int, default=16)
     p.add_argument("--no-cacti", action="store_true")
     return p.parse_args(a)
 
@@ -66,7 +66,7 @@ def main():
         look.eevee_defaults(sc, samples=A.samples, look="Punchy", exposure=-1.1)
         sc.render.film_transparent = False
         sc.eevee.use_shadows = True
-        sc.eevee.shadow_resolution_scale = 1.0
+        sc.eevee.shadow_resolution_scale = 0.5          # measured −2.0 s/frame (time_ab, 10-30); sunset shadows are soft anyway
         sc.eevee.shadow_pool_size = "1024"          # 512 overflowed (3090/2048 pages: 20 km terrain + sun + cacti)
 
         world_c = X.coll("World")
@@ -93,7 +93,8 @@ def main():
 
         # camel: the camel-shot camera + a visible walk line beyond the cube; walk inside the breakdown
         sec = {s["label"]: s for s in S.sections}
-        bd0, bd1 = sec["breakdown"]["start"], sec["breakdown"]["end"]
+        cw = (S.ear.get("scene") or {}).get("camel_window")            # Zeke: breakdown C, the Sahara vocal
+        bd0, bd1 = cw if cw else (sec["breakdown"]["start"], sec["breakdown"]["end"])
         walk_s = bd1 - bd0 + 2.0
         ccam, (pa, pb), dist = SH.camel_setup(walk_s=walk_s, speed=W.CAMEL_SPEED)
         R.log(f"[camel] camera {ccam.round(1)}, walk line {np.round(pa, 1)} → {np.round(pb, 1)} ({dist:.0f} m beyond the cube)")
@@ -102,13 +103,6 @@ def main():
         vel = checks.velocity(cloc, 30)
         ok = (np.einsum("ij,ij->i", nose[f0:f1], vel[f0:f1] / np.maximum(np.linalg.norm(vel[f0:f1], axis=1, keepdims=True), 1e-9)))
         R.assert_(float(ok.min()) > 0.9, "camel_direction", f"nose·velocity min {ok.min():.3f}")
-
-        if not A.no_cacti:
-            keep = [(0, 0, 24), (float(pa[0]), float(pa[1]), 30), (float(pb[0]), float(pb[1]), 30),
-                    (float(ccam[0]), float(ccam[1]), 12)]
-            extra = [(-27, -42), (-41, -20), (34, -27), (-17, 33), (22, 30), (55, -70), (-60, 45)]
-            W.cacti(world_c, kit_c, R, keep, extra)
-        R.tick("cacti")
 
         # camera
         cam = bpy.data.objects.new("CAM", bpy.data.cameras.new("CAM"))
@@ -134,6 +128,13 @@ def main():
         R.add("shots", [(nm, st, round((st - 1) / 30, 2)) for nm, st in zip(CA["names"], CA["starts"])])
         R.add("cuts_on_downbeats", [round(1000 * ((c - 1) / 30 - S.snap((c - 1) / 30)), 1) for c in CA["cuts"]])
         R.tick("camera")
+        if not A.no_cacti:
+            keep = [(0, 0, 24), (float(pa[0]), float(pa[1]), 30), (float(pb[0]), float(pb[1]), 30),
+                    (float(ccam[0]), float(ccam[1]), 12)]
+            extra = [(-27, -42), (-41, -20), (34, -27), (-17, 33), (22, 30), (55, -70), (-60, 45)]
+            W.cacti(world_c, kit_c, R, keep, extra, cam_pts=CA["loc"][::5])
+        R.tick("cacti")
+
 
         # look: haze matched to the horizon, glare for LEDs + arcs, gentle lens + vignette
         look.post_chain(sc, mist=dict(color=(0.42, 0.26, 0.15), k=0.5, cap=0.22, start=200.0, depth=7000.0),

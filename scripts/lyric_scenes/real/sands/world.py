@@ -163,16 +163,36 @@ CACTI = ["saguaro28", "saguaro09", "saguaro07", "saguaro27", "saguaro17"]
 
 
 def cactus_kit(kit_coll):
-    """each model joined into one mesh, origin at its base centre, 1 m tall (instances scale it)"""
-    meshes = []
+    """each model joined into one mesh, origin at its base centre, 1 m tall (instances scale it) → [(full, lod)].
+    LOD (far instances, measured −1.8 s/frame for all cacti): bark only (no alpha spine cards), decimated to 30 %."""
+    out = []
     for slug in CACTI:
         objs = importer.import_model(f"{ASSETS}/{slug}/model.glb", kit_coll)
-        me = importer.bake_world([o for o in objs if o.type == "MESH"], f"Cactus_{slug}")
-        importer.normalize(me, height=1.0, ground=True, center=True)
+        meshes = [o for o in objs if o.type == "MESH"]
+        full = importer.bake_world(meshes, f"Cactus_{slug}")
+        lod = importer.bake_world([o for o in meshes if "spine" not in o.name.lower()], f"CactusLOD_{slug}")
+        lo, hi = _bbox(full)
+        for me in (full, lod):                                   # same transform for both: base centre → origin
+            me.transform(_norm_mat(lo, hi))
+        lod = importer.decimate(lod, 0.3)
         for o in objs:
             bpy.data.objects.remove(o, do_unlink=True)
-        meshes.append(me)
-    return meshes
+        out.append((full, lod))
+    return out
+
+
+def _bbox(me):
+    co = np.empty(len(me.vertices) * 3)
+    me.vertices.foreach_get("co", co)
+    co = co.reshape(-1, 3)
+    return co.min(0), co.max(0)
+
+
+def _norm_mat(lo, hi):
+    from mathutils import Matrix
+    s = 1.0 / (hi[2] - lo[2])
+    c = (lo + hi) / 2
+    return Matrix.Scale(s, 4) @ Matrix.Translation((-c[0], -c[1], -lo[2]))
 
 
 def cactus_positions(rng, n, keep_out):
@@ -198,14 +218,18 @@ def cactus_positions(rng, n, keep_out):
     return pts
 
 
-def cacti(coll, kit_coll, R, keep_out, extra=()):
+def cacti(coll, kit_coll, R, keep_out, extra=(), cam_pts=None, lod_dist=90.0):
     meshes = cactus_kit(kit_coll)
     rng = np.random.default_rng(11)
     pts = cactus_positions(rng, 170, keep_out) + [(x, y, float(TR.height(x, y))) for x, y in extra]
     obs = []
+    nlod = 0
     for k, (x, y, h) in enumerate(pts):
-        me = meshes[k % len(meshes)] if k >= len(pts) - len(extra) else meshes[int(rng.integers(len(meshes)))]
-        ob = bpy.data.objects.new(f"Cactus_{k:03d}", me)
+        pair = meshes[k % len(meshes)] if k >= len(pts) - len(extra) else meshes[int(rng.integers(len(meshes)))]
+        dcam = float(np.min(np.hypot(cam_pts[:, 0] - x, cam_pts[:, 1] - y))) if cam_pts is not None else 0.0
+        far = dcam > lod_dist
+        nlod += far
+        ob = bpy.data.objects.new(f"Cactus_{k:03d}", pair[1] if far else pair[0])
         coll.objects.link(ob)
         hgt = rng.uniform(4.5, 10.5)
         # sink to the LOWEST ground under the base (slopes) + 0.15 m
@@ -214,7 +238,7 @@ def cacti(coll, kit_coll, R, keep_out, extra=()):
         ob.rotation_euler = (rng.normal(0, 0.03), rng.normal(0, 0.03), rng.uniform(0, 2 * math.pi))
         ob.scale = (hgt * rng.uniform(0.9, 1.1), hgt * rng.uniform(0.9, 1.1), hgt)
         obs.append(ob)
-    R.log(f"[cacti] {len(obs)} saguaros ({len(extra)} hand-placed), heights 4.5–10.5 m")
+    R.log(f"[cacti] {len(obs)} saguaros ({len(extra)} hand-placed, {nlod} far ones on the LOD mesh), heights 4.5–10.5 m")
     return obs
 
 

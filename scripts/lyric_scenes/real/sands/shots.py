@@ -110,40 +110,38 @@ def table(S, camel_cam):
     sec = {s["label"]: s for s in S.sections}
     f = lambda t: S.snap_fr(t)      # noqa: E731  downbeat frame
     bar = 4 * S.period
-    t_d1, t_d1b, t_d2 = sec["drop1"]["start"], sec["drop1b"]["start"], sec["drop2"]["start"]
-    t_d3, t_d4 = sec["drop3"]["start"], sec["drop4"]["start"]
+    st = lambda k: sec[k]["start"]  # noqa: E731
     cc, camel_mid = camel_cam
     look_camel, lens_camel = frame_both(cc, CUBE, camel_mid)
+    # Zeke's sections (ear.json 10-30): intro 0–41 · build 41–55 · dropA 55–79 · gap · dropB 82–103 · breakdown A/B/C
+    # (C = the Sahara vocal, camel window) · build2 137–151 · drop3 151–171 (the big one) · breakdown · outro 178–
     shots = [
-        Shot(1, "a_establish", move((215, 125, 42), (140, 82, 30), 30, 32, tgt0=(0, 0, 13), tgt1=(0, 0, 15))),
-        Shot(f(sec["build"]["start"]), "b_low_rise", move((30, -16, 1.4), (27, -14, 4.5), 20, ground=True,
-                                                        tgt0=CUBE + [0, 0, 1], tgt1=CUBE)),
-        Shot(f(t_d1), "c_hero_low", orbit(19, 1.3, 38, 58, 15, ground=True, tz=-9.0)),
-        Shot(f(t_d1 + 8 * bar), "d_orbit_mid", orbit(36, 12, 30, 75, 32)),
-        Shot(f(sec["gap"]["start"]), "e_gap_close", move((15, 9, 20), (13.5, 8, 19.5), 40)),
-        Shot(f(t_d1b), "f_wide_south", move((-30, -125, 2.2), (-10, -118, 2.2), 70, ground=True, tgt0=CUBE - [0, 0, 5])),
-        Shot(f(t_d1b + 8 * bar), "g_high_three_q", orbit(42, 40, 200, 235, 26, tgt=np.array([0.0, 0.0, 9.0]))),
-        Shot(f(sec["break"]["start"]), "h_far_dunes", move(*_far_dunes(), 70, ground=True,
-                                                         tgt0=CUBE - [0, 0, 4])),
-        Shot(f(t_d2), "i_hero_low2", orbit(20, 1.4, 100, 122, 15, ground=True, tz=-8.0)),
-        Shot(f(t_d2 + 6 * bar), "j_face_close", orbit(24, 17, 100, 118, 55)),
-        Shot(f(sec["roll"]["start"]), "k_push_in", move((-48, 40, 9), (-34, 28, 12), 32, 35)),
-        Shot(f(sec["breakdown"]["start"]), "l_camel_far", move(cc, cc + np.array([0, 0, 0.0]), lens_camel,
-                                                               tgt0=look_camel, tgt1=look_camel)),
-        Shot(f(sec["vocal"]["start"]), "m_orbit_high", orbit(46, 24, 240, 290, 30)),
-        Shot(f(sec["riser"]["start"]), "n_low_slide", move((-36, -30, 1.6), (-24, -38, 1.6), 24, ground=True,
-                                                         tgt0=CUBE - [0, 0, 3], tgt1=CUBE - [0, 0, 2])),
-        Shot(f(sec["riser"]["start"] + 4 * bar), "o_under", move((7, 5, 1.2), (6, 3.5, 1.2), 14, ground=True,
-                                                               tgt0=CUBE, tgt1=CUBE + [1.0, 0.5, 0])),
-        Shot(f(t_d3), "p_hero_wide", orbit(26, 1.6, 15, 40, 16, ground=True, tz=-9.0)),
-        Shot(f(t_d3 + 6 * bar), "q_orbit_close", orbit(23, 9, 130, 185, 24)),
-        Shot(f(t_d3 + 12 * bar), "r_side_mid", move((60, -55, 6), (52, -60, 7), 35, ground=True)),
-        Shot(f(sec["build2"]["start"]), "s_sun_tele", move(*_sun_tele(), 200, tgt0=CUBE - [0, 0, 1])),
-        Shot(f(t_d4), "t_hero_low3", orbit(18, 1.2, 60, 85, 14, ground=True, tz=-8.0)),
-        Shot(f(t_d4 + 3 * bar), "u_top_orbit", orbit(26, 40, -60, -10, 22, tgt=np.array([0.0, 0.0, 6.0]))),
-        Shot(f(sec["break2"]["start"]), "v_wide_pull", move((40, 70, 10), (70, 120, 16), 28, 26)),
-        Shot(f(sec["hit"]["start"]), "w_final", move((110, -140, 26), (170, -215, 40), 30, 30,
-                                                     tgt0=CUBE - [0, 0, 2], tgt1=CUBE - [0, 0, 4])),
+        Shot(1, "a_establish", move((215, 125, 42), (150, 88, 32), 30, 32, tgt0=(0, 0, 13), tgt1=(0, 0, 15))),
+        Shot(f(st("intro") + 12 * bar), "b_far_dunes", move(*_far_dunes(), 70, ground=True, tgt0=CUBE - [0, 0, 4])),
+        Shot(f(st("build")), "c_low_rise", move((30, -16, 1.4), (27, -14, 4.5), 20, ground=True,
+                                              tgt0=CUBE - [0, 0, 6], tgt1=CUBE - [0, 0, 3])),
+        Shot(f(st("build") + 4 * bar), "d_under", move((7, 5, 1.2), (6, 3.5, 1.2), 14, ground=True,
+                                                     tgt0=CUBE, tgt1=CUBE + [1.0, 0.5, 0])),
+        Shot(f(st("dropA")), "e_hero_low", orbit(19, 1.3, 38, 58, 15, ground=True, tz=-9.0)),
+        Shot(f(st("dropA") + 8 * bar), "f_orbit_mid", orbit(36, 12, 30, 75, 32)),
+        Shot(f(st("gap")), "g_wide_south", move((-30, -125, 2.2), (-22, -122, 2.2), 70, ground=True,
+                                               tgt0=CUBE - [0, 0, 5])),
+        Shot(f(st("dropB")), "h_hero_low2", orbit(20, 1.4, 100, 122, 15, ground=True, tz=-8.0)),
+        Shot(f(st("dropB") + 6 * bar), "i_face_close", orbit(24, 17, 100, 118, 55)),
+        Shot(f(st("breakdownA")), "j_push_in", move((-48, 40, 9), (-34, 28, 12), 32, 35)),
+        Shot(f(st("breakdownB")), "k_orbit_high", orbit(46, 24, 240, 290, 30)),
+        Shot(f(st("breakdownC_vocal")), "l_camel_far", move(cc, cc, lens_camel, tgt0=look_camel, tgt1=look_camel)),
+        Shot(f(st("build2")), "m_low_slide", move((-36, -30, 1.6), (-24, -38, 1.6), 24, ground=True,
+                                                tgt0=CUBE - [0, 0, 3], tgt1=CUBE - [0, 0, 2])),
+        Shot(f(st("build2") + 4 * bar), "n_sun_tele", move(*_sun_tele(), 200, tgt0=CUBE - [0, 0, 1])),
+        Shot(f(st("drop3")), "o_hero_wide", orbit(26, 1.6, 15, 40, 16, ground=True, tz=-9.0)),
+        Shot(f(st("drop3") + 6 * bar), "p_orbit_close", orbit(23, 9, 130, 185, 24)),
+        Shot(f(st("drop3") + 9 * bar), "q_high_three_q", orbit(42, 40, 200, 235, 26, tgt=np.array([0.0, 0.0, 9.0]))),
+        Shot(f(st("breakdown")), "r_side_mid", move((60, -55, 6), (52, -60, 7), 35, ground=True)),
+        Shot(f(st("outro")), "s_hero_low3", orbit(18, 1.2, 60, 85, 14, ground=True, tz=-8.0)),
+        Shot(f(st("outro") + 4 * bar), "t_wide_pull", move((40, 70, 10), (70, 120, 16), 28, 26)),
+        Shot(f(st("outro") + 8 * bar), "u_final", move((110, -140, 26), (190, -240, 44), 30, 30,
+                                                       tgt0=CUBE - [0, 0, 2], tgt1=CUBE - [0, 0, 4])),
     ]
     return shots
 
