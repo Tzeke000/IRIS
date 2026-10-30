@@ -22,7 +22,14 @@ _fake_av = types.ModuleType("avaagent")
 _fake_av.load_profile_by_id = lambda person_id: {}  # type: ignore[attr-defined]
 sys.modules.setdefault("avaagent", _fake_av)
 
+# The live host env sets IRIS_VOICE_REQUIRE_MATCH=0 (interim); these tests check the
+# CODE default, so never inherit it (and re-read it if another test imported the host).
+import importlib  # noqa: E402
+import os  # noqa: E402
+os.environ.pop("IRIS_VOICE_REQUIRE_MATCH", None)
 import iris_body_host as h  # noqa: E402
+if getattr(h, "VOICE_REQUIRE_MATCH", True) is not True:
+    h = importlib.reload(h)
 
 h._blog = lambda *a, **k: None  # type: ignore[assignment]
 

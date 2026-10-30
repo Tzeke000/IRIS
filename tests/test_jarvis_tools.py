@@ -15,6 +15,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+# These tools are Windows-only (ctypes.windll); skip cleanly on the Linux server.
+if sys.platform != "win32":
+    pytest.skip("Windows-only tools (ctypes.windll)", allow_module_level=True)
+
 # ── reminders: time parsing + validation ─────────────────────────────────────
 from tools.system import reminder_task_tool as rt  # noqa: E402
 

@@ -124,5 +124,13 @@ with tempfile.TemporaryDirectory() as td:
     summ = fl.summarize(recs)
     check("summary groups by actual/would", any("would=decoy:helmet" in k for k in summ["groups"]), summ)
 
-print(f"\n{'ALL PASS' if not FAILS else str(len(FAILS)) + ' FAILED: ' + ', '.join(FAILS)}")
-sys.exit(1 if FAILS else 0)
+
+
+def test_face_liveness_checks():
+    """pytest entry: the checks above ran at import time."""
+    assert not FAILS, FAILS
+
+
+if __name__ == "__main__":
+    print(f"\n{'ALL PASS' if not FAILS else str(len(FAILS)) + ' FAILED: ' + ', '.join(FAILS)}")
+    sys.exit(1 if FAILS else 0)

@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 from brain import anchor_moments as am, iris_transcript as it  # noqa: E402
 
-PY = str(ROOT / ".venv" / "Scripts" / "python.exe")
+PY = sys.executable  # was the Windows .venv path; the server runs ~/venvs/iris-v100
 
 
 def test_machine_prompts_are_not_anchor_worthy() -> None:
