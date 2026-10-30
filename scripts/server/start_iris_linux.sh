@@ -21,9 +21,13 @@ if [ "${IRIS_ROLE:-live}" != "staging" ] && [ -z "${IRIS_START_GATE:-}" ]; then
   exit 3
 fi
 
-# single launcher per machine (the .bat used a Windows named mutex)
-exec 9>"$ROOT/.tmp/launcher.lock"
-if ! flock -n 9; then log "another launcher holds .tmp/launcher.lock - standing down"; exit 10; fi
+# single launcher per machine (the .bat used a Windows named mutex). V3 step 1.6 (2026-10-30): the lock is
+# ~/IRIS/.tmp/launcher.lock for EVERY tree (v2 ~/IRIS and v3 ~/IRIS-v3 alike - scripts/server/stack_launch.sh
+# exports IRIS_LAUNCHER_LOCK), so ONE-OF-ME holds across versions. For ~/IRIS itself this is the same path as before.
+LOCK="${IRIS_LAUNCHER_LOCK:-$HOME/IRIS/.tmp/launcher.lock}"
+mkdir -p "$(dirname "$LOCK")"
+exec 9>"$LOCK"
+if ! flock -n 9; then log "another launcher holds $LOCK - standing down"; exit 10; fi
 
 case "$MODE" in
   opus)  IRIS_MODEL="claude-opus-5-5" ;;
