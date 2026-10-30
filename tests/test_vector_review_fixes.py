@@ -455,3 +455,16 @@ def test_local_turn_deadline_caps_tool_hops(brain_server, monkeypatch, deadline,
     assert len(timeouts) == expect_calls, timeouts
     assert out == "partial answer"
     assert all(t <= brain_server.LOCAL_TIMEOUT_S for t in timeouts)
+
+
+# ------------------------------- LOW: little_pilot's per-cycle log rotates (10-30)
+def test_pilot_log_rotates_and_other_logs_stay_whole(tmp_path, monkeypatch):
+    lp = _load_script("little_pilot")
+    monkeypatch.setattr(lp, "_ROTATE_BYTES", 200)
+    log, alerts = tmp_path / "pilot_log.jsonl", tmp_path / "pilot_alerts.jsonl"
+    for i in range(50):
+        lp._append(log, {"i": i, "pad": "x" * 20})
+        lp._append(alerts, {"i": i, "pad": "x" * 20})
+    assert (tmp_path / "pilot_log.jsonl.1").exists() and log.stat().st_size <= 260
+    assert json.loads(log.read_text().splitlines()[-1])["i"] == 49
+    assert len(alerts.read_text().splitlines()) == 50

@@ -98,8 +98,22 @@ def _read_json(p: Path) -> dict:
         return {}
 
 
+_ROTATE_BYTES = int(os.environ.get("IRIS_PILOT_LOG_ROTATE_BYTES", str(5 * 1024 * 1024)))
+_ROTATING = {"pilot_log.jsonl"}   # per-cycle firehose only; alerts/suggestions/grades are kept whole
+
+
 def _append(p: Path, d: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
+    if p.name in _ROTATING and _ROTATE_BYTES > 0:
+        # Code review 10-29 (Vector low): every cycle appends here, forever. Keep the newest
+        # ~2 x 5 MB (current + .1); nothing reads older cycles.
+        try:
+            if p.stat().st_size > _ROTATE_BYTES:
+                os.replace(p, p.with_name(p.name + ".1"))
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
     with p.open("a", encoding="utf-8") as f:
         f.write(json.dumps(d, ensure_ascii=False) + "\n")
 
