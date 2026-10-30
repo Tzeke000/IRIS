@@ -503,6 +503,35 @@ def sdk_probe(now: float | None = None, sessions_dir: Path | None = None,
     return ev
 
 
+def _expire_if_still_pending(p: Path, reason: str) -> bool:
+    """Code review 10-29 (bridges): the janitor used to overwrite the file it had read, with a
+    shared `.json.tmp` name and no re-check - an answer landing in between was clobbered. Use the
+    bridge's own compare-and-set (flock + re-read + mkstemp/replace); fall back to a local CAS
+    when brain/ can't be imported."""
+    try:
+        here = str(Path(__file__).resolve().parent.parent)
+        if here not in sys.path:
+            sys.path.append(here)
+        from brain.iris_llm import _set_status_if_pending
+        return bool(_set_status_if_pending(p, "expired", reason))
+    except ImportError:
+        pass
+    import tempfile
+    try:
+        rec = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(rec, dict) or rec.get("status") != "pending":
+            return False
+        rec["status"] = "expired"
+        rec["expired_reason"] = reason
+        fd, tmp = tempfile.mkstemp(dir=str(p.parent), suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec))
+        os.replace(tmp, p)
+        return True
+    except Exception:
+        return False
+
+
 def expire_abandoned_pendings(llm_dir: Path | None = None,
                               now: float | None = None) -> int:
     """Janitor: mark pending requests older than ABANDON_AGE_S as expired.
@@ -528,15 +557,8 @@ def expire_abandoned_pendings(llm_dir: Path | None = None,
                 continue
             if (now - float(rec.get("ts") or 0.0)) <= ABANDON_AGE_S:
                 continue
-            rec["status"] = "expired"
-            rec["expired_reason"] = "abandoned — never answered (watchdog janitor)"
-            tmp = p.with_suffix(".json.tmp")
-            try:
-                tmp.write_text(json.dumps(rec), encoding="utf-8")
-                os.replace(tmp, p)
+            if _expire_if_still_pending(p, "abandoned — never answered (watchdog janitor)"):
                 fixed += 1
-            except Exception:
-                continue
     except Exception as e:
         log(f"janitor failed: {e!r}")
     if fixed:
