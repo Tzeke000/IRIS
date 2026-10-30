@@ -21,6 +21,12 @@ iptables -A IRIS_ORB -s $TS -j ACCEPT
 $ZLINE
 iptables -A IRIS_ORB -j DROP
 iptables -C INPUT -p tcp --dport 5876 -j IRIS_ORB 2>/dev/null || iptables -I INPUT -p tcp --dport 5876 -j IRIS_ORB
+# 2026-10-30 (code review): IPv6 too. The app binds IPv4 only today, but a future [::] bind must not
+# silently open it - v6 gets localhost only (the tower/Zorin reach it over IPv4 LAN/Tailscale).
+ip6tables -N IRIS_ORB6 2>/dev/null || ip6tables -F IRIS_ORB6
+ip6tables -A IRIS_ORB6 -s ::1 -j ACCEPT
+ip6tables -A IRIS_ORB6 -j DROP
+ip6tables -C INPUT -p tcp --dport 5876 -j IRIS_ORB6 2>/dev/null || ip6tables -I INPUT -p tcp --dport 5876 -j IRIS_ORB6
 RULES_EOF
 sudo chmod 700 "$RULES"
 sudo tee /etc/systemd/system/iris-orb-firewall.service >/dev/null <<'UNIT_EOF'
@@ -40,4 +46,5 @@ UNIT_EOF
 sudo systemctl daemon-reload
 sudo systemctl enable iris-orb-firewall.service
 sudo systemctl restart iris-orb-firewall.service   # enable --now does NOT re-run a oneshot that already ran
+sudo ip6tables -S IRIS_ORB6
 sudo iptables -S IRIS_ORB | sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/x.x.x.x/g'
