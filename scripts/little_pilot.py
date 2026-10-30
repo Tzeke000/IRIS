@@ -369,12 +369,12 @@ def _escalate_to_big(request: str) -> None:
         return
     _esc_last["t"] = now
     try:
-        esc = LB / "escalations.jsonl"
-        esc.parent.mkdir(parents=True, exist_ok=True)
-        with esc.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                                "request": request, "status": "pending"},
-                               ensure_ascii=False) + "\n")
+        # Code review 10-29: shared flock'd append (ask_big_iris + check_escalations rewrite this
+        # file; a bare open("a") could land mid-rewrite and be lost).
+        from brain._jsonl_store import append_jsonl
+        append_jsonl(LB / "escalations.jsonl",
+                     [{"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                       "request": request, "status": "pending"}])
     except Exception:
         pass
 

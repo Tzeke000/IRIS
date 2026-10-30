@@ -304,43 +304,43 @@ def ask_big_iris(request: str = "") -> str:
         return "nothing to escalate — say what you need big Iris for"
     try:
         LB_ESCALATIONS.parent.mkdir(parents=True, exist_ok=True)
-        import json as _json
-        origin = "eval" if _eval_in_progress() else "live"
-        # DEDUPE (2026-08-22, Zeke: "you just have to know if it was a
-        # different event or just the same one spammed"): re-filing the SAME
-        # complaint while the first is still PENDING bumps a counter on the
-        # existing entry instead of appending (one accel alarm filed 19 copies
-        # overnight 08-22). Keyed on normalized TEXT — a genuinely different
-        # warning arriving right after still files fresh. A RESOLVED entry
-        # never blocks a recurrence: that's a new event worth a new wake.
-        fp = _norm_req(req)
-        try:
-            rows = [_json.loads(ln) for ln in
-                    LB_ESCALATIONS.read_text(encoding="utf-8").splitlines()
-                    if ln.strip()]
-        except Exception:
-            rows = []
-        for e in rows:
-            if (e.get("status") == "pending" and e.get("origin") == origin
-                    and _norm_req(e.get("request") or "") == fp):
-                e["repeats"] = int(e.get("repeats") or 1) + 1
-                e["last_repeat_ts"] = _now_dt().isoformat()
-                body = "\n".join(_json.dumps(r, ensure_ascii=False)
-                                 for r in rows)
-                LB_ESCALATIONS.write_text(body + "\n", encoding="utf-8")
-                return (f"already handed up (same request, x{e['repeats']} "
-                        f"now) — big Iris has it; only re-file if something "
-                        f"NEW happens")
-        line = _json.dumps({"ts": _now_dt().isoformat(),
-                            "request": req[:600], "status": "pending",
-                            "origin": origin},
-                           ensure_ascii=False)
-        with LB_ESCALATIONS.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
-        return ("handed up to big Iris — filed for her; she'll pick it up when "
-                "she's free and reach Zeke if it needs him")
+        # Code review 10-29: little_pilot + check_escalations write this file too. Hold the shared
+        # cross-process lock across the dedupe read and the rewrite/append so none of them races.
+        from brain._jsonl_store import locked as _locked
+        with _locked(LB_ESCALATIONS):
+            return _file_escalation(req)
     except Exception as e:
         return f"couldn't file the escalation: {e!r}"
+
+
+def _file_escalation(req: str) -> str:
+    """ask_big_iris body; caller holds locked(LB_ESCALATIONS)."""
+    from brain._jsonl_store import append_jsonl, read_jsonl, rewrite_jsonl
+    origin = "eval" if _eval_in_progress() else "live"
+    # DEDUPE (2026-08-22, Zeke: "you just have to know if it was a
+    # different event or just the same one spammed"): re-filing the SAME
+    # complaint while the first is still PENDING bumps a counter on the
+    # existing entry instead of appending (one accel alarm filed 19 copies
+    # overnight 08-22). Keyed on normalized TEXT — a genuinely different
+    # warning arriving right after still files fresh. A RESOLVED entry
+    # never blocks a recurrence: that's a new event worth a new wake.
+    fp = _norm_req(req)
+    got = read_jsonl(LB_ESCALATIONS, log=False)   # one bad line no longer hides the rest
+    rows = got.entries
+    for e in rows:
+        if (e.get("status") == "pending" and e.get("origin") == origin
+                and _norm_req(e.get("request") or "") == fp):
+            e["repeats"] = int(e.get("repeats") or 1) + 1
+            e["last_repeat_ts"] = _now_dt().isoformat()
+            rewrite_jsonl(LB_ESCALATIONS, rows, salvage=got.bad_raw)
+            return (f"already handed up (same request, x{e['repeats']} "
+                    f"now) — big Iris has it; only re-file if something "
+                    f"NEW happens")
+    append_jsonl(LB_ESCALATIONS, [{"ts": _now_dt().isoformat(),
+                                   "request": req[:600], "status": "pending",
+                                   "origin": origin}])
+    return ("handed up to big Iris — filed for her; she'll pick it up when "
+            "she's free and reach Zeke if it needs him")
 
 
 # nervous-system snapshot (written @5Hz by the inhabit daemon's nervous loop)

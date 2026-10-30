@@ -21,7 +21,15 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+# Code review 10-29 (Vector, low): three writers (little_pilot, little_brain_tools.ask_big_iris and
+# this script) raced on this file - a resolve rewrite could drop an escalation filed mid-rewrite.
+# All of them now go through the shared flock'd store; read-modify-write holds locked() throughout.
+from brain._jsonl_store import locked, rewrite_jsonl  # noqa: E402
+
 ESCALATIONS = ROOT / "state" / "little_brain" / "escalations.jsonl"
+_BAD_LINES: list[bytes] = []   # unparseable raw lines seen by the last _load (kept on rewrite)
 IRIS_TIME_STATE = ROOT / "state" / "iris_time.json"
 _EDT = timezone(timedelta(hours=-4))
 
@@ -40,24 +48,29 @@ def _now_iso() -> str:
 
 def _load() -> list[tuple[int, dict]]:
     """Return [(line_number, entry_dict), ...] for every valid JSON line."""
+    _BAD_LINES.clear()
     if not ESCALATIONS.is_file():
         return []
     out = []
-    for i, ln in enumerate(ESCALATIONS.read_text(encoding="utf-8").splitlines(), 1):
+    raw = ESCALATIONS.read_bytes().decode("utf-8", errors="replace")
+    for i, ln in enumerate(raw.splitlines(), 1):
         ln = ln.strip()
         if not ln:
             continue
         try:
-            out.append((i, json.loads(ln)))
+            e = json.loads(ln)
         except Exception:
+            _BAD_LINES.append(ln.encode("utf-8"))
             continue
+        if isinstance(e, dict):
+            out.append((i, e))
     return out
 
 
 def _save(rows: list[tuple[int, dict]]) -> None:
-    """Rewrite the file from the (renumbered) entries, one JSON per line."""
-    body = "\n".join(json.dumps(e, ensure_ascii=False) for _, e in rows)
-    ESCALATIONS.write_text(body + ("\n" if body else ""), encoding="utf-8")
+    """Atomically rewrite the file from the (renumbered) entries, one JSON per line. Lines that
+    didn't parse go to a salvage sidecar instead of vanishing. Callers hold locked(ESCALATIONS)."""
+    rewrite_jsonl(ESCALATIONS, [e for _, e in rows], salvage=list(_BAD_LINES))
 
 
 def _resolve(rows, note: str, which: int | None) -> int:
@@ -78,7 +91,13 @@ def _resolve(rows, note: str, which: int | None) -> int:
 
 def main() -> int:
     args = sys.argv[1:]
-    rows = _load()
+    if args and args[0] in ("--resolve-all", "--resolve"):
+        with locked(ESCALATIONS):          # read -> resolve -> rewrite as ONE critical section
+            return _main(args, _load())
+    return _main(args, _load())
+
+
+def _main(args: list[str], rows: list[tuple[int, dict]]) -> int:
     # origin=="eval" entries were provoked by the test battery, whose esc_*/ref_*
     # questions are SUPPOSED to make her hand up (2026-07-28). They're not real
     # asks, so they don't belong in the pending list. Only the explicit tag is
