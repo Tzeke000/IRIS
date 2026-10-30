@@ -213,6 +213,16 @@ def write_health(now: float, **ctx):
         return None
 
 
+def worker_sweep():
+    """V3 step 1.3 follow-up: expired task leases -> needs_review, lost launchers -> launcher_lost.
+    Runs worker.py's own `sweep` in a subprocess with a timeout; contained like write_health."""
+    try:
+        subprocess.run([sys.executable, str(Path(__file__).with_name("worker.py")), "sweep"],
+                       capture_output=True, timeout=20, check=False)
+    except Exception as e:  # noqa: BLE001
+        log(f"worker sweep failed (non-fatal): {e!r}")
+
+
 def dm(text: str) -> bool:
     try:
         uid = load(ROOT / "config" / "private.local.json", {}).get("zeke_discord_user_id")
@@ -322,6 +332,7 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             log(f"log cap failed for {path.name}: {e!r}")
 
+    worker_sweep()
     write_health(now, in_grace=in_grace)
     send_alerts(st, problems, now)
     st.update({"checked_ts": now, "problems": problems,
