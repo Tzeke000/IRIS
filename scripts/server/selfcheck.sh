@@ -46,5 +46,27 @@ gpu=$(nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu,temperatur
 mem=$(free -g | awk '/Mem:/{print $3"/"$2" G"}'); disk=$(df -h / | awk 'NR==2{print $3"/"$2" "$5}')
 rss=$(ps -o rss= -p $rt | awk '{printf "%.2f GB", $1/1048576}'); hrss=$(ps -o rss= -p $host | awk '{printf "%d MB", $1/1024}')
 echo "BASELINE $(date '+%F %H:%M') | GPU $gpu | RAM $mem | / $disk | runtime RSS $rss | host $hrss"
+# HEALTH SNAPSHOT (V3 step 1.5): state/health/now.json, written every minute by the watchdog timer from OUTSIDE
+# my process tree. Fresh (<180 s) => one line per subsystem; stale/missing => say so (the timer or the writer is down).
+python3 - "$R/state/health/now.json" <<'EOF'
+import json, sys, time
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception as e:
+    print("⚠ health now.json unreadable/missing (%s) — is iris-watchdog.timer running?" % type(e).__name__); sys.exit()
+age = time.time() - float(d.get("ts") or 0)
+if age > float(d.get("fresh_s") or 180):
+    print("⚠ health now.json is STALE (%d s old) — the watchdog timer/writer stopped; don't trust it" % age); sys.exit()
+s = d.get("summary") or {}
+bad = ["%s=%s" % (k, ",".join(s[k])) for k in ("red", "warn", "off", "parked") if s.get(k)]
+print(("✓" if not s.get("red") else "⚠"), "health now.json (%d s old, %s ms):" % (age, d.get("took_ms")),
+      "all ok" if not bad else " ".join(bad))
+for k, v in (d.get("subsystems") or {}).items():
+    if v.get("status") != "ok":
+        why = (v.get("detail") or {}).get("why") if v.get("status") in ("off", "parked", "n/a") else v.get("last_error")
+        err = (why or "")[:110]
+        lag = "-" if v.get("lag_s") is None else "%ss" % v.get("lag_s")
+        print("   %-6s %-13s lag=%s %s" % (v.get("status"), k, lag, err))
+EOF
 # PAINTING
 wk=$(date +%G-W%V); [ -d $R/scratch/practice/room_painting/$wk ] && ok "painting $wk exists" || { [ $(date +%u) -ge 4 ] && warn "painting $wk missing (Thu+ ⇒ paint it, after quiet hours / conversation)" || echo "  painting $wk not due yet"; }

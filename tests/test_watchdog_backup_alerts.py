@@ -24,6 +24,8 @@ def wd(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "LOG", tmp_path / "wd.log")
     monkeypatch.setattr(m, "BACKUP_LOG", tmp_path / "backup.log")
     monkeypatch.setattr(m, "HOME", tmp_path)                 # no tmp/LIVE => the not-running path
+    monkeypatch.setattr(m, "HEALTH_OUT", tmp_path / "health" / "now.json")   # never the real state/health
+    monkeypatch.setattr(m, "write_health", lambda now, **kw: None)          # live probes: tests/test_health_snapshot.py
     sent = []
     monkeypatch.setattr(m, "dm", lambda text: sent.append(text) or True)
     monkeypatch.setattr(m, "unit_state", lambda unit, verb: "enabled" if verb == "is-enabled" else "active")

@@ -17,6 +17,10 @@ ONE exception (2026-10-29 code review CRITICAL): the BACKUP check runs even with
 was never enabled never fails, so "no backup ok in state/backup.log for BACKUP_STALE_S" (or the timer not
 enabled/active) is its own alert. Every subprocess call has a timeout (the unit has TimeoutStartSec) so one
 hang under memory pressure can't stop the watchdog for good.
+
+3. (V3 Phase 1 step 1.5, 2026-10-30) HEALTH SNAPSHOT: every run - ~/LIVE or not - writes state/health/now.json
+   via scripts/server/health_snapshot.py (per-subsystem {ok, status, last_success_ts, lag_s, last_error, probe}).
+   Contained: a failing snapshot is logged and never stops the wedge/alert jobs above.
 """
 from __future__ import annotations
 
@@ -48,6 +52,7 @@ MAX_DMS_PER_RUN = 3      # each DM can take up to its timeout; the rest go out n
 UNITS = ("iris-mouth", "iris-ears", "iris-postoffice", "iris-postoffice-monitor", "iris-presence",
          "iris-wirepod", "iris-vector-brain", "iris-vector-nerves", "iris-backup")
 # Append-only logs that grow forever: keep the newest KEEP bytes once a file passes CAP bytes.
+HEALTH_OUT = ROOT / "state" / "health" / "now.json"
 LOG_CAPS = {ROOT / "state" / "attention" / "ptz_audit.jsonl": (50 << 20, 20 << 20)}
 
 
@@ -193,6 +198,21 @@ def port_listening(port: int) -> bool:
         return False
 
 
+def write_health(now: float, **ctx):
+    """state/health/now.json (one source of truth for selfcheck.sh / iris_health / later alerts). Loaded from the
+    sibling file by path (no sys.path edits); every failure is contained here."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("iris_health_snapshot",
+                                                      Path(__file__).with_name("health_snapshot.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.write_snapshot(HEALTH_OUT, ROOT, now=now, **ctx)
+    except Exception as e:  # noqa: BLE001
+        log(f"health snapshot failed (non-fatal): {e!r}")
+        return None
+
+
 def dm(text: str) -> bool:
     try:
         uid = load(ROOT / "config" / "private.local.json", {}).get("zeke_discord_user_id")
@@ -216,6 +236,7 @@ def main() -> int:
     bk = backup_problems(now)
     if not (HOME / "LIVE").exists():
         # deliberately not running here: stay quiet about everything EXCEPT backups
+        write_health(now)
         send_alerts(st, bk, now, scope=lambda k: k.startswith("backup"))
         st.update({"checked_ts": now, "problems": bk})
         save_state(st)
@@ -301,6 +322,7 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             log(f"log cap failed for {path.name}: {e!r}")
 
+    write_health(now, in_grace=in_grace)
     send_alerts(st, problems, now)
     st.update({"checked_ts": now, "problems": problems,
                "hb_age_s": round(hb_age, 1), "runtime_alive": rt_alive, "supervisor_alive": sup_alive})
