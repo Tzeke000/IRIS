@@ -31,6 +31,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 import os as _os_p, sys as _sys_p
 _sys_p.path.append(_os_p.path.dirname(_os_p.path.abspath(__file__)))
@@ -1089,9 +1090,11 @@ def _main_locked() -> int:
     # rewake logic.
     try:
         payload = json.load(sys.stdin)
-    except Exception:
+    except Exception as e:
+        _hook_log("stdin payload unreadable -> exit (" + repr(e)[:80] + ")")   # 10-30: was a SILENT exit
         return 0
     transcript_path = payload.get("transcript_path")
+    _t_af = time.time()
 
     # Channel auto-forward (routing safety net) — runs unconditionally before
     # any other logic. If the last inbound was a Discord message and the
@@ -1102,6 +1105,8 @@ def _main_locked() -> int:
             _check_and_auto_forward(transcript_path)
         except Exception as e:
             print(f"[stop_hook auto-forward] unexpected error: {e!r}", file=sys.stderr)
+    if time.time() - _t_af > 5:   # 10-30 diagnosis: a slow auto-forward can eat the hook's timeout before any log line
+        _hook_log(f"auto-forward took {time.time() - _t_af:.1f}s")
 
     # Voice is OWNED BY THE BODY HOST now (2026-06-29). iris_body_host.py
     # streams my sentences to the StyleTTS2 daemon (:8770 -> mouth :8769) =
