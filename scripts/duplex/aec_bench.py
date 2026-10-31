@@ -158,6 +158,8 @@ SCENARIOS = [
     ("speakers_hot_120ms", 120, 0.9, 0.35, 0, -55),
     ("speakers_drift_80ppm", 120, 0.5, 0.35, 80, -55),
     ("headset_bleed_30ms", 30, 0.05, 0.05, 0, -60),
+    ("speakers_moderate_100ms", 100, 0.15, 0.35, 0, -55),
+    ("speakers_soft_100ms", 100, 0.07, 0.35, 0, -55),
 ]
 
 
@@ -167,12 +169,15 @@ def main() -> int:
     ap.add_argument("--near", required=True, nargs="+", help="a human (near end) wav(s), concatenated")
     ap.add_argument("--backends", default="none,webrtc,speex")
     ap.add_argument("--out", default="")
+    ap.add_argument("--scenarios", default="", help="comma list (default all)")
     ap.add_argument("--json", default="")
     a = ap.parse_args()
     far = np.concatenate([load16(p) for p in a.far])
     near = compact(np.concatenate([load16(p) for p in a.near]))
     results = []
     for (name, d, g, rt, drift, nz) in SCENARIOS:
+        if a.scenarios and name not in a.scenarios.split(","):
+            continue
         mic, farf, nearf, echo, R = build(far, near, delay_ms=d, gain=g, rt60=rt, drift_ppm=drift,
                                           noise_db=nz, seed=7)
         fo, dbl = slice(*R["far_only"]), slice(*R["double"])
