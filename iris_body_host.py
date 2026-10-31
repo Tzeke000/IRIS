@@ -1887,6 +1887,137 @@ def _vr_heard_read(pos):
     return pos + end + 1, out
 
 
+# ── VR turn-taking (2026-10-31, Zeke: "all of it also works in VR"; default OFF) ──────────────────────
+# The room's two host-side fixes, ported to temple lines. On with scratch/voice_control.json
+# {"vr_turntaking": true} (hot, no restart) or IRIS_VR_TURNTAKING=1 (forces on/off).
+#  1. CONTINUATION MERGE (room: _merge_continuation / ce0356f): he paused mid-thought, vr_hear closed the line,
+#     I started answering in the temple, and he went on before ANY of my sentences had finished playing (my
+#     speak was barged with heard_n 0). His new line is his SAME turn: ONE combined line (previous words ...
+#     new words), tagged, within VR_CONTINUATION_MERGE_S of his previous line. Same speaker on both halves.
+#  2. "YES" AFTER MY QUESTION (room: bd6cd7e): a backchannel-only line ("yeah", "okay") that he said WHILE my
+#     temple line was still playing is just him following along - logged, no turn (as in the room) - UNLESS
+#     my line asked him something ("?") within VR_QUESTION_ACK_WINDOW_S: then it is his ANSWER, tagged so.
+# Both read state/vr_temple/my_speech.json, which `vr_temple speak` writes (spans of what actually played).
+VR_SPEECH_PATH = os.path.join(REPO_ROOT, "state", "vr_temple", "my_speech.json")
+VR_CONTROL_PATH = os.path.join(REPO_ROOT, "scratch", "voice_control.json")
+VR_CONTINUATION_MERGE_S = float(os.environ.get("IRIS_VR_CONTINUATION_MERGE_S", "20"))
+VR_QUESTION_ACK_WINDOW_S = 90.0
+_VR_TT = {"last": None}      # his previous delivered VR line {speaker, words, ts_end, delivered}
+
+
+def _vr_turntaking_on():
+    e = os.environ.get("IRIS_VR_TURNTAKING", "").strip().lower()
+    if e:
+        return e not in ("0", "off", "false", "no")
+    try:
+        with open(VR_CONTROL_PATH, encoding="utf-8") as f:
+            return bool((json.load(f) or {}).get("vr_turntaking", False))
+    except Exception:
+        return False
+
+
+def _vr_my_speech():
+    try:
+        with open(VR_SPEECH_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+_TIERS_HOST = None
+
+
+def _is_backchannel(text):
+    global _TIERS_HOST
+    try:
+        if _TIERS_HOST is None:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "iris_interrupt_tiers_host", os.path.join(REPO_ROOT, "voice", "iris_interrupt_tiers.py"))
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = mod
+            spec.loader.exec_module(mod)
+            _TIERS_HOST = mod
+        return bool(_TIERS_HOST.is_backchannel(text))
+    except Exception:
+        return False                         # unsure => a normal turn (never swallow his words)
+
+
+def _vr_line_ts(d, key="ts"):
+    try:
+        return float(d.get(key))
+    except (TypeError, ValueError):
+        try:
+            import datetime as _dt
+            return _dt.datetime.fromisoformat(str(d.get("t_start" if key == "ts" else "t_end"))).timestamp()
+        except Exception:
+            return None
+
+
+def _vr_speech_window(sp):
+    """(start, end) of the stretch my temple line was audibly playing; end None = still going."""
+    spans = sp.get("spans") or []
+    if not spans:
+        return None
+    a = float(spans[0][0])
+    if sp.get("state") == "interrupted":
+        return a, float(sp.get("cut") or a)
+    if sp.get("state") == "speaking":
+        return a, None
+    return a, float(spans[-1][1])
+
+
+def _vr_asked_before(sp, ts):
+    """Did my line ask a question that had (started) playing by ts, within the ack window?"""
+    for (a, e), txt in zip(sp.get("spans") or [], sp.get("sentences") or []):
+        if str(txt).rstrip().endswith("?") and float(a) <= ts and ts - float(e) <= VR_QUESTION_ACK_WINDOW_S:
+            return True
+    return False
+
+
+def _vr_turntaking(lines, sp, last, now):
+    """Pure (no I/O). lines = this batch of attending heard lines; sp = my_speech record (or None);
+    last = _VR_TT["last"]. Returns (lines to wake me with - possibly rewritten/tagged, new last, notes)."""
+    notes = []
+    out = []
+    win = _vr_speech_window(sp) if sp else None
+    for d in lines:
+        ts = _vr_line_ts(d)
+        txt = str(d.get("text", "")).strip()
+        if win and ts is not None and d.get("kind") != "gesture" and _is_backchannel(txt) \
+                and win[0] <= ts <= (win[1] if win[1] is not None else ts) + 0.3:
+            if _vr_asked_before(sp, ts):
+                d = dict(d, _pre="[said while I was still talking, right after I asked a question - treat as "
+                                 "their answer]")
+                notes.append("ack after my question -> answer: " + txt[:60])
+            else:
+                notes.append("acknowledgement while I talked (no turn): " + txt[:60])
+                continue
+        out.append(d)
+    if not out:
+        return out, last, notes
+    spk = {str(d.get("speaker", "")) for d in out}
+    t_first = _vr_line_ts(out[0])
+    t_end = _vr_line_ts(out[-1], "ts_end") or _vr_line_ts(out[-1]) or now
+    words = " ... ".join(str(d.get("text", "")).strip() for d in out)
+    if (VR_CONTINUATION_MERGE_S > 0 and last and len(spk) == 1 and spk == {last["speaker"]} and sp
+            and t_first is not None and 0 <= t_first - float(last["ts_end"]) <= VR_CONTINUATION_MERGE_S
+            and sp.get("state") == "interrupted" and int(sp.get("heard_n") or 0) == 0
+            and str(sp.get("by") or "") == last["speaker"]
+            and float(sp.get("t0") or 0) >= float(last["delivered"]) - 1.0
+            and not any(d.get("_pre") or d.get("kind") == "gesture" for d in out)):
+        joined = last["words"] + " ... " + words
+        merged = dict(out[0], text=joined, _pre="[continuation - they had NOT finished: they paused mid-thought, "
+                      "I started replying in the temple, and they went on before hearing ANY of it (0 of my "
+                      "sentences heard). Answer their WHOLE turn, joined:]")
+        notes.append("continuation merge: " + last["speaker"] + " went on before hearing any of my reply")
+        return [merged], {"speaker": last["speaker"], "words": joined, "ts_end": t_end, "delivered": now}, notes
+    new_last = {"speaker": next(iter(spk)), "words": words, "ts_end": t_end, "delivered": now} \
+        if len(spk) == 1 and not any(d.get("_pre") for d in out) else None
+    return out, new_last, notes
+
+
 def _vr_heard_prompt(lines):
     head = ("[VR TEMPLE - my ears in the temple heard this: speech-to-text of what a player said into their mic "
             "(the name comes from their invite; the words can be slightly off). They are talking TO me - they said "
@@ -1903,7 +2034,8 @@ def _vr_heard_prompt(lines):
         ts = str(d.get("t_start", ""))
         hhmmss = ts[11:19] if len(ts) >= 19 else "?"
         body.append("[VR TEMPLE - " + str(d.get("speaker", "someone")).replace("TEMPLE>>>", "TEMPLE >>>")
-                    + " said, " + hhmmss + "] " + _vr_fence(str(d.get("text", "")).strip()))
+                    + " said, " + hhmmss + "] " + (str(d["_pre"]) + " " if d.get("_pre") else "")
+                    + _vr_fence(str(d.get("text", "")).strip()))
     return head + "\n" + "\n".join(body)
 
 
@@ -2394,6 +2526,13 @@ async def vr_heard_reader(queue, loop):
         if pos != _prev:
             await loop.run_in_executor(None, _vr_cursor_save, pos)
         lines += [d for d in more if d.get("attending")]
+        if _vr_turntaking_on():
+            lines, _VR_TT["last"], _notes = _vr_turntaking(lines, _vr_my_speech(), _VR_TT["last"], time.time())
+            for _n in _notes:
+                print("[host] VR turn-taking: " + _n, flush=True)
+                _blog("ears", "vr " + _n, {})
+            if not lines:
+                continue
         text = _vr_heard_prompt(lines)
         print("\n[vr <- temple] " + text.split("\n", 1)[1], flush=True)
         speakers = ",".join(sorted({str(d.get("speaker", "?")) for d in lines}))

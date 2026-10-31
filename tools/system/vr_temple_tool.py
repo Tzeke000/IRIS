@@ -27,7 +27,7 @@ Actions:
   grab  side=L|R prop=<id>       (hand must be within 0.6 m)   release side=L|R [throw=[vx,vy,vz]]
   speak text="…"                 SAY IT ALOUD in the world: my own mouth (:8769 /synth) renders it, my body streams it
                                  positionally (everyone near me hears it from my eye; it glows while I talk)
-  hush                           stop mid-line
+  hush [fade_ms=N]               stop mid-line (fade_ms: trail off over N ms; default from vr_hush_fade_ms, 0 = cut)
   color hex="#rrggbb" minutes=N  my glow (it follows my mood by itself; this overrides for N min)
   build op=spawn|edit|delete|copy|glue|split|unstroke|clear_strokes data={…}
                                  live building, e.g. op=spawn data={kind:"plank", at:[x,y,z], color:"#c8955a", material:"wood"}
@@ -140,10 +140,19 @@ def _speak(text: str) -> dict[str, Any]:
     sents = _sentences(text)
     out: dict[str, Any] = {"ok": False}
 
+    spans: list[list[float]] = []                        # [play start, play end] per sentence sent
+    rec = {"t0": t0, "text": text, "sentences": sents, "spans": spans, "state": "speaking"}
+    _speech_record(rec)
+
     def _stop(by: dict[str, Any], k: int) -> dict[str, Any]:
-        _send({"cmd": "hush"})
+        fade = vr_cfg()["hush_fade_ms"]
+        _send({"cmd": "hush", "fade_ms": fade} if fade > 0 else {"cmd": "hush"})
+        cut = time.time()
+        heard = sum(1 for _a, e in spans if e <= cut)
+        rec.update(state="interrupted", cut=cut, by=by.get("speaker"), heard_n=heard, sent_n=k)
+        _speech_record(rec)
         return {"ok": True, "interrupted": True, "by": by.get("speaker"), "dist_m": by.get("dist_m"),
-                "sentences_sent": k, "of": len(sents), "first_word_s": first_s,
+                "sentences_sent": k, "of": len(sents), "sentences_heard": heard, "first_word_s": first_s,
                 "note": "someone talked over me - I stopped (barge-in). Their words arrive as a heard line; "
                         "answer THAT, don't resume the old line unless they ask."}
 
@@ -164,7 +173,10 @@ def _speak(text: str) -> dict[str, Any]:
         if first_s is None:
             first_s = round(time.time() - t0, 2)
         secs = float(out.get("seconds", 0.0))
-        play_end = max(play_end, time.time()) + secs
+        _start = max(play_end, time.time())
+        play_end = _start + secs
+        spans.append([round(_start, 3), round(play_end, 3)])
+        _speech_record(rec)
         total += secs
         nbytes += len(wav)
     # FULL-DUPLEX (10-29): keep listening until my line has finished PLAYING - a barge-in during the
@@ -174,6 +186,8 @@ def _speak(text: str) -> dict[str, Any]:
         if b:
             return _stop(b, len(sents))
         time.sleep(0.2)
+    rec.update(state="done", heard_n=len(spans), sent_n=len(spans), done=time.time())
+    _speech_record(rec)
     out["seconds"] = round(total, 2)
     out["wav_bytes"] = nbytes
     out["first_word_s"] = first_s
@@ -182,6 +196,51 @@ def _speak(text: str) -> dict[str, Any]:
 
 
 _ACTIVITY = "/home/iris/IRIS/state/vr_temple/voice_activity.json"
+# What I'm saying / just said in the temple (10-31 VR turn-taking): one JSON record per speak call,
+# rewritten as it goes - {t0, text, sentences, spans:[[play_start, play_end]...], state speaking|interrupted|done,
+# cut, by, heard_n}. Read by the host (continuation merge, "yes" after my question) and vr_hear (no backchannel
+# over my own line). Plain observation of my own mouth - written whether or not the turn-taking flags are on.
+_SPEECH = "/home/iris/IRIS/state/vr_temple/my_speech.json"
+
+
+def _speech_record(rec: dict[str, Any]) -> None:
+    try:
+        tmp = _SPEECH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rec, f)
+        os.replace(tmp, _SPEECH)
+    except Exception:
+        pass
+
+
+# VR turn-taking switches (10-31, all default OFF). Hot: scratch/voice_control.json keys below (no restart);
+# the env var forces a feature on for tests / a unit drop-in.
+#   vr_turntaking    (IRIS_VR_TURNTAKING=1)  continuation merge + "yes" after my question   (host + vr_hear)
+#   vr_backchannel   (IRIS_VR_BACKCHANNEL=1) my "mm-hm" while a nearby player is mid-thought (vr_hear)
+#   vr_hush_fade_ms  (IRIS_VR_HUSH_FADE_MS)  hushed => trail off over N ms instead of a hard cut (0 = cut)
+_CONTROL = "/home/iris/IRIS/scratch/voice_control.json"
+
+
+def vr_cfg(ctl: "dict | None" = None) -> dict[str, Any]:
+    if ctl is None:
+        try:
+            with open(_CONTROL, encoding="utf-8") as f:
+                ctl = json.load(f) or {}
+        except Exception:
+            ctl = {}
+
+    def _on(env: str, key: str) -> bool:
+        e = os.environ.get(env, "").strip().lower()
+        if e:
+            return e not in ("0", "off", "false", "no")
+        return bool(ctl.get(key, False))
+    try:
+        fade = float(os.environ.get("IRIS_VR_HUSH_FADE_MS", "") or ctl.get("vr_hush_fade_ms", 0) or 0)
+    except (TypeError, ValueError):
+        fade = 0.0
+    return {"turntaking": _on("IRIS_VR_TURNTAKING", "vr_turntaking"),
+            "backchannel": _on("IRIS_VR_BACKCHANNEL", "vr_backchannel"),
+            "hush_fade_ms": max(0.0, min(fade, 2000.0))}
 BARGE_MAX_DIST_M = 6.0
 
 
@@ -345,6 +404,8 @@ def _vr_temple(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
             return out
         if action == "speak":
             return _speak(str(p.get("text", "")))
+        if action == "hush" and "fade_ms" not in p and vr_cfg()["hush_fade_ms"] > 0:
+            p["fade_ms"] = vr_cfg()["hush_fade_ms"]          # an old bot ignores the key (= the hard cut)
         if action == "heard":
             return _heard(p)
         if action not in ("state", "events", "move", "look", "hand", "grab", "release", "say", "action", "kick", "omniscient", "hush", "color", "build", "draw", "chess", "laser", "arrow", "hearing", "gun", "power", "follow", "comm"):
