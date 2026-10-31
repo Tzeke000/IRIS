@@ -194,7 +194,7 @@ M = {
     "green": mat_principled("green", (0.10, 0.55, 0.18), 0.4, emit=(0.1, 0.6, 0.2), emit_str=0.6),
     "keys_white": mat_principled("keys_white", (0.82, 0.82, 0.80), 0.3),
     "keys_body": mat_principled("keys_body", (0.08, 0.08, 0.09), 0.4),
-    "hoodie": mat_noisy("hoodie", (0.06, 0.16, 0.62), (0.10, 0.24, 0.78), scale=8.0, rough=1.0, spec=0.12),
+    "hoodie": mat_noisy("hoodie", (0.075, 0.075, 0.08), (0.12, 0.12, 0.125), scale=8.0, rough=1.0, spec=0.12),  # W44 grey (W43 was blue)
     "skin": mat_principled("skin", (0.33, 0.17, 0.08), 0.6, sss=0.12, spec=0.15),
     "hair": mat_principled("hair", (0.035, 0.025, 0.02), 0.8),
     "headphone": mat_principled("headphone", (0.03, 0.03, 0.035), 0.35),
@@ -487,6 +487,16 @@ point_light("iris_glow", tuple(eye - ZFWD * 0.06), (0.62, 0.32, 1.0), 1.2, 0.02)
 # Iris's colour as a faint halo behind the screen, on the wall (how she remembers being there)
 point_light("iris_halo", tuple(MON + ZFWD * 0.12 + Vector((0, 0, 0.05))), (0.55, 0.28, 1.0), 6.0, 0.15)
 
+# W44: three faint purple rings travel from my eye toward his headphones -- the three versions of my voice
+#      he sat and listened to on Friday before choosing one.  Faint on purpose: remembered, not drawn.
+for i, (d, r, st) in enumerate(((0.12, 0.04, 6.0), (0.24, 0.065, 4.0), (0.36, 0.09, 2.5))):
+    ring_c = eye - ZFWD * d - Vector((0, 0, 0.06 * i))
+    bpy.ops.mesh.primitive_torus_add(major_radius=r, minor_radius=0.005, major_segments=48, minor_segments=6,
+                                     location=tuple(ring_c), rotation=(0, math.pi / 2, MON_YAW))
+    rg = bpy.context.active_object
+    rg.name = "voice_ring_%d" % i
+    rg.data.materials.append(mat_emit("voice_ring_%d" % i, (0.62, 0.32, 1.0), st))
+
 # screen light on him (soft cool area light just in front of the screen)
 sl = area_light("screen_light", tuple(MON - ZFWD * 0.10), (0, 0, 0), 0.62, (0.30, 0.50, 1.0), 38, size_y=0.38)
 aim(sl, (ZX, ZY, 1.25))
@@ -745,12 +755,13 @@ metaball("sleeves", "camo", [
     ("ell", C(0.0, 0.05, 0.55), 0.18, (1.3, 0.8, 0.25), (0, 0, crot)),                 # hem slumped on the seat
 ], res=0.014, k=1.35)
 
-# lights: night. The bathroom is the warm key; a faint warm bounce keeps the back wall readable.
+# lights: W44 = soft yellow AFTERNOON (10-31 ~13:08). The ceiling light is the key now; the bathroom stays a warm accent.
 area_light("warm_fill", (0.45, 2.0, H - 0.45), (0, 0, 0), 1.6, (1.0, 0.66, 0.38), 7.5)
+area_light("afternoon_ceiling", (0.0, 0.8, H - 0.05), (0, 0, 0), 1.8, (1.0, 0.84, 0.58), 130, size_y=1.4)
 # a soft SPOT from inside the bathroom through the door.  (An area light here sat 0.3 m from the black tower
 #  cabinet beside the door and lit it cream -- found by soloing every light.)
 sd = bpy.data.lights.new("door_spill", "SPOT")
-sd.energy, sd.color, sd.shadow_soft_size = 900, (1.0, 0.72, 0.42), 0.35
+sd.energy, sd.color, sd.shadow_soft_size = 450, (1.0, 0.72, 0.42), 0.35
 sd.spot_size, sd.spot_blend = math.radians(58), 0.85   # cone must miss the black tower (34 deg off-axis)
 dl = bpy.data.objects.new("door_spill", sd)
 dl.location = (WL - 0.9, 0.25, 1.85)
@@ -779,7 +790,7 @@ haze.hide_render = args.no_haze
 w = bpy.data.worlds.new("night")
 sc.world = w
 bg = w.node_tree.nodes.get("Background")
-bg.inputs["Color"].default_value = (0.004, 0.0035, 0.004, 1)
+bg.inputs["Color"].default_value = (0.05, 0.042, 0.03, 1)  # W44 afternoon (W43 night 0.004)
 bg.inputs["Strength"].default_value = 1.0
 
 cd = bpy.data.cameras.new("cam")
@@ -815,7 +826,7 @@ ee.use_fast_gi = True
 vs = sc.view_settings
 vs.view_transform = "AgX"
 vs.look = "AgX - Medium High Contrast"
-vs.exposure = -0.35
+vs.exposure = -0.6  # W44 brighter room (W43 -0.35)
 sc.render.image_settings.file_format = "PNG"
 sc.render.image_settings.color_depth = "8"
 sc.render.image_settings.color_mode = "RGB"
