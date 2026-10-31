@@ -14,6 +14,13 @@ prints p50/p90 per stage, per local day, per source:
 plus, for worker tasks (worker.py), per kind: queue (admitted->running) and run (running->done/failed).
 
     latency_report.py [--days 7] [--json] [--db PATH]
+    latency_report.py --transcript [PATH] [--split-ts EPOCH] [--days 7] [--json]
+
+--transcript is the v2 side of the comparison: v2 never recorded stage timestamps, but every turn on
+every stack lands in state/transcript.jsonl, so the one stage BOTH can measure is `reply` = a user line
+-> my next line on the same modality (discord / chat=orb / voice), capped at REPLY_CAP_S (anything
+longer is "never answered on that channel", not latency). --split-ts (e.g. the event store's first
+received_ts = when dual-write started) prints the `days` before vs the `days` after side by side.
 
 Store incidents (source `store`) are excluded. An event that never reached a stage simply contributes no
 sample to it (counted under `open`). A missing / empty / unreadable DB prints "no data" and exits 0.
@@ -161,6 +168,64 @@ def build(c: sqlite3.Connection, days: int, now: float | None = None) -> dict:
     return report
 
 
+REPLY_CAP_S = 3600.0
+
+
+def transcript_replies(path: Path) -> list[tuple[str, float, float]]:
+    """[(modality, user_ts, latency_s)] — each user line paired with my next line on the same modality.
+    Unparseable lines are skipped; a user line with no reply within REPLY_CAP_S contributes nothing."""
+    pending: dict[str, list[float]] = defaultdict(list)
+    out: list[tuple[str, float, float]] = []
+    try:
+        f = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    with f:
+        for line in f:
+            try:
+                d = json.loads(line)
+                ts, mod, role = float(d["ts"]), str(d.get("modality") or "?"), d.get("role")
+            except (ValueError, KeyError, TypeError):
+                continue
+            if role == "user":
+                pending[mod].append(ts)
+            elif role == "assistant" and pending.get(mod):
+                for u in pending.pop(mod):
+                    if 0 <= ts - u <= REPLY_CAP_S:
+                        out.append((mod, u, ts - u))
+    return out
+
+
+def transcript_report(path: Path, days: int, split_ts: float | None = None, now: float | None = None) -> dict:
+    """reply latency per modality: one window (last `days`), or before/after `split_ts` (`days` each)."""
+    now = time.time() if now is None else now
+    pairs = transcript_replies(path)
+    if split_ts is None:
+        windows = {"last": (now - days * 86400, now)}
+    else:
+        windows = {"before": (split_ts - days * 86400, split_ts), "after": (split_ts, split_ts + days * 86400)}
+    rep: dict = {"transcript": str(path), "days": days, "split_ts": split_ts, "windows": {}}
+    for name, (a, b) in windows.items():
+        by: dict[str, list[float]] = defaultdict(list)
+        for mod, u, lat in pairs:
+            if a <= u < b:
+                by[mod].append(lat)
+        rep["windows"][name] = {"from": _day(a), "to": _day(b), "reply": {m: summarize(v) for m, v in sorted(by.items())}}
+    return rep
+
+
+def render_transcript(rep: dict) -> str:
+    out = [f"reply latency from {rep['transcript']} (user line -> my next line, same modality, cap "
+           f"{int(REPLY_CAP_S)} s)"]
+    for name, w in rep["windows"].items():
+        out.append(f"\n{name}  {w['from']} .. {w['to']}")
+        if not w["reply"]:
+            out.append("  no data")
+        for mod, s in w["reply"].items():
+            out.append(f"  {mod:8} n={s['n']:<5} p50={_fmt(s['p50']):>8}  p90={_fmt(s['p90']):>8}  max={_fmt(s['max']):>8}")
+    return "\n".join(out)
+
+
 def _fmt(v: float | None) -> str:
     if v is None:
         return "-"
@@ -194,7 +259,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--db", default="")
+    ap.add_argument("--transcript", nargs="?", const=str(ROOT / "state" / "transcript.jsonl"), default=None,
+                    help="v2-comparable reply latency from the shared transcript (default state/transcript.jsonl)")
+    ap.add_argument("--split-ts", type=float, default=None,
+                    help="with --transcript: compare the `days` before this epoch vs the `days` after")
     a = ap.parse_args(argv)
+    if a.transcript is not None:
+        rep = transcript_report(Path(a.transcript), max(1, a.days), a.split_ts)
+        print(json.dumps(rep, indent=1) if a.json else render_transcript(rep))
+        return 0
     path = Path(a.db) if a.db else default_db()
     c = open_ro(path)
     if c is None:
