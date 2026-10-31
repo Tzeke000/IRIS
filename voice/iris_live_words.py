@@ -62,6 +62,28 @@ def last() -> dict:
         return dict(_LAST)
 
 
+def read_current(path=None, max_age_s: float = 3.0, now=None) -> "dict | None":
+    """For OTHER processes (host / cognition, 10-31): what he is saying right now, from the file.
+
+    Returns the payload ({"text", "source", "utterance_id", "final", "ts", ...}) only while an
+    utterance is IN PROGRESS - not final and published within max_age_s - else None. Same
+    display-only contract: a partial is a guess that later passes rewrite; never act on it as a
+    turn. In-process callers (the daemon) use last() / the daemon's `live_partial` command."""
+    try:
+        d = json.loads(Path(path or LIVE_FILE).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(d, dict) or d.get("final") or not d.get("text"):
+        return None
+    now = time.time() if now is None else now
+    try:
+        if now - float(d.get("ts") or 0) > max_age_s:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return d
+
+
 class LiveWords:
     def __init__(self, source: str, *, path=None, transcribe_fn=None,
                  cadence_s: float = 0.6, min_audio_s: float = 0.5, sample_rate: int = 16000,

@@ -65,6 +65,12 @@ try:
     _HAVE_LIVE = True
 except ImportError:
     _HAVE_LIVE = False
+# Backchannels while he talks (10-31, IRIS_BACKCHANNEL, default OFF) - see voice/iris_backchannel.py
+try:
+    import iris_backchannel as _bcmod
+    _HAVE_BC = True
+except ImportError:
+    _HAVE_BC = False
 try:   # full-duplex tiers (10-31): only used when the HOST asks ({"tiers": true}); absent = binary watch
     import iris_duplex_watch as _duplex
     from iris_interrupt_tiers import TierConfig as _TierConfig
@@ -413,6 +419,13 @@ class _StreamingPartials:
             except Exception:
                 pass
 
+    # (10-31: this method had been stranded as dead code after _live_whisper_text's return by
+    # the 10-29 live-words insert, so every in-call turn raised AttributeError in
+    # _transcribe_in_call and fell back to plain whisper - no Route-1 shortcut, no prosody.)
+    def latest(self):
+        with self._lock:
+            return self._latest
+
 
 # ── Live words (10-29 full-duplex chunk 3, Zeke: "hear my words live, in VR and on the app") ──
 # Rolling DISPLAY-ONLY partials of the current utterance → state/voice/live_partial.json (see
@@ -463,10 +476,6 @@ def _live_whisper_text(audio) -> str:
                                without_timestamps=True)
     return " ".join(seg.text.strip() for seg in segs).strip()
 
-    def latest(self):
-        with self._lock:
-            return self._latest
-
 
 # Serializes ALL faster-whisper access (the model isn't reentrant). The partial worker
 # holds it for each pass; the turn-end transcribe holds it for the full pass. So even if
@@ -512,7 +521,8 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                        transcribe_fn=None, mouth_busy_fn=None,
                        early_finalize_fn=None, ef_state: "dict | None" = None,
                        hold_open_fn=None, extend_max_s: float = 0.0,
-                       extend_recheck_s: float = 0.4) -> "np.ndarray | None":
+                       extend_recheck_s: float = 0.4,
+                       backchannel: "_Backchannel | None" = None) -> "np.ndarray | None":
     """Block until speech onset (or timeout), then record until trailing silence or max
     length. Sets overlay state to listening when mic opens.
     Returns float32 audio, or None if nothing was said.
@@ -619,12 +629,23 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                         started = True
                         onset_t = now
                         last_voice_t = now
+                        if backchannel is not None:
+                            backchannel.policy.on_frame(now, True, frame_s)
                         with buf_lock:
                             collected.append(f)
                 else:
+                    voiced = peak >= CONTINUE_PEAK
+                    if (backchannel is not None and backchannel.player.in_self_window(now)
+                            and peak < backchannel.cfg["resume_peak"]):
+                        # my own backchannel clip is (or just was) playing: anything quieter than
+                        # "clearly him talking again" is treated as silence, never as his words
+                        f = np.zeros_like(f)
+                        voiced = False
+                    if backchannel is not None:
+                        backchannel.policy.on_frame(now, voiced, frame_s)
                     with buf_lock:
                         collected.append(f)
-                    if peak >= CONTINUE_PEAK:
+                    if voiced:
                         last_voice_t = now
                         pause_evt.clear()   # he's still talking → let partials run
                         ext_active = False  # speech resumed → next crossing re-decides fresh
@@ -633,6 +654,12 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                     # runs — keeps the two off the GPU at once and idles the worker for a fast join.
                     if silence >= PARTIAL_PAUSE_SILENCE_S:
                         pause_evt.set()
+                    if (backchannel is not None and silence < end_silence_s
+                            and backchannel.policy.want_check(now, silence, last_voice_t,
+                                                              end_silence_s)):
+                        with buf_lock:
+                            snap = collected[:]
+                        backchannel.maybe_fire(ctx, np.concatenate(snap), now, partials)
                     if silence >= end_silence_s:
                         if not ext_enabled:
                             break  # he finished a thought (full end-silence reached)
@@ -714,6 +741,68 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
     if not collected:
         return None
     return np.concatenate(collected)
+
+
+def _grace_resume_s() -> float:
+    """Grace window (s) after a mid-thought turn-end: voice_control.json grace_resume_s (hot,
+    clamped 0.5-8) else GRACE_RESUME_TIMEOUT. Longer = fewer cut-offs on a deliberate pause, but
+    every mid-thought-looking turn waits that much longer for my reply - tune from [grace] logs."""
+    try:
+        from wren_voice_status import read_control
+        v = read_control().get("grace_resume_s")
+        if v is not None:
+            return min(max(float(v), 0.5), 8.0)
+    except Exception:
+        pass
+    return GRACE_RESUME_TIMEOUT
+
+
+class _Backchannel:
+    """One listen's backchannel lane: policy (when) + player (the mouth clip) + smart-turn."""
+
+    def __init__(self, ctx, cfg: dict):
+        self.cfg = cfg
+        self.policy = _bcmod.BackchannelPolicy(cfg)
+        self.player = _bcmod.Player(ctx.server_url, cfg)
+
+    def maybe_fire(self, ctx, audio, now: float, partials=None) -> bool:
+        if getattr(ctx, "speaking", False) or self.player.busy:
+            return False
+        ok, why = _bcmod.allowed()
+        if not ok:
+            return False
+        try:
+            prob = float(_smartturn.predict_endpoint(audio)["prob"])
+        except Exception as e:
+            print(f"[backchannel] smart-turn failed (non-fatal): {e!r}", file=sys.stderr)
+            return False
+        heard = ""
+        try:
+            lt = partials.latest() if partials is not None else None
+            heard = (lt[0] if lt else "")[-40:]
+        except Exception:
+            pass
+        if prob >= self.cfg["incomplete_bar"]:
+            print(f"[backchannel] pause, smart-turn {prob:.3f} sounds done — no backchannel "
+                  f"({heard!r})", file=sys.stderr)
+            return False
+        if not self.player.fire(now):
+            return False
+        self.policy.fired(now)
+        print(f"[backchannel] FIRE: smart-turn {prob:.3f} mid-thought after "
+              f"{self.policy.voiced_s:.1f}s of his speech ({heard!r})", file=sys.stderr)
+        return True
+
+
+def _new_backchannel(ctx) -> "_Backchannel | None":
+    """A lane for this listen, or None (flag off / no smart-turn / mouth has no clips)."""
+    if not (_HAVE_BC and _HAVE_SMARTTURN and _bcmod.env_enabled() and _bcmod.Player.available()):
+        return None
+    try:
+        return _Backchannel(ctx, _bcmod.config())
+    except Exception as e:
+        print(f"[backchannel] init failed (non-fatal): {e!r}", file=sys.stderr)
+        return None
 
 
 def _transcribe_in_call(audio: "np.ndarray", partials: "_StreamingPartials | None"):
@@ -1628,6 +1717,7 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
     # a turn that reaches the fast window but SOUNDS unfinished holds the mic open up
     # to max_seconds. Off/absent → identical to before.
     ext_cfg = _smart_extend_cfg() if _HAVE_SMARTTURN else None
+    bc = _new_backchannel(ctx) if in_call else None
     try:
         with ctx.mic_lock:
             audio = _capture_utterance(
@@ -1640,6 +1730,7 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
                 hold_open_fn=(_endpoint_incomplete if ext_cfg else None),
                 extend_max_s=(ext_cfg["max_seconds"] if ext_cfg else 0.0),
                 extend_recheck_s=(ext_cfg["recheck_seconds"] if ext_cfg else 0.4),
+                backchannel=bc,
             )
     except Exception as e:
         set_state("idle")
@@ -1715,16 +1806,25 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
         filler_fired = True
 
     rounds = 0
+    grace_s = _grace_resume_s()
     while text and not _complete() and rounds < MAX_GRACE_ROUNDS:
         rounds += 1
         set_state("listening", "still with you")
         try:
             with ctx.mic_lock:
-                more = _capture_utterance(ctx, GRACE_RESUME_TIMEOUT, max_s, end_silence)
+                more = _capture_utterance(ctx, grace_s, max_s, end_silence)
         except Exception:
             more = None
         if more is None or not getattr(more, "size", 0):
+            # Logged 10-31: the 12:50 cut-off ("...stopped on the middle of a thought maybe" /
+            # pause / "and then I would probably you know") was exactly this branch, and it left
+            # no trace - only the two HOLD lines before it. The host now merges a continuation that
+            # lands before my reply was heard (iris_body_host CONTINUATION_MERGE_S).
+            print(f"[grace] round {rounds}: no resume within {grace_s:.1f}s — turn closes "
+                  f"mid-thought ({text[-40:]!r})", file=sys.stderr)
             break  # the cue was a false alarm — he really did stop
+        print(f"[grace] round {rounds}: he resumed ({more.size / SAMPLE_RATE:.1f}s more)",
+              file=sys.stderr)
         audio = np.concatenate([audio, more])
         set_state("thinking", "heard you")
         try:
@@ -2554,6 +2654,9 @@ def cmd_call_start(ctx, args: dict) -> dict:
     # ── Step 4: confirm spoken (logged-only when silent) ─────────────────────
     if core_ready:
         ctx.call_warm = True
+        if _HAVE_BC and _bcmod.env_enabled():
+            threading.Thread(target=_bcmod.prime, args=(ctx.server_url,), daemon=True,
+                             name="bc-prime-req").start()
         if degraded:
             msg = (f"okay — we're good, but {' and '.join(degraded)} "
                    f"{'is' if len(degraded) == 1 else 'are'} degraded, running on fallback")

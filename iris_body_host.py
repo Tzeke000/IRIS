@@ -188,6 +188,15 @@ BARGEIN_ON = os.environ.get("IRIS_BARGEIN", "1").strip().lower() not in ("0", "o
 # '[barge-defer]' = queued as a (fenced) turn WITHOUT interrupting mine. Off = the binary watch, as
 # before. Needs the daemon reloaded with the tiers code (an old daemon ignores the arg).
 DUPLEX_TIERS = os.environ.get("IRIS_DUPLEX_TIERS", "0").strip().lower() not in ("0", "off", "false", "no", "")
+# Continuation merge (2026-10-31, Zeke's live duplex test 12:50): he paused mid-thought, the ears
+# closed the turn (smart-turn HOLD, grace window expired), I started replying, and his "and then I
+# would probably you know" landed as a [barge-in] that cut my reply before ONE sentence was heard -
+# so I answered a half-thought, then answered the other half alone ("Go on, I'm listening.").
+# Now: a barge that lands within CONTINUATION_MERGE_S of his previous voice turn, while NONE of my
+# reply had been heard yet, is HIS SAME TURN continuing - re-issued as one combined turn (previous
+# words + new words, tagged) instead of a fresh interruption. Same speaker trust required on both
+# halves. 0 disables.
+CONTINUATION_MERGE_S = float(os.environ.get("IRIS_CONTINUATION_MERGE_S", "20"))
 # Socket timeout for one watch window: must exceed the daemon-side cap (900s backstop;
 # in practice the host ends the window at turn end via bargein_hold False).
 BARGEIN_WATCH_TIMEOUT_S = float(os.environ.get("IRIS_BARGEIN_WATCH_TIMEOUT_S", "920"))
@@ -1466,6 +1475,46 @@ def _daemon_bargein_watch_once():
     return None
 
 
+# Markers (wren_voice_core._barge_cut_marker) meaning "he heard none of my reply".
+_UNHEARD_MARKERS = (
+    re.compile(r"\[cut mid-sentence at: .*\| 0 sentence\(s\) fully heard, \d+ never played\]"),
+    re.compile(r"\[cut between sentences \| 0 heard, \d+ never played\]"),
+    re.compile(r"\[barge landed before the reply started playing[^\]]*\]"),
+)
+_LEADING_TAGS = re.compile(r"^(?:\s*\[[^\]]*\])+\s*")
+
+
+def _his_words(text):
+    """The spoken words of a voice item: leading [tags] and trailing [pace: ...]-style lines off."""
+    lines = [ln for ln in str(text or "").strip().splitlines() if ln.strip()]
+    while lines and re.fullmatch(r"\[.*\]", lines[-1].strip()):
+        lines.pop()
+    return _LEADING_TAGS.sub("", " ".join(ln.strip() for ln in lines)).strip()
+
+
+def _merge_continuation(last, barge, bmeta, now):
+    """last = {"text", "meta", "ts"} of his previous voice turn (or None; "words" = already-clean
+    words, set after a merge so a chain of merges stays parseable). Returns (combined turn text,
+    joined words) if `barge` is that same turn continuing (see CONTINUATION_MERGE_S), else None."""
+    if CONTINUATION_MERGE_S <= 0 or not last or not str(barge).startswith("[barge-in]"):
+        return None
+    if now - float(last.get("ts") or 0) > CONTINUATION_MERGE_S:
+        return None
+    marker = next((m.group(0) for rx in _UNHEARD_MARKERS for m in [rx.search(barge)] if m), None)
+    if marker is None:
+        return None                      # he heard some of my reply: a real interruption
+    if _voice_trusted(last.get("meta"))[0] != _voice_trusted(bmeta)[0]:
+        return None                      # never launder trust across the two halves
+    before = last.get("words") or _his_words(last.get("text"))
+    after = _his_words(barge)
+    if not before or not after:
+        return None
+    joined = before + " ... " + after
+    return ("[barge-in] [continuation - he had NOT finished: he paused mid-thought, you started "
+            "replying, and he went on before hearing any of it " + marker + ". Answer his WHOLE "
+            "turn, joined:] " + joined, joined)
+
+
 async def _wait_until_quiet(loop, settle_grace=0.8, cap_s=180.0, quiet_hold_s=1.5):
     """After a turn, wait for the mouth to finish playing before reopening the ears.
     Polls the daemon's overlay state (state=speaking while playing). The settle_grace lets
@@ -1551,6 +1600,7 @@ async def voice_reader(queue, loop, mic_gate):
     _voff_flag = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "voice_deliberately_off.json")  # repo-relative (10-07: the D:\ literal never existed on Linux)
     _voff_warned = False
     _fail_streak = 0
+    _last_heard = None   # his previous voice turn {"text","meta","ts"} - continuation merge
     while True:
         try:
             # 2026-09-05 fix: EXISTENCE of the flag file is NOT "off". Every other
@@ -1590,6 +1640,15 @@ async def voice_reader(queue, loop, mic_gate):
                 continue
             if barge:
                 barge, _bmeta = barge
+                _merged = _merge_continuation(_last_heard, barge, _bmeta, time.time())
+                if _merged:
+                    print("[host] continuation merge: his barge continues his previous turn "
+                          "(none of my reply heard) -> one combined turn", flush=True)
+                    _blog("ears", "continuation merged", {"barge": barge[:200]})
+                    barge = _merged[0]
+                    _last_heard = {"text": barge, "words": _merged[1], "meta": _bmeta, "ts": time.time()}
+                elif not barge.startswith("[barge-defer]"):
+                    _last_heard = {"text": barge, "meta": _bmeta, "ts": time.time()}
                 print("\n[voice <- " + ("Zeke" if _voice_trusted(_bmeta)[0] else "UNVERIFIED")
                       + ", BARGE-IN] " + barge, flush=True)
                 _blog("ears", barge, {"bargein": True, "speaker": _bmeta})
@@ -1653,6 +1712,7 @@ async def voice_reader(queue, loop, mic_gate):
                 print("\n[host] voice listen: gate cleared mid-listen (warden/turn) - "
                       "keeping utterance (headphones mode).", flush=True)
             _blog("ears", text, {"speaker": _vmeta})
+            _last_heard = {"text": text, "meta": _vmeta, "ts": time.time()}
             await _enqueue(queue, ("voice", text, None, json.dumps(_vmeta)))
             if BARGEIN_ON:
                 # Hand the floor to the main loop: wait (briefly) for it to pick this
