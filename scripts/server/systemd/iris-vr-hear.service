@@ -11,7 +11,9 @@ Type=simple
 WorkingDirectory=%h/IRIS
 Environment=PYTHONUNBUFFERED=1
 Environment=HF_HOME=%h/IRIS/.cache/huggingface
-Environment=IRIS_VR_HEAR_DIR=/tmp/iris_vr_hear
+# audit H2: the sandboxed bot (user irisvr) spools here; group irisvr, 2770 (scratch/vr_sandbox/apply.sh)
+Environment=IRIS_VR_HEAR_DIR=/data/irisvr/hear
+Environment=IRIS_VR_GESTURES=/data/irisvr/gestures/gestures.jsonl
 ExecStart=%h/venvs/iris-v100/bin/python %h/IRIS/scripts/vr/vr_hear.py
 Restart=on-failure
 RestartSec=10

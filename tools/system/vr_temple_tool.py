@@ -45,6 +45,7 @@ Coordinates: metres, temple centre = (0,0,0), +Y up, spawn ≈ (0,0,9) facing �
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 from typing import Any
@@ -264,7 +265,13 @@ def _heard(p: dict[str, Any]) -> dict[str, Any]:
 
 
 def _unit(cmd: str) -> str:
-    r = subprocess.run(["systemctl", "--user", cmd, _UNIT], capture_output=True, text=True, timeout=20)
+    # audit H2 (10-30): my body is a SYSTEM unit now (sandboxed, user irisvr) — start/stop need root
+    # (sudo -n: iris has NOPASSWD); the old user unit is the fallback (pre-apply / after rollback.sh)
+    if os.path.exists("/etc/systemd/system/" + _UNIT):
+        argv = ["systemctl", cmd, _UNIT] if cmd in ("is-active", "status", "show") else ["sudo", "-n", "systemctl", cmd, _UNIT]
+    else:
+        argv = ["systemctl", "--user", cmd, _UNIT]
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=20)
     return (r.stdout or r.stderr).strip()
 
 

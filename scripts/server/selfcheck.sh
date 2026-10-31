@@ -17,7 +17,9 @@ fa_age=$(( $(date +%s) - $(stat -c %Y ~/FAILOVER_ACTIVE 2>/dev/null || echo 0) )
 model=$(ps -o args= -p "$claude" 2>/dev/null | grep -oP -- '--model \K\S+')
 [ "$model" = claude-opus-5-5 ] && ok "model $model" || warn "MODEL '$model' (expected claude-opus-5-5) — tell Zeke; restart_self is banned"
 # UNITS
-for u in iris-stack iris-mouth iris-ears iris-vr-presence; do s=$(systemctl --user is-active $u); printf "%s=%s " $u $s; done; echo
+for u in iris-stack iris-mouth iris-ears iris-vr-presence; do s=$(systemctl --user is-active $u); printf "%s=%s " $u $s; done
+# audit H2: the VR body is a sandboxed SYSTEM unit once scratch/vr_sandbox/apply.sh ran
+[ -e /etc/systemd/system/iris-vr-presence.service ] && printf "iris-vr-presence(system)=%s" "$(systemctl is-active iris-vr-presence)"; echo
 [ -e $R/state/voice_deliberately_off.json ] && echo "  voice flag: $(cat $R/state/voice_deliberately_off.json) (night/deliberate ⇒ don't heal)" || echo "  voice flag absent = ON"
 [ -e $R/state/attention/servo_deliberately_off.json ] && echo "  servo flag SET: $(cat $R/state/attention/servo_deliberately_off.json)" || echo "  servo flag absent (servo should run while Zeke is home)"
 python3 -c "import json;d=json.load(open('$R/scratch/voice_control.json'));print('  mic_muted',d.get('mic_muted'),'mouth_muted',d.get('mouth_muted'))" 2>/dev/null

@@ -1,0 +1,12 @@
+# ~/.config/systemd/user/iris-vr-mood-mirror.path — audit H2 (10-30): my sandboxed VR body can't see /home, so my
+# glow colour reads a COPY of state/iris_mood.json under /data/irisvr/in (the bot's IRIS_MOOD_FILE). Fires on every
+# mood write (mood_core replaces the file atomically; PathChanged sees the rename). Installed by scratch/vr_sandbox/apply.sh.
+[Unit]
+Description=Mirror my mood file for my sandboxed VR body
+
+[Path]
+PathChanged=%h/IRIS/state/iris_mood.json
+Unit=iris-vr-mood-mirror.service
+
+[Install]
+WantedBy=default.target

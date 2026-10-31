@@ -1,0 +1,8 @@
+# ~/.config/systemd/user/iris-vr-mood-mirror.service — one copy of state/iris_mood.json → /data/irisvr/in (atomic).
+# /data/irisvr/in is mine, group irisvr, setgid 2750 ⇒ the copy is group irisvr and only the bot can read it.
+[Unit]
+Description=Copy my mood file for my sandboxed VR body
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'install -m 0640 %h/IRIS/state/iris_mood.json /data/irisvr/in/.iris_mood.json.tmp && mv -f /data/irisvr/in/.iris_mood.json.tmp /data/irisvr/in/iris_mood.json'

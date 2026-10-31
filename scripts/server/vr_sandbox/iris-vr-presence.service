@@ -1,0 +1,92 @@
+# /etc/systemd/system/iris-vr-presence.service — Iris's body in the VR temple, SANDBOXED (audit H2, 2026-10-30).
+# Headless game client that decodes OTHER PLAYERS' voice packets ⇒ treat it as hostile-input-facing code:
+#   · its own system user (irisvr), no shell, home /var/lib/irisvr — nothing of /home/iris is even mounted
+#   · sees only: the bot build (ro), the DJ music (ro), Iris's voice wavs (ro), the mood mirror (ro),
+#     and writes only: the hearing spool + the gesture log under /data/irisvr
+#   · invite key = a systemd credential (root-only file), read via --code-file — never on argv
+#   · network: cgroup IP filter (localhost + the temple only) AND the per-uid egress firewall
+#     (iris-vr-egress-firewall.service: udp → temple:7777 + replies on the control socket, nothing else)
+# The temple address lives ONLY in the generated drop-in iris-vr-presence.service.d/temple.conf (apply.sh).
+[Unit]
+Description=Iris's body in the VR temple (sandboxed headless client, control socket 127.0.0.1:7790)
+Wants=network-online.target
+After=network-online.target iris-vr-egress-firewall.service
+# fail CLOSED: no egress firewall ⇒ no bot
+Requires=iris-vr-egress-firewall.service
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=irisvr
+Group=irisvr
+StateDirectory=irisvr
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/irisvr
+Environment=HOME=/var/lib/irisvr
+Environment=IRIS_VR_HEAR_DIR=/data/irisvr/hear
+Environment=IRIS_HEARD_PATH=/data/irisvr/gestures/gestures.jsonl
+Environment=IRIS_MOOD_FILE=/data/irisvr/in/iris_mood.json
+LoadCredential=invite:/etc/irisvr/invite
+# ${TEMPLE_HOST} comes from the drop-in; ${CREDENTIALS_DIRECTORY} = this unit's credentials (systemd 249 has no %d)
+ExecStart=/data/projects/vr_iris/bot/VRIrisServer.x86_64 --headless -- --bot --join=${TEMPLE_HOST}:7777 --code-file=${CREDENTIALS_DIRECTORY}/invite
+Restart=on-failure
+RestartSec=15
+Nice=5
+OOMScoreAdjust=500
+
+# --- sandbox begin (test_sandbox.sh / test_probe.sh run exactly these lines) ---
+# filesystem: the whole OS read-only, /home an empty tmpfs, /data an empty tmpfs with only these holes
+ProtectSystem=strict
+ProtectHome=tmpfs
+PrivateTmp=yes
+TemporaryFileSystem=/data:ro
+BindReadOnlyPaths=/data/projects/vr_iris/bot
+BindReadOnlyPaths=/data/projects/vr_iris/harness/assets:/tmp/iris_vr_music
+BindReadOnlyPaths=/data/irisvr/voice:/tmp/iris_vr_voice
+BindReadOnlyPaths=/data/irisvr/in
+BindPaths=/data/irisvr/hear
+BindPaths=/data/irisvr/gestures
+# belt + braces: root-only already, but never even mounted (the invite's source, the old local temple copy)
+InaccessiblePaths=-/etc/irisvr -/srv
+UMask=0022
+# devices / kernel / processes
+PrivateDevices=yes
+DevicePolicy=closed
+PrivateUsers=yes
+PrivateIPC=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+ProcSubset=pid
+KeyringMode=private
+RemoveIPC=yes
+# privileges + syscalls (MemoryDenyWriteExecute TESTED OK with Godot 4.7 headless, 2026-10-30)
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+# network: IPv4/6 only — no AF_UNIX (TESTED: Godot runs without it; it cuts the bot off D-Bus + abstract sockets);
+# the drop-in adds IPAddressAllow=<temple>
+RestrictAddressFamilies=AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+# resources
+MemoryMax=1500M
+TasksMax=256
+# --- sandbox end ---
+
+[Install]
+WantedBy=multi-user.target

@@ -49,7 +49,11 @@ if _NV.exists() and "IRIS_VR_HEAR_LDPATH" not in os.environ:
     os.environ["IRIS_VR_HEAR_LDPATH"] = "1"
     os.execv(sys.executable, [sys.executable] + sys.argv)
 os.environ.setdefault("HF_HOME", str(REPO / ".cache" / "huggingface"))
-DEFAULT_SPOOL = os.environ.get("IRIS_VR_HEAR_DIR", "/tmp/iris_vr_hear")
+# audit H2 (10-30): the bot runs SANDBOXED as its own user (irisvr) and can't see /home or the host's /tmp; it spools
+# into /data/irisvr/hear (owned by me, group irisvr, 2770) and drops gesture wakes in /data/irisvr/gestures, which
+# this service relays into heard.jsonl (the bot can no longer write anything of mine directly).
+DEFAULT_SPOOL = os.environ.get("IRIS_VR_HEAR_DIR", "/data/irisvr/hear")
+DEFAULT_GESTURES = os.environ.get("IRIS_VR_GESTURES", "/data/irisvr/gestures/gestures.jsonl")
 DEFAULT_OUT = REPO / "state" / "vr_temple" / "heard.jsonl"
 DEFAULT_STATE = REPO / "state" / "vr_temple" / "hear_attention.json"
 
@@ -157,6 +161,7 @@ class Ears:
         self.out = Path(a.out)
         self.state_path = Path(a.state)
         self.keep_wav = Path(a.keep_wav) if a.keep_wav else None
+        self.gestures = Path(a.gestures) if getattr(a, "gestures", "") else None
         # 10-29 live words: per-speaker DISPLAY-ONLY partials (state/vr_temple/live_partial.json), the same
         # shape as the room daemon's state/voice/live_partial.json. Never feeds heard.jsonl or wakes me.
         self.live_on = not getattr(a, "no_live", False)
@@ -257,6 +262,37 @@ class Ears:
                 "display_name": meta.get("display_name"), "level_db": round(float(lvl), 1), "eff_db": round(float(eff), 1),
                 "secs": round(secs, 2), "stt_s": round(stt_s, 2), "id": stem}
         return line
+
+    def relay_gestures(self) -> int:
+        """audit H2: the sandboxed bot's gesture wakes (gesture_teach.gd → IRIS_HEARD_PATH) land in a file IT can
+        write; move them into heard.jsonl. Untrusted input ⇒ re-build each line from a few known fields, capped."""
+        g = self.gestures
+        if g is None or not g.exists():
+            return 0
+        take = g.with_name(g.name + ".taking")
+        try:
+            g.replace(take)                         # the bot reopens/creates a fresh file on its next gesture
+            raw = take.read_bytes()[:65536].decode("utf-8", "replace").splitlines()[-50:]
+        except OSError as e:
+            log("gesture relay: %r" % (e,))
+            return 0
+        finally:
+            take.unlink(missing_ok=True)
+        n = 0
+        for ln in raw:
+            try:
+                d = json.loads(ln)
+            except ValueError:
+                continue
+            if not isinstance(d, dict) or d.get("kind") != "gesture":
+                continue
+            ts = str(d.get("t_start", ""))[:32] or iso(time.time())
+            self.append({"t_start": ts, "t_end": ts, "speaker": str(d.get("speaker", "?"))[:64], "kind": "gesture",
+                         "text": str(d.get("text", ""))[:300], "addressed": True, "attending": True})
+            n += 1
+        if n:
+            log("relayed %d gesture wake(s)" % n)
+        return n
 
     def append(self, line: dict) -> None:
         try:
@@ -360,6 +396,7 @@ class Ears:
         n = 0
         self.buf: dict[str, dict] = {}
         while True:
+            self.relay_gestures()
             items = self.pending()
             for side in items:
                 got = self.load(side)
@@ -396,7 +433,8 @@ class Ears:
 def _spool_is_safe(path: str) -> bool:
     """Code review (security, low): the spool sits at a fixed /tmp path, so another
     local user could create it first and feed me speech. Refuse a spool that isn't
-    a real directory owned by me; tighten its mode to 0700 (the bot runs as me)."""
+    a real directory owned by me. audit H2: the bot now runs as `irisvr`, so the spool is SHARED with that group
+    (2770, set up by scratch/vr_sandbox/apply.sh) — strip only the world bits, never the group's."""
     try:
         os.makedirs(path, mode=0o700, exist_ok=True)
         st = os.lstat(path)
@@ -404,8 +442,8 @@ def _spool_is_safe(path: str) -> bool:
         if not _stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
             log("REFUSING spool %s: not a directory owned by uid %d" % (path, os.getuid()))
             return False
-        if st.st_mode & 0o077:
-            os.chmod(path, 0o700)
+        if st.st_mode & 0o007:
+            os.chmod(path, st.st_mode & 0o7770)
         return True
     except OSError as e:
         log("REFUSING spool %s: %s" % (path, e))
@@ -417,6 +455,7 @@ def main() -> int:
     ap.add_argument("--spool", default=DEFAULT_SPOOL)
     ap.add_argument("--out", default=str(DEFAULT_OUT))
     ap.add_argument("--state", default=str(DEFAULT_STATE))
+    ap.add_argument("--gestures", default=DEFAULT_GESTURES, help="the sandboxed bot's gesture wakes to relay ('' = off)")
     ap.add_argument("--model", default=MODEL)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--compute", default="float16")
