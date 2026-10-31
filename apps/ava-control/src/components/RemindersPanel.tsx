@@ -1,7 +1,7 @@
 // Reminders tab (2026-10-07, Zeke's "#3"). Each reminder is a one-shot Windows scheduled task that DMs him on
 // Discord at the time — it survives my restarts and his reboots. GET/POST/DELETE /api/v1/app/reminders*.
 import { useCallback, useEffect, useState } from "react";
-import { API_BASE, getJson, postJson } from "../api";
+import { API_BASE, authHeaders, getJson, postJson } from "../api";
 import { Section } from "./Ui";
 
 type Rem = { id: string; text: string; due_iso: string; status: string };
@@ -39,7 +39,7 @@ export default function RemindersPanel() {
   };
   const cancel = async (id: string) => {
     try {
-      const res = await fetch(`${API_BASE}/api/v1/app/reminders/${id}`, { method: "DELETE" });
+      const res = await fetch(`${API_BASE}/api/v1/app/reminders/${id}`, { method: "DELETE", headers: authHeaders() });
       const j = await res.json(); if (!j.ok) setMsg(j.error ?? "couldn't cancel");
       await load();
     } catch (e) { setMsg(String(e)); }

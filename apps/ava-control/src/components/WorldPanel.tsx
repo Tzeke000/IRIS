@@ -2,7 +2,7 @@
 // place if you wanna know how it looks … a 2D and a 3D one". Backend: GET /api/v1/app/weather, /map,
 // /map/image/{name}; POST /api/v1/app/open (allow-listed map links only) for the Google Earth 3D view.
 import { useState } from "react";
-import { API_BASE, getJson, postJson } from "../api";
+import { API_BASE, getJson, postJson, withToken } from "../api";
 import { Section } from "./Ui";
 
 type Day = { date: string; summary: string; high: number; low: number; rain_chance_pct: number | null };
@@ -49,8 +49,8 @@ export default function WorldPanel() {
   const is3d = view === "3d" || view === "3dsat";
   const img = is3d ? undefined : map?.image_urls?.[view];
   const url3d = map?.lat != null && map?.lon != null
-    ? `${API_BASE}/api/v1/app/map3d?lat=${map.lat}&lon=${map.lon}&mode=${view === "3dsat" ? "satellite" : "buildings"}` +
-      `&zoom=${view === "3dsat" ? Math.min(zoom, 15) - 1.5 : zoom}&pitch=${view === "3dsat" ? 70 : 60}&bearing=-20`
+    ? withToken(`${API_BASE}/api/v1/app/map3d?lat=${map.lat}&lon=${map.lon}&mode=${view === "3dsat" ? "satellite" : "buildings"}` +
+      `&zoom=${view === "3dsat" ? Math.min(zoom, 15) - 1.5 : zoom}&pitch=${view === "3dsat" ? 70 : 60}&bearing=-20`)
     : "";
   return (
     <div className="op-pane">
@@ -100,7 +100,7 @@ export default function WorldPanel() {
             </label>
           </div>
           {is3d ? (url3d ? <iframe className="iris-world-map" src={url3d} title="3D map" /> : <p className="op-muted">No coordinates for a 3D view.</p>)
-            : img ? <img className="iris-world-map" src={`${API_BASE}${img}?t=${Date.now()}`} alt={`${view} map`} />
+            : img ? <img className="iris-world-map" src={withToken(`${API_BASE}${img}?t=${Date.now()}`)} alt={`${view} map`} />
             : <p className="op-muted">That view didn't load{map.errors?.[view] ? ` (${map.errors[view]})` : ""}.</p>}
           <p className="op-muted">Map data © OpenStreetMap contributors · OpenFreeMap · Imagery © Esri, Vantor, Earthstar Geographics · Terrain © Mapterhorn</p>
         </Section>

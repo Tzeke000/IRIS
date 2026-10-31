@@ -26,6 +26,18 @@ if (typeof window !== "undefined") {
 }
 const API_BASE: string = import.meta.env.VITE_OPERATOR_API || BACKENDS[readBackend()];
 
+// :5876 bearer token (code review 10-29): from the git-ignored .env.local (VITE_IRIS_ORB_TOKEN, written by
+// scripts/server/orb_token.sh env-line) — never in the repo. Empty = no token sent (the server's default).
+// Headers where fetch() is used; ?token= on URLs the webview loads itself (<img>, <iframe>, WebSocket).
+const ORB_TOKEN: string = import.meta.env.VITE_IRIS_ORB_TOKEN || "";
+export function authHeaders(h: Record<string, string> = {}): Record<string, string> {
+  return ORB_TOKEN ? { ...h, Authorization: `Bearer ${ORB_TOKEN}` } : h;
+}
+export function withToken(url: string): string {
+  if (!ORB_TOKEN) return url;
+  return url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(ORB_TOKEN);
+}
+
 /** Emitted after each completed HTTP API response (before JSON throw on error). */
 export type ApiLogEntry = {
   timestamp: string;
@@ -58,7 +70,7 @@ function emitLog(method: string, path: string, status: number, rawBody: string):
 }
 
 export async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { method: "GET" });
+  const res = await fetch(`${API_BASE}${path}`, { method: "GET", headers: authHeaders() });
   const txt = await res.text();
   emitLog("GET", path, res.status, txt);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -68,7 +80,7 @@ export async function getJson<T>(path: string): Promise<T> {
 export async function postJson<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   const txt = await res.text();
@@ -78,7 +90,7 @@ export async function postJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 export async function getText(path: string): Promise<string> {
-  const res = await fetch(`${API_BASE}${path}`, { method: "GET" });
+  const res = await fetch(`${API_BASE}${path}`, { method: "GET", headers: authHeaders() });
   const txt = await res.text();
   emitLog("GET", path, res.status, txt);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);

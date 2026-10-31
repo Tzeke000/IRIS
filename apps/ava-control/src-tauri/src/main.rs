@@ -719,8 +719,13 @@ exit 3
 /// plays with the built-in .NET SoundPlayer (no extra software), hidden, fire-and-forget.
 #[tauri::command]
 fn desk_play_audio(url: String) -> Result<(), String> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) || !url.ends_with(".wav") || url.len() > 300
-        || url.contains('"') || url.contains('\'') {
+    // The path must end in .wav; the only query allowed is the :5876 token (?token=<urlsafe>, code review
+    // 10-29) - it rides inside the single-quoted curl argument below, so its charset is pinned.
+    let (path, query) = match url.split_once('?') { Some((p, q)) => (p, Some(q)), None => (url.as_str(), None) };
+    let query_ok = query.map_or(true, |q| q.strip_prefix("token=").map_or(false, |t| !t.is_empty()
+        && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '%')));
+    if !(url.starts_with("http://") || url.starts_with("https://")) || !path.ends_with(".wav") || !query_ok
+        || url.len() > 300 || url.contains('"') || url.contains('\'') {
         return Err("only an http(s) .wav address".into());
     }
     #[cfg(windows)]

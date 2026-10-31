@@ -1,7 +1,7 @@
 // Vector tab (2026-10-06). Zeke: "add a vector one for your physical body". Read-only view of the Vector:
 // its camera, battery, whether my session holds it, what its senses feel. GET /api/v1/vector/status + /frame.
 import { useEffect, useState } from "react";
-import { API_BASE, getJson } from "../api";
+import { API_BASE, getJson, withToken } from "../api";
 import { Section } from "./Ui";
 
 type Status = {
@@ -47,7 +47,7 @@ export default function VectorPanel() {
       {err && <p className="op-note">Can't reach the Vector status ({err}).</p>}
       <div className="iris-vector-grid">
         <div className="iris-vector-cam">
-          <img src={`${API_BASE}/api/v1/vector/frame?t=${tick}`} alt="What the Vector's camera sees" />
+          <img src={withToken(`${API_BASE}/api/v1/vector/frame?t=${tick}`)} alt="What the Vector's camera sees" />
           <span>{stale ? `camera frame from ${ago(st?.frame_age_s)}` : "what my body sees · live"}</span>
         </div>
         <div className="iris-vector-facts">

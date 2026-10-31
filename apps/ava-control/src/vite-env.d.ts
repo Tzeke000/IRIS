@@ -4,4 +4,5 @@ interface ImportMetaEnv {
   readonly VITE_OPERATOR_API?: string;
   readonly VITE_IRIS_SERVER_URL?: string;
   readonly VITE_DEFAULT_BACKEND?: string;
+  readonly VITE_IRIS_ORB_TOKEN?: string;
 }
