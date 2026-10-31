@@ -30,7 +30,10 @@ if [ "$ENGINE" = "fish" ]; then
     export FISH_SEED=-1   # research 10-09: a fixed seed made every repeat identical ("hmm" always the same)
     # Zeke 10-09: first blind test picked refA_32s; then after "still monotone" he made a lively ElevenLabs take and picked #3 = x3
     # (45 s montage: excited + mischievous + sad + comforting, from iris-expresive.mp3) — pitch movement ~2x refA
-    export IRIS_FISH_REF_WAV="$HOME/voice_lab/ref_expressive/x3.wav" IRIS_FISH_REF_TXT="$HOME/voice_lab/ref_expressive/x3.txt"
+    # Zeke 10-31: x3 read "sultry/alluring" (worst with the tenderness tag); new ElevenLabs v3 voice B (light British, clear, "not
+    # breathy" in the design prompt) — Zeke: "sounds like you just with the British accent… much clearer". Revert = the x3 line.
+    # export IRIS_FISH_REF_WAV="$HOME/voice_lab/ref_expressive/x3.wav" IRIS_FISH_REF_TXT="$HOME/voice_lab/ref_expressive/x3.txt"
+    export IRIS_FISH_REF_WAV="$HOME/voice_lab/ref_candidates/elB_20s.wav" IRIS_FISH_REF_TXT="$HOME/voice_lab/ref_candidates/elB_20s.txt"
     export IRIS_FISH_ROOT="$HOME/voice_lab/fish" TMPDIR="$HOME/voice_lab/tmp"
     t0=$(date +%s)
     "$HOME/voice_lab/fish/venv/bin/python" "$ROOT/voice/wren_fish_server.py"
