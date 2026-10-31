@@ -246,6 +246,39 @@ def test_event_store_oldest_uncommitted_and_parity(hs):
     assert r["detail"]["parity"]["json_only"] == ["333"] and "parity mismatch" in r["error"]
 
 
+def test_parity_soak_ledger_counts_only_persistent_mismatches(hs):
+    led = hs.ROOT / "state" / "v3" / "parity_soak.json"
+    t0 = 1_000_000.0
+    assert hs.parity_soak_update(led, t0, set())["persistent"] == 0
+    s = hs.parity_soak_update(led, t0 + 60, {"111"})            # first seen: transient so far
+    assert s["mismatch_samples"] == 1 and s["persistent"] == 0
+    s = hs.parity_soak_update(led, t0 + 120, set())             # cleared on the next sample
+    s = hs.parity_soak_update(led, t0 + 180, {"222"})
+    s = hs.parity_soak_update(led, t0 + 240, {"222"})
+    assert s["persistent"] == 0                                 # 60 s < PARITY_PERSIST_S
+    s = hs.parity_soak_update(led, t0 + 180 + hs.PARITY_PERSIST_S, {"222"})
+    assert s["persistent"] == 1 and s["last_persistent"]["id"] == "222"
+    s = hs.parity_soak_update(led, t0 + 1000, {"222"})          # still open: counted once
+    assert s["persistent"] == 1
+    s = hs.parity_soak_update(led, t0 + 1000 + 7200, set())     # a 2 h hole in the soak
+    assert s["gaps"] == 1 and s["samples"] == 8
+    assert s["soak_days"] == round((8200) / 86400, 2)
+    led.write_text("{torn")                                     # a torn ledger restarts, never raises
+    assert hs.parity_soak_update(led, t0 + 9000, set())["samples"] == 1
+
+
+def test_event_store_probe_feeds_the_soak_ledger(hs):
+    db = hs.ROOT / "state" / "v3" / "events.sqlite"
+    db.parent.mkdir(parents=True)
+    with sqlite3.connect(db) as c:
+        c.execute("CREATE TABLE events(event_id TEXT PRIMARY KEY, source TEXT, channel_msg_id TEXT, "
+                  "status TEXT, received_ts REAL)")
+    (hs.ROOT / "state" / "discord_inbox.json").write_text(json.dumps({"unacked": [{"id": "9"}]}))
+    r = hs.probe_events(ctx(hs))
+    assert r["detail"]["soak"]["mismatch_samples"] == 1
+    assert json.loads((hs.ROOT / "state" / "v3" / "parity_soak.json").read_text())["open"] == {"9": pytest.approx(time.time(), abs=60)}
+
+
 def test_event_store_without_tables_is_red_not_a_crash(hs):
     db = hs.ROOT / "state" / "v3" / "events.sqlite"
     db.parent.mkdir(parents=True)
