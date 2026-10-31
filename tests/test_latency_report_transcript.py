@@ -55,4 +55,5 @@ def test_split_before_after(tmp_path):
 
 def test_missing_transcript_is_no_data(tmp_path, capsys):
     assert lr.main(["--transcript", str(tmp_path / "nope.jsonl"), "--days", "1"]) == 0
-    assert "no data" in capsys.readouterr().out
+    cap = capsys.readouterr()          # (an earlier test in the suite leaves sys.stdout -> stderr)
+    assert "no data" in cap.out + cap.err
