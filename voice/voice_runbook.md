@@ -163,3 +163,19 @@ py -3.11 -m venv --system-site-packages D:\Wren\voice\xtts-venv
 `voice\wren_ref.wav` (24kHz mono, from ElevenLabs Voice Design, Zeke picked it by
 ear 2026-06-01) is the speaker clone source. `clone_kit.md` has the design prompt +
 script. The voice description is canonical in `CLAUDE.md` "How you sound".
+
+## Turn-taking knobs (2026-10-31, Zeke's live duplex test)
+
+- **Continuation merge (host, default ON):** a `[barge-in]` that lands within `IRIS_CONTINUATION_MERGE_S`
+  (stack.env, default 20, 0 = off) of his previous voice turn, while 0 of my sentences had been heard,
+  is re-issued as ONE combined turn (`[barge-in] [continuation - he had NOT finished ...] <before> ... <after>`).
+  Same speaker trust required on both halves. Log: `[host] continuation merge`.
+- **Grace window (ears, hot):** `scratch/voice_control.json` `grace_resume_s` (0.5-8, default 1.8). Every
+  outcome now logs `[grace] round N: ...` in `journalctl --user -u iris-ears`.
+- **Backchannels while he talks (ears, default OFF):** `IRIS_BACKCHANNEL=1` in `~/.config/iris/voice.env`.
+  Hot kill switch `voice_control.json` `"backchannel": false`; tunables under `"backchannel_cfg"`
+  (see `voice/iris_backchannel.py` DEFAULTS). Clips live in the Fish mouth (`POST /backchannel`,
+  `GET /backchannel` diagnostics, `GET /backchannel/prime`); the StyleTTS2 mouth has no endpoint, so the
+  lane switches itself off there (logged once). Logs: `[backchannel] FIRE / played / not played`.
+- **Live partial for other processes:** `iris_live_words.read_current()` returns what he is saying right
+  now (in-progress, < 3 s old) from `state/voice/live_partial.json`; display-only, never a turn.
