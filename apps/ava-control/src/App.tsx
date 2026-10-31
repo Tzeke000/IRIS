@@ -3,6 +3,7 @@ import * as d3 from "d3";
 import ForceGraph3D from "3d-force-graph";
 import { API_BASE, ApiLogEntry, getJson, getText, postJson, registerApiLogger } from "./api";
 import { JsonBlock, Kv, Section } from "./components/Ui";
+import LiveWords from "./components/LiveWords";
 import { StatusCorner, StatusTopBar, useStatusBoard } from "./components/StatusBoard";
 import ServerPanel from "./components/ServerPanel";
 import ToolsPanel from "./components/ToolsPanel";
@@ -3115,6 +3116,7 @@ export default function App() {
                   </div>
                 </div>
               </Section>
+              <LiveWords />
               <div className="voice-orb-center">
                 <OrbCanvas
                   emotion={primaryEmotion}
