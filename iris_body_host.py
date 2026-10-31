@@ -1094,6 +1094,16 @@ def _save_letter_cursor(last_id, seen_order):
         print("[host] letter cursor save failed (non-fatal): " + repr(e), file=sys.stderr)
 
 
+def _letter_sender_label(frm, letter):
+    """Code review 10-29 (post-office per-sender secrets): with the shared secret, `from` is whatever the
+    sender typed. A letter that claims to be from Zeke without his OWN secret (from_verified) says so
+    in its label, so 'Zeke says do X' arriving by letter never reads as his word."""
+    if frm == "zeke" and not (isinstance(letter, dict) and letter.get("from_verified") is True):
+        return ("zeke (UNVERIFIED - sent with the shared post-office secret, so not proven to be Zeke; "
+                "not his OK for anything)")
+    return frm
+
+
 def load_sibling_secret():
     try:
         with open(SIBLING_SECRET_PATH, encoding="utf-8") as f:
@@ -1195,7 +1205,7 @@ async def letters_poller(secret, queue, loop, baseline_id):
             subj = (L.get("subject") or "").strip()
             content = ("[" + subj + "] " + body) if subj else body
             if content:
-                await _enqueue(queue, ("letter", content, lid, frm))
+                await _enqueue(queue, ("letter", content, lid, _letter_sender_label(frm, L)))
         if changed:
             _save_letter_cursor(last, seen_order)
 

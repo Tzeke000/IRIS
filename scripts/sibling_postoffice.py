@@ -150,6 +150,7 @@ def _stash_for_iris_inbox(letter: dict[str, Any]) -> None:
         "id": letter["id"],
         "ts": letter["ts"],
         "sender": letter["from"],
+        "from_verified": bool(letter.get("from_verified")),
         "content": letter["body"],
         "addressed_to": letter["to"],
         "subject": letter.get("subject"),
@@ -191,9 +192,60 @@ def _refresh_pending_flag() -> None:
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
-def _check_secret(provided: str | None) -> None:
-    if not provided or not secrets.compare_digest(str(provided), SECRET):
+# Per-sender secrets (code review 10-29, security Med): with ONE shared secret, `from` is whatever the
+# sender writes, so a letter can claim to be from Zeke (and an injection can travel through Wren to me).
+# OPTIONAL file ~/.iris_sibling_secrets.json = {"wren": "<secret>", "zeke": "<secret>", ...} (0600):
+#   * a request made with a sender's OWN secret is that sender: `from` is set from the secret (whatever
+#     the payload says; a different claim is kept as `claimed_from`) and `from_verified` = true;
+#   * the shared secret still works for everyone (Wren's lifeline must not break mid-migration), but a
+#     shared-secret letter may NOT claim a name that has its own secret (403), and is `from_verified` false.
+# File absent / unreadable / empty = exactly the old behaviour (plus `from_verified: false` on new letters).
+# Re-read when its mtime changes, so adding a sender needs no restart.
+SENDER_SECRETS_PATH = Path(os.environ.get("IRIS_SIBLING_SECRETS_FILE")
+                           or (Path.home() / ".iris_sibling_secrets.json"))
+_SENDER_SECRETS: dict = {"key": None, "map": {}}
+
+
+def _sender_secrets() -> dict[str, str]:
+    try:
+        st = SENDER_SECRETS_PATH.stat()
+    except OSError:
+        return {}
+    key = (st.st_mtime_ns, st.st_size)
+    if _SENDER_SECRETS["key"] != key:
+        m: dict[str, str] = {}
+        try:
+            raw = json.loads(SENDER_SECRETS_PATH.read_text(encoding="utf-8"))
+            for name, sec in (raw.items() if isinstance(raw, dict) else []):
+                name, sec = _normalize_sender(name), str(sec or "").strip()
+                if len(sec) >= 16 and name != "anonymous" and not secrets.compare_digest(sec, SECRET):
+                    m[name] = sec
+            if st.st_mode & 0o077:
+                print(f"[postoffice] WARNING: {SENDER_SECRETS_PATH} is readable by group/others",
+                      file=sys.stderr)
+        except Exception as e:  # noqa: BLE001
+            print(f"[postoffice] sender secrets unreadable (shared secret only): {e!r}", file=sys.stderr)
+        _SENDER_SECRETS.update(key=key, map=m)
+    return dict(_SENDER_SECRETS["map"])
+
+
+def _auth(provided: str | None) -> str | None:
+    """None = the shared secret; a sender name = that sender's own secret. 401 otherwise.
+    Every configured secret is compared (no early exit on a match)."""
+    p = str(provided or "")
+    who = None
+    for name, sec in _sender_secrets().items():
+        if p and secrets.compare_digest(p, sec):
+            who = name
+    if who is not None:
+        return who
+    if not p or not secrets.compare_digest(p, SECRET):
         raise HTTPException(status_code=401, detail="invalid or missing X-Sibling-Secret")
+    return None
+
+
+def _check_secret(provided: str | None) -> None:
+    _auth(provided)
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -207,8 +259,11 @@ def post_letter(
 ) -> dict:
     """Submit a letter to the channel. Required fields: from, body. Optional:
     to (default 'all'), subject, in_reply_to, mood_at_write."""
-    _check_secret(x_sibling_secret)
-    sender = _normalize_sender(payload.get("from"))
+    who = _auth(x_sibling_secret)
+    claimed = _normalize_sender(payload.get("from"))
+    if who is None and claimed in _sender_secrets():
+        raise HTTPException(status_code=403, detail=f"'{claimed}' has its own secret - send with it")
+    sender = who or claimed
     raw_body = str(payload.get("body") or "")
     raw_subject = str(payload.get("subject") or "")
     if len(raw_body) > _MAX_BODY_CHARS:
@@ -240,7 +295,10 @@ def post_letter(
         "body": body,
         "in_reply_to": str(payload.get("in_reply_to") or "") or None,
         "mood_at_write": str(payload.get("mood_at_write") or "") or None,
+        "from_verified": who is not None,
     }
+    if who is not None and claimed not in ("anonymous", who):
+        letter["claimed_from"] = claimed
     _append_letter(letter)
     # Bridge to Iris's Stop hook: if this letter is FROM someone other than
     # iris AND is addressed to her (or 'all'), drop it in her sibling inbox
