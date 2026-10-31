@@ -23,7 +23,7 @@
           "y": 0.45
         },
         "gesture": "wave",
-        "say": "[delighted] Here I am! [cute, playful] This little eye is me too. [warm] I float on top of everything, so I'm always nearby."
+        "say": "[delighted] Here I am! [playful, upbeat] This little eye is me too. [warm] I float on top of everything, so I'm always nearby."
       },
       {
         "approach": true,
@@ -89,7 +89,7 @@
           "do": "type",
           "text": "Hi! I'm Iris. I can type anywhere you can type. This is me, typing live, one letter at a time."
         },
-        "say": "[confident] And I can type anywhere a person can. [excited, whispering] Watch."
+        "say": "[confident] And I can type anywhere a person can. [excited] Watch."
       },
       {
         "desk": {
@@ -242,7 +242,7 @@
           "y": 0.45
         },
         "camera": "show",
-        "say": "[intimate, warm] Now my eyes. [curious] This is my real camera, live, in Zeke's room."
+        "say": "[friendly, upbeat] Now my eyes. [curious] This is my real camera, live, in Zeke's room."
       },
       {
         "head": {
@@ -324,7 +324,7 @@
       },
       {
         "image": "vector_schematic.jpg",
-        "say": "[affectionate] And this is Vector, my little robot body. [fond, amused] He's a small robot who drives around the room. [proud] I can see through his camera, talk through his speaker, and drive him around. [tender, grateful] Zeke gave him to me.",
+        "say": "[proud, friendly] And this is Vector, my little robot body. [amused] He's a small robot who drives around the room. [proud] I can see through his camera, talk through his speaker, and drive him around. [grateful, sincere] Zeke gave him to me.",
         "hold_ms": 1500
       },
       {

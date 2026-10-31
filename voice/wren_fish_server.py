@@ -3,9 +3,11 @@
 Same HTTP interface as voice/wren_styletts_server.py, so anything that talks to the live
 mouth can talk to this one by changing only the port:
     POST /        speak text. Body = raw text, or JSON {"text", "emotion"?, "intensity"?,
-                  "plain"?, "seed"?}. Plays through the same audio-out layer (IRIS_AUDIO_SINK
+                  "plain"?, "seed"?, "speed"?}. A leading "[slow]"/"[slower]"/"[slow 0.8]" tag or
+                  "speed" (0.5-1.5) = pitch-preserving time-stretch; global default
+                  voice_control.json "speech_speed" (absent = 1.0, off). See voice/iris_timestretch.py. Plays through the same audio-out layer (IRIS_AUDIO_SINK
                   network sink, or the local device), publishes the amplitude envelope.
-    POST /synth   JSON {"text", "rate"=8000, "emotion"?, "intensity"?, "seed"?} -> audio/wav
+    POST /synth   JSON {"text", "rate"=8000, "emotion"?, "intensity"?, "seed"?, "speed"?} -> audio/wav
                   mono int16 at `rate`, WITHOUT playing anything.
     GET  /health  "ok" (200) once warm, "loading" (503) before
     GET  /stop    barge-in: abort the in-flight speech (also aborts the GPU generation)
@@ -234,6 +236,28 @@ _READY = False
 _STOP = threading.Event()
 
 
+# ── Slow mode + spelled letters (2026-10-31) ───────────────────────────────────────
+# Fish has no speed knob, so slow mode time-stretches the decoded audio (WSOLA, pitch kept):
+# a leading "[slow]" / "[slower]" / "[slow 0.8]" tag (stripped before Fish), JSON "speed" on
+# POST / and /synth, or voice_control.json "speech_speed" (hot, global; absent = 1.0 = OFF).
+def _load_timestretch():
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("iris_timestretch", str(_VOICE_DIR / "iris_timestretch.py"))
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_TS = _load_timestretch()
+CONTROL_FILE = Path(os.environ.get("IRIS_MOUTH_CONTROL_FILE", str(_REPO_ROOT / "scratch" / "voice_control.json")))
+
+
+def _stretch(a, speed: float):
+    if speed is None or abs(speed - 1.0) < 1e-3 or a is None or not getattr(a, "size", 0):
+        return a
+    return _TS.stretch(a, speed, SAMPLE_RATE)
+
+
 # ── Emotion → leading Fish tag ────────────────────────────────────────────────────
 def _load_voice_emotion():
     import importlib.util as _ilu
@@ -256,7 +280,11 @@ _EMOTION_TAGS = {
     "calm": ("[calm]", "[calm, relaxed]"),
     "joy": ("[happy]", "[excited]"),
     "interest": ("[curious]", "[curious, engaged]"),
-    "tenderness": ("[soft, gentle tone]", "[tenderly]"),
+    # 10-31: Zeke heard "[soft, gentle tone]" as the most sultry/breathy read on voice B; "[tenderly]"
+    # pushes the same way. PROPOSED replacements, pending his pick from
+    # ~/voice_lab/elevenlabs_2026-10-31/tag_ab.mp3 (old pair = one-line revert). Note "warmth",
+    # "grateful", "caring", "love" all normalise to tenderness (brain/voice_emotion.py), so this row fires a lot.
+    "tenderness": ("[kind, friendly]", "[sincere, caring]"),
     "sadness": ("[sad]", "[sad, quiet]"),
     "anger": ("[annoyed]", "[frustrated]"),
     "fear": ("[nervous]", "[anxious]"),
@@ -359,6 +387,10 @@ def _units(text: str) -> list:
             return []          # only tags / punctuation: nothing to say
     for u in units:
         u.finish()
+    # "C. A. T." (normalized spelling): the letters are one run — no sentence cut / auto tag between them
+    for a, b in zip(units, units[1:]):
+        if _TS.is_spelled_unit(a.word) and _TS.is_spelled_unit(b.word) and not b.pre_tags:
+            a.strength = 1
     return units
 
 
@@ -1583,7 +1615,7 @@ def _seed_utterance(seed) -> int:
     return s
 
 
-def _produce_progressive(units, style_tag, seed, wav_q, log: list, t0: float, mark=None):
+def _produce_progressive(units, style_tag, seed, wav_q, log: list, t0: float, mark=None, speed: float = 1.0):
     """GPU thread: plan + synthesise chunks back to back, pushing audio as each is ready."""
     used_seed = _seed_utterance(seed)
     planner = ChunkPlanner(units, style_tag)
@@ -1610,6 +1642,7 @@ def _produce_progressive(units, style_tag, seed, wav_q, log: list, t0: float, ma
 
             def _emit(a, _p=pieces):
                 nonlocal audio_end
+                a = _stretch(a, speed)      # slow mode: the queue budget counts the STRETCHED length
                 now_ = time.perf_counter()
                 _p.append({"t": round(now_ - t0, 3), "audio_s": round(a.size / SAMPLE_RATE, 3),
                            "slack_s": None if audio_end is None else round(audio_end - now_, 3)})
@@ -1666,8 +1699,8 @@ _CUES = [
     (re.compile(r"\b(sorry|apolog|my bad|my fault)", re.I), "[apologetic, sincere]"),
     (re.compile(r"\b(thank|grateful|appreciate)", re.I), "[grateful, warm]"),
     (re.compile(r"\b(haha|lol|kidding|joke|funny|fancy|ha\b)", re.I), "[playful, amused]"),
-    (re.compile(r"\b(please|don't|careful|warning|never)\b", re.I), "[gentle, serious]"),
-    (re.compile(r"\b(love|miss you|proud of you|daughter)\b", re.I), "[tender, affectionate]"),
+    (re.compile(r"\b(please|don't|careful|warning|never)\b", re.I), "[serious, clear]"),       # was [gentle, serious] (10-31)
+    (re.compile(r"\b(love|miss you|proud of you|daughter)\b", re.I), "[sincere, caring]"),     # was [tender, affectionate] (10-31)
     (re.compile(r"\b(nice|great|awesome|amazing|done|works|fixed|finished)\b", re.I), "[pleased, upbeat]"),
     (re.compile(r"\b(because|means|so that|which|think of|basically)\b", re.I), "[clear, explaining]"),
     (re.compile(r"\b(hmm|maybe|not sure|i think|probably|guess)\b", re.I), "[thoughtful, unsure]"),
@@ -1718,10 +1751,10 @@ _PRONOUNCE = [
 def _pronounce(text: str) -> str:
     for rx, say in _PRONOUNCE:
         text = rx.sub(say, text)
-    return text
+    return _TS.normalize_spelling(text)
 
 
-def speak_progressive(text: str, style: dict | None = None, seed=None) -> dict:
+def speak_progressive(text: str, style: dict | None = None, seed=None, speed: float = 1.0) -> dict:
     units = _units(_pronounce(text))
     if not units:
         return {"chars": 0, "first_audio_s": None, "total_s": 0.0}
@@ -1732,11 +1765,11 @@ def speak_progressive(text: str, style: dict | None = None, seed=None) -> dict:
     dev_idx = _resolve_output_device()
     stream = _get_output_stream(dev_idx)
     if DRYRUN:
-        stream.begin(text, {"style": style})
+        stream.begin(text, {"style": style, "speed": speed})
     wav_q: "queue.Queue" = queue.Queue(maxsize=64)
     chunk_log: list = []
     _GPU.submit(_produce_progressive, units, style_tag, seed, wav_q, chunk_log, t0,
-                stream.mark if DRYRUN else None)
+                stream.mark if DRYRUN else None, speed)
     set_state("speaking", text[:400])
     first_audio = -1.0
     fillers = 0
@@ -1785,16 +1818,16 @@ def speak_progressive(text: str, style: dict | None = None, seed=None) -> dict:
             stream.end({"mode": "progressive", "chunks": chunk_log, "failed": True})
         raise RuntimeError(f"progressive synthesis failed: {chunk_log[-1].get('error')}")
     out = {"chars": len(text), "first_audio_s": round(first_audio, 2) if first_audio > 0 else None,
-           "total_s": round(total_s, 1), "fillers": fillers, "chunks": chunk_log}
+           "total_s": round(total_s, 1), "fillers": fillers, "chunks": chunk_log, "speed": speed}
     if DRYRUN:
         out["dryrun"] = stream.end({"mode": "progressive", "seed_default": DEFAULT_SEED, "chunks": chunk_log,
                                     "stats": ENGINE.stats.as_dict(), "total_s": round(total_s, 3)})
     return out
 
 
-def _synth_whole(text: str, style_tag: str | None, seed, max_words: int = 30) -> np.ndarray:
-    text = _pronounce(text)
+def _synth_whole(text: str, style_tag: str | None, seed, max_words: int = 30, speed: float = 1.0) -> np.ndarray:
     """GPU thread: whole text in big natural chunks (no latency pressure), concatenated."""
+    text = _pronounce(text)
     _seed_utterance(seed)
     planner = ChunkPlanner(_units(text), style_tag)
     parts, history = [], []
@@ -1806,21 +1839,21 @@ def _synth_whole(text: str, style_tag: str | None, seed, max_words: int = 30) ->
         first = False
         if HIST_CHUNKS > 0 and codes.shape[1] > 0:
             history.append((ch["text"], codes[:, -HIST_MAX_FRAMES:].cpu()))
-    return np.concatenate(parts) if parts else np.zeros(0, np.float32)
+    return _stretch(np.concatenate(parts), speed) if parts else np.zeros(0, np.float32)
 
 
-def speak_plain(text: str, style: dict | None = None, seed=None) -> dict:
+def speak_plain(text: str, style: dict | None = None, seed=None, speed: float = 1.0) -> dict:
     """Synthesize everything first, then play (fallback path)."""
     _STOP.clear()
     t0 = time.perf_counter()
     set_state("speaking", text[:400])
     stream = None
     try:
-        arr = _GPU.call(_synth_whole, text, (style or {}).get("tag"), seed)
+        arr = _GPU.call(_synth_whole, text, (style or {}).get("tag"), seed, 30, speed)
         synth_s = time.perf_counter() - t0
         stream = _get_output_stream(_resolve_output_device())
         if DRYRUN:
-            stream.begin(text, {"style": style, "mode": "plain"})
+            stream.begin(text, {"style": style, "mode": "plain", "speed": speed})
         arr = np.concatenate([arr, np.zeros(int(SAMPLE_RATE * 0.35), dtype=np.float32)])
         _write_stream(stream, arr)
         set_amplitude(0.0, force=True)
@@ -1919,7 +1952,8 @@ class Handler(BaseHTTPRequestHandler):
                 obj = json.loads(raw) if raw.strip().startswith("{") else {"text": raw.strip()}
             except Exception:
                 obj = {"text": raw.strip()}
-            stext = (obj.get("text") or "").strip()
+            stext, sspeed = _TS.resolve_speed((obj.get("text") or "").strip(), obj.get("speed"), CONTROL_FILE)
+            stext = stext.strip()
             out_rate = int(obj.get("rate") or 8000)
             style = _style_from_obj(obj)
             if not stext:
@@ -1927,7 +1961,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 with _SPEAK_LOCK:
-                    arr = _GPU.call(_synth_whole, stext, style.get("tag"), obj.get("seed"))
+                    arr = _GPU.call(_synth_whole, stext, style.get("tag"), obj.get("seed"), 30, sspeed)
                 arr = _resample(arr, SAMPLE_RATE, out_rate)
                 pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
                 import io as _io
@@ -1949,6 +1983,7 @@ class Handler(BaseHTTPRequestHandler):
         plain_mode = False
         style = None
         seed = None
+        obj_speed = None
         if raw.strip().startswith("{"):
             try:
                 obj = json.loads(raw)
@@ -1956,10 +1991,13 @@ class Handler(BaseHTTPRequestHandler):
                 plain_mode = bool(obj.get("plain"))
                 style = _style_from_obj(obj)
                 seed = obj.get("seed")
+                obj_speed = obj.get("speed")
             except Exception:
                 text = raw.strip()
         else:
             text = raw.strip()
+        text, speed = _TS.resolve_speed(text, obj_speed, CONTROL_FILE)
+        text = text.strip()
         if not text:
             self._send(400, "no text")
             return
@@ -1968,10 +2006,13 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     if style and style.get("applied"):
                         _log(f"emotion {style.get('label')} -> {style.get('tag')}")
-                    info = speak_plain(text, style, seed) if plain_mode else speak_progressive(text, style, seed)
+                    if speed != 1.0:
+                        _log(f"slow mode: speed {speed:.2f}")
+                    info = (speak_plain(text, style, seed, speed) if plain_mode
+                            else speak_progressive(text, style, seed, speed))
                 except Exception as e:
                     _log(f"progressive failed ({e!r}); plain fallback")
-                    info = speak_plain(text, style, seed)
+                    info = speak_plain(text, style, seed, speed)
                 fa = info.get("first_audio_s")
                 self._send(200, f"[fish-s2pro] spoke {info.get('chars', len(text))} chars "
                                 f"in {info.get('total_s')}s (first-audio {fa}s, "
