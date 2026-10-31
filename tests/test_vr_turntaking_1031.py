@@ -476,3 +476,11 @@ def test_room_mouth_fade(tmp_path):
     assert 380 <= fade["after_ms"] <= 460, fade          # ~400 ms more, ramped
     assert fade["mono"] and fade["last"] < 0.01           # only ever quieter, ends in silence
     assert res["idle"]["mode"] == "stopping"              # nothing playing: no fade to ride, plain stop
+
+
+def test_smart_turn_gets_real_scale_audio_even_from_int_scaled_decodes():
+    seen = []
+    b = vh.VRBackchannel(predict=lambda a: (seen.append(float(np.abs(a).max())), 0.3)[1])
+    assert b.endpoint_prob(_tone(1.0, amp=0.5) * 32768.0) == 0.3 and seen[-1] <= 1.0   # decode_opus int scale
+    b.endpoint_prob(_tone(1.0, amp=0.5))
+    assert abs(seen[-1] - 0.5) < 1e-3                                                   # real scale untouched

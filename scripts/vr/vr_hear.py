@@ -324,7 +324,15 @@ class VRBackchannel:
                 sys.path.insert(0, str(REPO / "voice"))
                 import wren_smartturn
                 self._predict = lambda a: float(wren_smartturn.predict_endpoint(a)["prob"])
-            return float(self._predict(x.astype(np.float32)))
+            a = x.astype(np.float32)
+            pk = float(np.abs(a).max()) if a.size else 0.0
+            if pk > 1.5:
+                # decode_opus hands back int16-SCALED floats for packed stereo (the .mean() turns int16 into float64
+                # before its /32768 check - every live level_db reads ~+67 dBFS). Smart-turn needs real [-1, 1] audio:
+                # at that scale it saw a clipped square wave and called every pause "done" (0.71). Decoder left as is
+                # here on purpose (fixing it re-arms the distance gates) - see the 10-31 vrduplex report.
+                a = a / 32768.0
+            return float(self._predict(a))
         except Exception as e:  # noqa: BLE001  no smart-turn ⇒ never guess: no backchannel
             if not getattr(self, "_st_warned", False):
                 self._st_warned = True
