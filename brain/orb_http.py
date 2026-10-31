@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import base64
+import hmac
 import json
 import os
 import sys
@@ -183,10 +184,101 @@ def _host_ok(host: str | None) -> bool:
     return h in _ALLOWED_HOSTS
 
 
+# Bearer token (code review 10-29, security High: ":5876 has no authentication" + "the Origin check lets
+# through requests with no Origin header"). The only real gate was the iptables source-IP list, which
+# ARP spoofing on the LAN can fake. Staged, so the tower app can't be locked out before it is rebuilt:
+#   IRIS_ORB_TOKEN_MODE = off | log | enforce   (unset: log when a token is configured, else off)
+#   token = IRIS_ORB_TOKEN, else the file IRIS_ORB_TOKEN_FILE (default ~/.config/iris/orb_token;
+#           scripts/server/orb_token.sh mints it, owner-only). Never in the repo.
+# Presented as `Authorization: Bearer <t>`, `X-Iris-Token: <t>`, or `?token=<t>` (<img>/<iframe>/
+# WebSocket URLs can't carry headers). Compared with hmac.compare_digest.
+# Exempt: LOOPBACK clients (same-machine processes - my tools, the host, the health probes - already
+# run as me), CORS preflight (OPTIONS carries no credentials) and GET /api/v1/health (liveness only).
+# `log` never denies: it prints each distinct (method, path, client) that WOULD be refused, so the app's
+# missing call sites show up before `enforce`. `enforce` with no token configured refuses every
+# non-loopback request (fail closed) rather than silently running open.
+_TOKEN_MODES = ("off", "log", "enforce")
+_TOKEN_EXEMPT_GET = frozenset({"/api/v1/health"})
+
+
+def _load_orb_token() -> str:
+    tok = (os.environ.get("IRIS_ORB_TOKEN") or "").strip()
+    if tok:
+        return tok
+    path = Path(os.environ.get("IRIS_ORB_TOKEN_FILE")
+                or (Path.home() / ".config" / "iris" / "orb_token")).expanduser()
+    try:
+        st = path.stat()
+        if st.st_mode & 0o077:
+            print(f"[orb_http] WARNING: {path} is readable by group/others - chmod 600 it",
+                  file=sys.stderr, flush=True)
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _token_mode(raw: str | None, token: str) -> str:
+    m = (raw or "").strip().lower()
+    if m in _TOKEN_MODES:
+        return m
+    if m:
+        print(f"[orb_http] WARNING: IRIS_ORB_TOKEN_MODE={m!r} unknown - using 'log'", file=sys.stderr, flush=True)
+        return "log"
+    return "log" if token else "off"
+
+
+_ORB_TOKEN = _load_orb_token()
+_ORB_TOKEN_MODE = _token_mode(os.environ.get("IRIS_ORB_TOKEN_MODE"), _ORB_TOKEN)
+if _ORB_TOKEN_MODE == "enforce" and not _ORB_TOKEN:
+    print("[orb_http] IRIS_ORB_TOKEN_MODE=enforce but NO token configured - every non-loopback request "
+          "is refused (fail closed)", file=sys.stderr, flush=True)
+elif _ORB_TOKEN_MODE != "off":
+    print(f"[orb_http] bearer token: mode={_ORB_TOKEN_MODE}", file=sys.stderr, flush=True)
+_TOKEN_LOGGED: dict = {}
+
+
+def _is_loopback(client_host: str | None) -> bool:
+    h = (client_host or "").strip().lower()
+    return h == "::1" or h.startswith("127.") or h == "localhost" or h.startswith("::ffff:127.")
+
+
+def _presented_token(headers, query) -> str:
+    auth = headers.get("authorization") or ""
+    if auth[:7].lower() == "bearer ":
+        return auth[7:].strip()
+    return (headers.get("x-iris-token") or query.get("token") or "").strip()
+
+
+def _token_ok(method: str, path: str, client_host: str | None, headers, query) -> bool:
+    """True = let it through (also in `log` mode, after noting a would-be refusal)."""
+    if _ORB_TOKEN_MODE == "off" or method == "OPTIONS" or _is_loopback(client_host):
+        return True
+    if method in ("GET", "HEAD") and path in _TOKEN_EXEMPT_GET:
+        return True
+    got = _presented_token(headers, query)
+    good = bool(_ORB_TOKEN) and bool(got) and hmac.compare_digest(got.encode(), _ORB_TOKEN.encode())
+    if good:
+        return True
+    if _ORB_TOKEN_MODE == "log":
+        key = (method, path.split("?")[0], client_host)
+        if key not in _TOKEN_LOGGED:
+            if len(_TOKEN_LOGGED) >= 500:
+                _TOKEN_LOGGED.pop(next(iter(_TOKEN_LOGGED)))
+            _TOKEN_LOGGED[key] = time.time()
+            print(f"[orb_http] token(log): WOULD refuse {method} {key[1]} from {client_host} "
+                  f"({'wrong' if got else 'no'} token)", file=sys.stderr, flush=True)
+        return True
+    return False
+
+
 @app.middleware("http")
 async def _origin_guard(request, call_next):
     if not _host_ok(request.headers.get("host")):
         return JSONResponse({"ok": False, "error": "host not allowed"}, status_code=421)
+    if not _token_ok(request.method, request.url.path, getattr(request.client, "host", None),
+                     request.headers, request.query_params):
+        return JSONResponse({"ok": False, "error": "token required"}, status_code=401,
+                            headers={"WWW-Authenticate": "Bearer"})
     if request.method not in ("GET", "HEAD", "OPTIONS") and _foreign_origin(request.headers.get("origin")):
         return JSONResponse({"ok": False, "error": "origin not allowed"}, status_code=403)
     # body-size cap (hardening 10-07): nothing the app sends is near 1 MB
@@ -2053,6 +2145,10 @@ def debug_export() -> str:
 async def ws(socket: WebSocket) -> None:
     if _foreign_origin(socket.headers.get("origin")):  # 2026-10-07: no cross-site websocket either
         await socket.close(code=1008)
+        return
+    if not _host_ok(socket.headers.get("host")) or not _token_ok(
+            "GET", "/ws", getattr(socket.client, "host", None), socket.headers, socket.query_params):
+        await socket.close(code=1008)        # http middleware never sees websockets: same gates here
         return
     await socket.accept()
     try:
