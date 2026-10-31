@@ -468,3 +468,10 @@ def test_pilot_log_rotates_and_other_logs_stay_whole(tmp_path, monkeypatch):
     assert (tmp_path / "pilot_log.jsonl.1").exists() and log.stat().st_size <= 260
     assert json.loads(log.read_text().splitlines()[-1])["i"] == 49
     assert len(alerts.read_text().splitlines()) == 50
+
+
+def test_little_brain_keep_alive_defaults_to_5m():
+    """Code review 10-29 (Vector med, keep_alive half): 30m pinned the model next to the voice on the V100."""
+    src = (Path(__file__).resolve().parents[1] / "scripts" / "vector_brain_server.py").read_text(encoding="utf-8")
+    assert 'LOCAL_KEEP_ALIVE = os.environ.get("IRIS_LB_KEEP_ALIVE", "5m")' in src
+    assert '"keep_alive": LOCAL_KEEP_ALIVE' in src, "the per-request value is what Ollama honours"
