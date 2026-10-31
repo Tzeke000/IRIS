@@ -71,9 +71,14 @@ def test_precommit_gate_refuses_staged_syntax_error() -> None:
 
 
 def test_repo_hook_is_installed_and_points_at_the_gate() -> None:
-    hook = ROOT / ".git" / "hooks" / "pre-commit"
+    # --git-path resolves the shared hooks dir from a linked worktree too (.git is a file there)
+    hooks = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-path", "hooks"],
+                           cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
+    hook = Path(hooks) / "pre-commit"
     assert hook.is_file(), "run: sh scripts/install_git_hooks.sh"
-    assert "precommit_pycompile.py" in hook.read_text(encoding="utf-8")
+    text = hook.read_text(encoding="utf-8")
+    assert "precommit_pycompile.py" in text
+    assert "privacy_guard.py" in text
 
 
 if __name__ == "__main__":
