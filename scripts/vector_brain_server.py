@@ -76,7 +76,14 @@ LOCAL_TIMEOUT_S = 90.0
 # Code review 10-29 (Vector med): one turn could block 4 hops x 90 s = 360 s. One overall deadline
 # per turn now; each hop gets only what is left of it (min 10 s). Env-tunable, 0 = old behaviour.
 LOCAL_TURN_DEADLINE_S = float(os.environ.get("IRIS_LB_TURN_DEADLINE_S", "150"))
-LOCAL_KEEP_ALIVE = os.environ.get("IRIS_LB_KEEP_ALIVE", "30m")
+# Code review 10-29 (Vector med): 30m was the TOWER fix above (an 8 GB model on the 3060, cold reload blew the
+# 30 s ceiling). On the server the V100 is shared with the Fish mouth + whisper, and a per-request keep_alive
+# overrides OLLAMA_KEEP_ALIVE, so 30m pinned ~8 GB next to the voice for half an hour after one Vector line.
+# 5m (the review's number) frees it; the cold-reload room is still LOCAL_TIMEOUT_S. IRIS_LB_KEEP_ALIVE=30m
+# restores the old hold. num_ctx: NOT set on purpose - measured, this Ollama (0.32.15) sizes the default from
+# VRAM ("vram-based default context ... default_num_ctx=32768" in its journal), so the ~10 KB prompt is never
+# front-truncated here; no "truncating" line in the journal either.
+LOCAL_KEEP_ALIVE = os.environ.get("IRIS_LB_KEEP_ALIVE", "5m")
 # 2026-07-24 (Zeke): 120 was cutting her off mid-sentence AND leaving no room to
 # emit a tool call after any preamble. 256 is a ceiling — short replies still
 # EOS early (no latency cost), it just lets a full answer + a tool line finish.

@@ -376,3 +376,33 @@ def test_stream_heartbeat_atomic_and_throttled(env):
     h._host_stream_beat(turn, force=True)
     assert json.loads(Path(h.HOST_STREAM_PATH).read_text())["turn_active"] is False
     h._STREAM["turn_started_ts"] = None
+
+
+# ── P1-H1: the host stubs a checkpoint before it interrupts a working turn ───────────────────
+def test_interrupt_stub_records_where_the_turn_stood(env):
+    async def go():
+        q = asyncio.PriorityQueue()
+        await h._enqueue(q, ("discord", "build the thing", "901"))
+        _, eids = _turn_from_queue(q)
+        h._INBOX["last_tool_ts"] = time.time() - 120
+        h._INBOX["last_tool_name"] = "Bash"
+        return eids
+    eids = asyncio.run(go())
+    tid = h._ev_interrupt_stub("look-up phrase waited 90 s with no tool boundary")
+    assert tid
+    cp = h._ev_store().read_checkpoint(tid)
+    assert cp["auto_stub"] is True and cp["events"] == eids and cp["last_tool"] == "Bash"
+    assert 110 <= cp["last_tool_age_s"] <= 130 and "look-up" in cp["reason"]
+    assert h._ev_store().get_task(tid)["kind"] == "interrupted_turn"
+    pre = h._ev_interrupt_note_prefix()
+    assert tid in pre and "task_checkpoint" in pre
+    assert h._ev_interrupt_note_prefix() == "", "one-shot"
+    assert h._ev_interrupt_stub("again") == tid, "a double fire in the same minute reuses the stub"
+    h._INBOX.pop("interrupt_note", None)
+
+
+def test_interrupt_stub_flag_off_is_a_noop(env, monkeypatch):
+    monkeypatch.setenv("IRIS_V3_EVENTS", "0")
+    h._INBOX.pop("interrupt_note", None)
+    assert h._ev_interrupt_stub("x") is None
+    assert h._ev_interrupt_note_prefix() == ""

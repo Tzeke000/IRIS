@@ -48,6 +48,7 @@ BACKUP_STALE_S = 36 * 3600.0   # mirrors iris_watchdog.BACKUP_STALE_S
 DISK_WARN, DISK_RED = 85.0, 95.0
 EVENT_WARN_S = 600.0           # an un-committed event older than this = the store is not draining
 DONE_STATUSES = ("committed", "failed", "cancelled")
+PARITY_PERSIST_S = 120.0       # a discord id mismatched on samples this far apart = a REAL mismatch (gate 3)
 STREAM_TURN_WARN_S = 1800.0    # host_stream.json: an ACTIVE turn with no SDK message this long (host interrupts at 3600)
 
 
@@ -647,8 +648,44 @@ def probe_events(ctx: dict) -> dict:
         det["parity"] = {"json_only": sorted(jids - dids)[:10], "db_only": sorted(dids - jids)[:10]}
         if jids != dids:
             warns.append(f"discord parity mismatch: {len(jids - dids)} json-only, {len(dids - jids)} db-only")
+    if "parity" in det:
+        det["soak"] = parity_soak_update(root / "state" / "v3" / "parity_soak.json", now,
+                                         set(det["parity"]["json_only"]) | set(det["parity"]["db_only"]))
     oldest = max([v["oldest_age_s"] or 0 for v in det["uncommitted"].values()] or [0])
     return _r("warn" if warns else "ok", probe, "; ".join(warns) or None, age=oldest, **det)
+
+
+def parity_soak_update(path: Path, now: float, mismatched: set) -> dict:
+    """Phase 1 exit gate 3 ("3-day dual-write soak: 0 parity mismatches") needs a RECORD, not one sample.
+    state/v3/parity_soak.json keeps: first/last sample, sample count, samples with any mismatch, and
+    `persistent` = discord ids still mismatched >= PARITY_PERSIST_S after first seen (a one-sample
+    mismatch is the poller's JSON write and the store insert landing either side of this probe).
+    A gap > 1 h between samples (watchdog off, server down) is counted in `gaps` so a soak with holes
+    can't pass as continuous. Never raises; returns the summary for now.json."""
+    try:
+        d = _load(path, None)
+        if not isinstance(d, dict) or "since_ts" not in d:
+            d = {"since_ts": now, "last_ts": None, "samples": 0, "mismatch_samples": 0, "persistent": 0,
+                 "gaps": 0, "open": {}, "last_persistent": None}
+        if d.get("last_ts") and now - float(d["last_ts"]) > 3600:
+            d["gaps"] = int(d.get("gaps", 0)) + 1
+        d["samples"] = int(d.get("samples", 0)) + 1
+        d["last_ts"] = now
+        opened = {k: float(v) for k, v in (d.get("open") or {}).items() if k in mismatched}
+        if mismatched:
+            d["mismatch_samples"] = int(d.get("mismatch_samples", 0)) + 1
+        for k in sorted(mismatched):
+            first = opened.setdefault(k, now)
+            if first >= 0 and now - first >= PARITY_PERSIST_S:
+                d["persistent"] = int(d.get("persistent", 0)) + 1
+                d["last_persistent"] = {"ts": now, "id": k, "first_seen_ts": first}
+                opened[k] = -1.0            # counted once; stays open (negative) until it clears
+        d["open"] = opened
+        write_atomic(path, d)
+        return {k: d.get(k) for k in ("since_ts", "samples", "mismatch_samples", "persistent", "gaps",
+                                      "last_persistent")} | {"soak_days": round((now - float(d["since_ts"])) / 86400, 2)}
+    except Exception as e:  # noqa: BLE001
+        return {"error": repr(e)[:200]}
 
 
 PROBES = {

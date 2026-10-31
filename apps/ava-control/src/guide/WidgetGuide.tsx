@@ -15,7 +15,7 @@
 //   gesture · say · wait_ms · hold_ms
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { API_BASE, getJson, postJson } from "../api";
+import { API_BASE, getJson, postJson, withToken } from "../api";
 import { eyeArms } from "../components/eyeArms3d";
 import { speakLine, stripTags } from "./speech";
 import { fly, type Pose } from "./flight";
@@ -202,7 +202,7 @@ export function useWidgetGuide() {
       setPanel(p);
       if (p.kind === "video" && p.name) {                   // the music: autoplay-with-sound is blocked in the
         const wav = p.name.replace(/\.mp4$/, ".wav");       // webview, so the picture plays muted and the sound
-        void invoke("desk_play_audio", { url: `${API_BASE}/api/v1/app/guide/media/${encodeURIComponent(wav)}` })   // comes through his speakers
+        void invoke("desk_play_audio", { url: withToken(`${API_BASE}/api/v1/app/guide/media/${encodeURIComponent(wav)}`) })   // comes through his speakers
           .catch(() => undefined);
       }
     } else {

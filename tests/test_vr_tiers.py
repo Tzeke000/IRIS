@@ -6,10 +6,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-if "tools.tool_registry" not in sys.modules:          # the tool module only needs register_tool
+# The tool module only needs register_tool. Use the REAL tools package when it imports (it does on the
+# server): a bare ModuleType("tools") left in sys.modules at collection time is not a package, so every
+# later `import tools.system...` in the suite failed (10-31: test_body_possess_tool_writes_atomically).
+try:
+    import tools.tool_registry  # noqa: F401
+except Exception:  # noqa: BLE001
     reg = types.ModuleType("tools.tool_registry")
     reg.register_tool = lambda *a, **k: (lambda f: f)
-    sys.modules.setdefault("tools", types.ModuleType("tools"))
+    pkg = sys.modules.get("tools") or types.ModuleType("tools")
+    pkg.__path__ = [str(ROOT / "tools")]              # stay a package, so tools.system still imports
+    sys.modules["tools"] = pkg
     sys.modules["tools.tool_registry"] = reg
 import importlib.util  # noqa: E402
 

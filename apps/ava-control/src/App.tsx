@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as d3 from "d3";
 import ForceGraph3D from "3d-force-graph";
-import { API_BASE, ApiLogEntry, getJson, getText, postJson, registerApiLogger } from "./api";
+import { API_BASE, ApiLogEntry, authHeaders, getJson, getText, postJson, registerApiLogger, withToken } from "./api";
 import { JsonBlock, Kv, Section } from "./components/Ui";
 import LiveWords from "./components/LiveWords";
 import { StatusCorner, StatusTopBar, useStatusBoard } from "./components/StatusBoard";
@@ -309,7 +309,7 @@ function CustomTabRenderer({ config, snap }: { config: CustomTabConfig; snap: Sn
         <div style={{ marginTop: 12, opacity: 0.85 }}>
           {/* Lightweight inline viewer — full impl reads journal entries on focus. */}
           <iframe
-            src={`${API_BASE}${String(config.data_source || "/api/v1/journal/shared")}`}
+            src={withToken(`${API_BASE}${String(config.data_source || "/api/v1/journal/shared")}`)}
             title={`${config.name}-journal`}
             style={{ width: "100%", height: "60vh", border: "none", borderRadius: 6, background: "#0b0f1a" }}
           />
@@ -874,7 +874,7 @@ export default function App() {
 
   const deleteMem0Entry = useCallback(async (id: string) => {
     try {
-      await fetch(`${API_BASE}/api/v1/memory/mem0/${id}`, { method: "DELETE" });
+      await fetch(`${API_BASE}/api/v1/memory/mem0/${id}`, { method: "DELETE", headers: authHeaders() });
       setMem0Entries((prev) => prev.filter((e) => String(e.id) !== id));
       setMem0SearchResults((prev) => prev ? prev.filter((e) => String(e.id) !== id) : prev);
     } catch { /* ignore */ }
@@ -943,14 +943,14 @@ export default function App() {
     // the runtime has the endpoint (older runtimes 404) and fall back to polling if not. The
     // epoch query makes every reconnect (runtime restart -> online flips) open a fresh stream.
     const tryStream = async (): Promise<boolean> => {
-      const url = `${API_BASE}/api/v1/camera/mjpeg?e=${Date.now()}`;
+      const url = withToken(`${API_BASE}/api/v1/camera/mjpeg?e=${Date.now()}`);
       const ctl = new AbortController();
       const timer = window.setTimeout(() => ctl.abort(), 4000);
       try {
         const res = await fetch(url, { signal: ctl.signal });
         const ok = res.ok && (res.headers.get("content-type") || "").startsWith("multipart/x-mixed-replace");
         ctl.abort();
-        if (ok && active) setLiveFrameSrc(`${API_BASE}/api/v1/camera/mjpeg?e=${Date.now()}`);
+        if (ok && active) setLiveFrameSrc(withToken(`${API_BASE}/api/v1/camera/mjpeg?e=${Date.now()}`));
         return ok;
       } catch {
         return false;
@@ -984,7 +984,7 @@ export default function App() {
 
     const connect = () => {
       try {
-        const wsUrl = API_BASE.replace(/^http/, "ws") + "/ws";
+        const wsUrl = withToken(API_BASE.replace(/^http/, "ws") + "/ws");
         ws = new WebSocket(wsUrl);
         ws.onopen = () => { /* connected */ };
         ws.onmessage = (ev) => {
@@ -1788,7 +1788,7 @@ export default function App() {
   // <img src={frameUrl}> references fire independent HTTP fetches per tab
   // even though Iris only captures the camera once on the backend — wasteful
   // bandwidth + browser load. Vault: see 2026-05 work order Phase A2.
-  const frameUrl = `${API_BASE}/api/v1/vision/latest_frame?t=${cameraTick}`;
+  const frameUrl = withToken(`${API_BASE}/api/v1/vision/latest_frame?t=${cameraTick}`);
   // Prefer shared state for camera display. Falls back to frameUrl only when
   // shared state hasn't loaded yet (cold start or paused stream).
   const sharedCameraSrc = liveFrameSrc || frameUrl;
@@ -3373,7 +3373,7 @@ export default function App() {
                               type="button"
                               style={{ marginTop: 4, fontSize: "0.7rem", color: "#ef4444", background: "none", border: "none", cursor: "pointer", padding: 0 }}
                               onClick={() => {
-                                fetch(`${API_BASE}/api/v1/images/${String(im.filename ?? "")}`, { method: "DELETE" })
+                                fetch(`${API_BASE}/api/v1/images/${String(im.filename ?? "")}`, { method: "DELETE", headers: authHeaders() })
                                   .then(() => setImageList(prev => prev.filter((_, j) => j !== i)))
                                   .catch(() => {});
                               }}

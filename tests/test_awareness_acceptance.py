@@ -114,6 +114,9 @@ def test_checkpoint_hands_routine_dm_to_working_turn_without_acking_it():
     assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
     assert ctx.startswith("[INBOX CHECKPOINT") and "routine midway message" in ctx
     assert "message_id 555" in ctx and "★ PRIORITY" not in ctx
+    # P1-R3: every choice the brief names is offered - now, after this task, defer, delegate
+    for choice in ("answer now", "after this task", "defer it", "delegate it"):
+        assert choice in ctx, choice
     assert q.qsize() == 0, "handed over = removed from the queue (no duplicate turn later)"
     assert h._INBOX["turn_ids"] == ["555"], "acked when THIS turn ends"
     assert [u["id"] for u in h._DISCORD_INBOX["unacked"]] == ["555"], \

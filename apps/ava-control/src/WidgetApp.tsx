@@ -13,7 +13,7 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import OrbCanvas from "./components/OrbCanvas";
-import { API_BASE, getJson, postJson } from "./api";
+import { API_BASE, authHeaders, getJson, postJson, withToken } from "./api";
 import { CUBE_MORPH_ENABLED, deriveOrbEmotion, deriveOrbSleep, deriveOrbState } from "./orbDerive";
 import { PANEL, WIDGET_BASE, ZMAX, useWidgetGuide } from "./guide/WidgetGuide";
 import type { OrbState } from "./components/orbShared";
@@ -40,7 +40,7 @@ function getEnergy(snap: Record<string, unknown> | null): number {
 function savePosition(x: number, y: number): void {
   fetch(`${API_BASE}/api/v1/widget/position`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ x, y }),
   }).catch(() => {});
 }
@@ -298,18 +298,18 @@ export default function WidgetApp() {
           border: "1px solid rgba(120,170,255,0.45)", boxShadow: "0 6px 26px rgba(0,0,0,0.55)", pointerEvents: "none" }}>
           {(guide.panel.kind === "camera" || guide.panel.kind === "image") && (
             <img alt="" style={{ width: "100%", height: "100%", objectFit: guide.panel.kind === "camera" ? "cover" : "contain" }}
-              src={guide.panel.kind === "camera" ? `${API_BASE}/api/v1/camera/mjpeg?e=${guide.panel.name ?? "w"}`
-                : `${API_BASE}/api/v1/app/guide/media/${encodeURIComponent(guide.panel.name || "")}`} />
+              src={withToken(guide.panel.kind === "camera" ? `${API_BASE}/api/v1/camera/mjpeg?e=${guide.panel.name ?? "w"}`
+                : `${API_BASE}/api/v1/app/guide/media/${encodeURIComponent(guide.panel.name || "")}`)} />
           )}
           {guide.panel.kind === "video" && (
             // one of my music videos — quietly (Zeke: "have the music come through at a low volume")
             <video autoPlay muted playsInline style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000" }}
-              src={`${API_BASE}/api/v1/app/guide/media/${encodeURIComponent(guide.panel.name || "")}`}
+              src={withToken(`${API_BASE}/api/v1/app/guide/media/${encodeURIComponent(guide.panel.name || "")}`)}
               onLoadedMetadata={(e) => { void e.currentTarget.play().catch(() => undefined); }}
               onPlay={(e) => measureVideoFps(e.currentTarget)} />
           )}
           {guide.panel.kind === "map3d" && guide.panel.src && (
-            <iframe title="3D map" src={`${API_BASE}${guide.panel.src}`} style={{ width: "100%", height: "100%", border: 0 }} />
+            <iframe title="3D map" src={withToken(`${API_BASE}${guide.panel.src}`)} style={{ width: "100%", height: "100%", border: 0 }} />
           )}
           {guide.panel.kind === "weather" && <WeatherCard d={guide.panel.data || {}} />}
         </div>
