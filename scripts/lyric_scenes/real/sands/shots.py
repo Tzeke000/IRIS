@@ -117,7 +117,8 @@ def table(S, camel_cam):
     # (C = the Sahara vocal, camel window) · build2 137–151 · drop3 151–171 (the big one) · breakdown · outro 178–
     shots = [
         Shot(1, "a_establish", move((215, 125, 42), (150, 88, 32), 30, 32, tgt0=(0, 0, 13), tgt1=(0, 0, 15))),
-        Shot(f(st("intro") + 12 * bar), "b_far_dunes", move(*_far_dunes(), 70, ground=True, tgt0=CUBE - [0, 0, 4])),
+        Shot(f(st("intro") + 12 * bar), "b_far_dunes", move(*_far_dunes(), 60, 150, ground=True,      # v2: slow zoom-in
+                                                     tgt0=CUBE - [0, 0, 4], tgt1=CUBE - [0, 0, 1.5])),
         Shot(f(st("build")), "c_low_rise", move((30, -16, 1.4), (27, -14, 4.5), 20, ground=True,
                                               tgt0=CUBE - [0, 0, 6], tgt1=CUBE - [0, 0, 3])),
         Shot(f(st("build") + 4 * bar), "d_under", move((7, 5, 1.2), (6, 3.5, 1.2), 14, ground=True,
@@ -136,7 +137,8 @@ def table(S, camel_cam):
         Shot(f(st("build2") + 4 * bar), "n_sun_tele", move(*_sun_tele(), 200, tgt0=CUBE - [0, 0, 1])),
         Shot(f(st("drop3")), "o_hero_wide", orbit(26, 1.6, 15, 40, 16, ground=True, tz=-9.0)),
         Shot(f(st("drop3") + 6 * bar), "p_orbit_close", orbit(23, 9, 130, 185, 24)),
-        Shot(f(st("drop3") + 9 * bar), "q_high_three_q", orbit(42, 40, 200, 235, 26, tgt=np.array([0.0, 0.0, 9.0]))),
+        Shot(f(st("drop3") + 9 * bar), "q_high_three_q", orbit(40, 52, 200, 235, 26,          # v2: high enough to
+                                                                tgt=np.array([0.0, 0.0, 11.0]))),     # read the top face
         Shot(f(st("breakdown")), "r_side_mid", move((60, -55, 6), (52, -60, 7), 35, ground=True)),
         Shot(f(st("outro")), "s_hero_low3", orbit(18, 1.2, 60, 85, 14, ground=True, tz=-8.0)),
         Shot(f(st("outro") + 4 * bar), "t_wide_pull", move((40, 70, 10), (70, 120, 16), 28, 26)),

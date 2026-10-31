@@ -6,12 +6,15 @@ Hierarchy: CubeRoot (hover + kick dip + punch scale) → CubeYaw (Z, kick slams)
 CubeFlipY (Y, snare flips) → CubeFrame / CubePanels / CubeEdges / Arcs (arcs ride the cube, bulging out of it).
 """
 import math
+import os
 
 import bpy
 import numpy as np
 
 from lib import bpyx as X
 from lib.bpyx import bake, bake_vec
+
+import faces as FC
 
 EDGE = 6.0                 # cube edge (m)
 HS = EDGE / 2
@@ -25,8 +28,10 @@ STRIKE_PTS = 56
 GRAINS = 700
 DUST = 18
 
-CTRL_KEYS = ["kenv", "senv", "I", "hot", "big", "gain", "swap", "bi", "ph", "strobe", "energy",
+CTRL_KEYS = ["kenv", "senv", "I", "hot", "big", "gain", "swap", "bi", "ph", "strobe", "energy", "glitch", "fr",
              "Ar", "Ag", "Ab", "Br", "Bg", "Bb"]
+NEON_A = (0.0, 0.85, 1.0)  # cyberpunk trims: edges lean cyan, face trims lean magenta (mixed with the section colours)
+NEON_B = (1.0, 0.05, 0.6)
 
 
 # ------------------------------------------------------------------------------------------------ CTRL group
@@ -38,6 +43,7 @@ def ctrl_group(T, cuts=None):
     go = nb.n("NodeGroupOutput")
     vals = dict(kenv=T["kenv"], senv=T["senv"], I=T["I"], hot=T["hot"].astype(float), big=T["big"].astype(float),
                 gain=T["gain"], swap=T["swap"], bi=T["bi"], ph=T["ph"], strobe=T["strobe"], energy=T["energy"],
+                glitch=T["glitch"], fr=np.arange(1, T["n"] + 1, dtype=float),
                 Ar=T["A"][:, 0], Ag=T["A"][:, 1], Ab=T["A"][:, 2], Br=T["B"][:, 0], Bg=T["B"][:, 1], Bb=T["B"][:, 2])
     for k in CTRL_KEYS:
         ng.interface.new_socket(k, in_out="OUTPUT", socket_type="NodeSocketFloat")
@@ -73,9 +79,11 @@ def _add(nb, a, b):
 
 # ------------------------------------------------------------------------------------------------ materials
 
-def led_material(ng):
-    """LED panel: 40×40 rounded cells under a glossy cover. Faces 0–3 (sides) carry the logo (drops: faces 1/3 run a
-    chase); 4–5 (top/bottom) checker blocks on the beat. lyric_viz _stage_face in shader form."""
+def led_material(ng, tex):
+    """SIX DIFFERENT FACES (faces.py header): emblem ×3 variants, album cover, spectrum visualizer, circuit core.
+    LED cells (40 / 150 album / 48 visualizer) under a glossy cover, PCB circuitry with travelling pulses glowing
+    between the cells, panel seams, row-shift glitch on snares/strobes. tex = dict(logo, album, album_crop, spec,
+    spec_rows, circuit)."""
     m, nb, out = X.new_mat("LED")
     C = ctrl_node(nb, ng)
     A = _rgb(nb, C["Ar"], C["Ag"], C["Ab"])
@@ -83,7 +91,18 @@ def led_material(ng):
     tc = nb.n("ShaderNodeTexCoord")
     uvx, uvy, _ = nb.sep(tc.outputs["UV"])
     face = nb.sattr("face").outputs["Fac"]
-    N = float(N_CELLS)
+    isf = [nb.m("COMPARE", face, float(k), 0.1) for k in range(6)]
+    kenv, hot, I, swap = C["kenv"], C["hot"], C["I"], C["swap"]
+    # glitch: whole rows slide sideways for a frame or two (not on the visualizer — its bars must stay true)
+    band = nb.m("FLOOR", nb.m("MULTIPLY", uvy, 14.0))
+    wn = nb.n("ShaderNodeTexWhiteNoise", noise_dimensions="3D")
+    nb.link(nb.xyz(band, nb.m("FLOOR", nb.m("MULTIPLY", C["fr"], 0.5)), face), wn.inputs["Vector"])
+    h = wn.outputs["Value"]
+    shift = nb.m("MULTIPLY", nb.m("MULTIPLY", nb.m("GREATER_THAN", h, 0.72), nb.m("SUBTRACT", h, 0.72)),
+                 nb.m("MULTIPLY", C["glitch"], nb.m("SUBTRACT", 1.0, isf[3])))
+    uvx = nb.m("FRACT", nb.m("ADD", uvx, nb.m("MULTIPLY", shift, 0.6)))
+    # cell grid, per-face pitch
+    N = nb.m("ADD", 40.0, nb.m("ADD", nb.m("MULTIPLY", isf[1], 110.0), nb.m("MULTIPLY", isf[3], 8.0)))
     cx = nb.m("FLOOR", nb.m("MULTIPLY", uvx, N))
     cy = nb.m("FLOOR", nb.m("MULTIPLY", uvy, N))
     cux = nb.m("DIVIDE", nb.m("ADD", cx, 0.5), N)
@@ -93,47 +112,104 @@ def led_material(ng):
     r4 = nb.m("POWER", nb.m("ADD", nb.m("POWER", nb.m("ABSOLUTE", lx), 4.0), nb.m("POWER", nb.m("ABSOLUTE", ly), 4.0)), 0.25)
     dot = nb.m("MULTIPLY", nb.mr(r4, 0.80, 0.60), nb.m("ADD", 0.82, nb.m("MULTIPLY", 0.18, nb.m(
         "EXPONENT", nb.m("MULTIPLY", -1.5, nb.m("ADD", nb.m("MULTIPLY", lx, lx), nb.m("MULTIPLY", ly, ly)))))))
-    # logo layers sampled at the cell centre (Closest) — R outline, G fill, B plume
-    tex = nb.tex(X.img(LOGO_TEX, False), nb.xyz(cux, cuy, 0.0), interp="Closest")
-    tex.extension = "CLIP"
+    dot = nb.m("ADD", dot, nb.m("MULTIPLY", isf[1], nb.m("MULTIPLY", nb.m("SUBTRACT", 1.0, dot), 0.55)))  # album: finer, softer
+    cheb = nb.m("MAXIMUM", nb.m("ABSOLUTE", nb.m("SUBTRACT", cux, 0.5)), nb.m("ABSOLUTE", nb.m("SUBTRACT", cuy, 0.5)))
+
+    # --- EMBLEM layers (R outline, G fill, B plume) sampled at the cell centre
+    ltex = nb.tex(tex["logo"], nb.xyz(cux, cuy, 0.0), interp="Closest")
+    ltex.extension = "CLIP"
     sepc = nb.n("ShaderNodeSeparateColor")
-    nb.link(tex.outputs["Color"], sepc.inputs[0])
+    nb.link(ltex.outputs["Color"], sepc.inputs[0])
     dark, fill, red = sepc.outputs[0], sepc.outputs[1], sepc.outputs[2]
-    kenv, hot, I, swap = C["kenv"], C["hot"], C["I"], C["swap"]
     out_col = _scale_col(nb, nb.mix(swap, A, B), 0.85)
     tint = nb.mix(swap, B, A)
     fill_col = nb.mix(0.70, tint, (1.0, 1.0, 1.0))
-    bgk = nb.m("ADD", 0.07, nb.m("MULTIPLY", 0.20, nb.m("MULTIPLY", kenv, hot)))
     lay = nb.m("ADD", nb.m("ADD", dark, fill), red, clamp=True)
-    c_logo = _scale_col(nb, B, nb.m("MULTIPLY", bgk, nb.m("SUBTRACT", 1.0, lay)))
-    c_logo = _add(nb, c_logo, _scale_col(nb, out_col, dark))
-    c_logo = _add(nb, c_logo, _scale_col(nb, fill_col, nb.m("MULTIPLY", fill, nb.m("ADD", 0.8, nb.m("MULTIPLY", 0.2, I)))))
-    c_logo = _add(nb, c_logo, _scale_col(nb, (1.0, 0.0097, 0.0168), red))
-    # chase rings (drop, faces 1 and 3): w = cheb·2.5 − phase
-    cheb = nb.m("MAXIMUM", nb.m("ABSOLUTE", nb.m("SUBTRACT", cux, 0.5)), nb.m("ABSOLUTE", nb.m("SUBTRACT", cuy, 0.5)))
+    nlay = nb.m("SUBTRACT", 1.0, lay)
+    bgk = nb.m("ADD", 0.07, nb.m("MULTIPLY", 0.20, nb.m("MULTIPLY", kenv, hot)))
+    c_fg = _scale_col(nb, out_col, dark)
+    c_fg = _add(nb, c_fg, _scale_col(nb, fill_col, nb.m("MULTIPLY", fill, nb.m("ADD", 0.8, nb.m("MULTIPLY", 0.2, I)))))
+    c_fg = _add(nb, c_fg, _scale_col(nb, (1.0, 0.0097, 0.0168), red))
+    c_logo = _add(nb, c_fg, _scale_col(nb, B, nb.m("MULTIPLY", bgk, nlay)))
+    # face 2: chase rings behind the emblem (bright in drops, a slow dim drift when calm)
     w = nb.m("SUBTRACT", nb.m("MULTIPLY", cheb, 2.5), C["ph"])
     mm = nb.m("MULTIPLY", nb.m("LESS_THAN", nb.m("FRACT", w), 0.35), nb.m("ADD", 0.6, nb.m("MULTIPLY", 0.4, kenv)))
     mx = nb.m("FLOORED_MODULO", nb.m("FLOOR", w), 2.0)
-    c_chase = _scale_col(nb, nb.mix(mx, A, B), mm)
-    # top/bottom checker blocks, beat parity
+    c_chase = _scale_col(nb, nb.mix(mx, A, B), nb.m("MULTIPLY", mm, nb.m("MULTIPLY", nlay, nb.m("ADD", 0.25, nb.m("MULTIPLY", 0.75, hot)))))
+    c_rings = _add(nb, c_fg, c_chase)
+    # face 4 (top): checker blocks behind the emblem, beat parity
     par = nb.m("FLOORED_MODULO", nb.m("FLOOR", C["bi"]), 2.0)
     blk = nb.m("FLOORED_MODULO", nb.m("ADD", nb.m("ADD", nb.m("FLOOR", nb.m("MULTIPLY", cux, 4.0)),
                                                    nb.m("FLOOR", nb.m("MULTIPLY", cuy, 4.0))), C["bi"]), 2.0)
     blk = nb.m("LESS_THAN", blk, 0.5)
-    bk = nb.m("MULTIPLY", blk, nb.m("MULTIPLY", nb.m("ADD", 0.18, nb.m("MULTIPLY", 0.47, hot)),
+    bk = nb.m("MULTIPLY", blk, nb.m("MULTIPLY", nb.m("ADD", 0.12, nb.m("MULTIPLY", 0.40, hot)),
                                     nb.m("ADD", 0.6, nb.m("MULTIPLY", 0.4, kenv))))
-    c_top = _scale_col(nb, nb.mix(par, B, A), bk)
-    # select by face id
-    is_top = nb.m("GREATER_THAN", face, 3.5)
-    odd_side = nb.m("MULTIPLY", nb.m("GREATER_THAN", nb.m("FLOORED_MODULO", face, 2.0), 0.5), nb.m("LESS_THAN", face, 3.5))
-    use_chase = nb.m("MULTIPLY", odd_side, hot)
-    c = nb.mix(use_chase, c_logo, c_chase)
-    c = nb.mix(is_top, c, c_top)
-    border = nb.m("GREATER_THAN", cheb, 0.5 - 1.0 / N)
-    c = _add(nb, c, _scale_col(nb, A, nb.m("MULTIPLY", border, 0.9)))
-    c = _scale_col(nb, c, C["gain"])
+    c_top = _add(nb, c_fg, _scale_col(nb, nb.mix(par, B, A), nb.m("MULTIPLY", bk, nlay)))
+
+    # --- ALBUM COVER (path-driven image, centre-cropped square)
+    kx, ky = tex["album_crop"]
+    au = nb.m("ADD", 0.5, nb.m("MULTIPLY", nb.m("SUBTRACT", cux, 0.5), kx))
+    av = nb.m("ADD", 0.5, nb.m("MULTIPLY", nb.m("SUBTRACT", cuy, 0.5), ky))
+    atex = nb.tex(tex["album"], nb.xyz(au, av, 0.0), interp="Linear")
+    atex.extension = "EXTEND"
+    abri = nb.m("ADD", 0.30, nb.m("MULTIPLY", 0.42, nb.m("ADD", C["gain"], nb.m("MULTIPLY", 0.25, nb.m("MULTIPLY", kenv, hot)))))
+    c_album = _scale_col(nb, atex.outputs["Color"], abri)
+
+    # --- VISUALIZER: 16 bars × (2 lit + 1 gap) cells, level + falling peak caps from the baked atlas
+    NB_, COLS = float(FC.N_BARS), float(FC.ATLAS_COLS)
+    bar = nb.m("FLOOR", nb.m("DIVIDE", cx, 3.0))
+    inbar = nb.m("LESS_THAN", nb.m("SUBTRACT", cx, nb.m("MULTIPLY", bar, 3.0)), 1.5)
+    f0 = nb.m("SUBTRACT", C["fr"], 1.0)
+    row = nb.m("FLOOR", nb.m("DIVIDE", f0, COLS))
+    col = nb.m("ADD", nb.m("MULTIPLY", nb.m("SUBTRACT", f0, nb.m("MULTIPLY", row, COLS)), NB_), bar)
+    su = nb.m("DIVIDE", nb.m("ADD", col, 0.5), COLS * NB_)
+    sv = nb.m("SUBTRACT", 1.0, nb.m("DIVIDE", nb.m("ADD", row, 0.5), float(tex["spec_rows"])))
+    stx = nb.tex(tex["spec"], nb.xyz(su, sv, 0.0), interp="Closest")
+    stx.extension = "EXTEND"
+    lvl, pkv, _b = nb.sep(stx.outputs["Color"])
+    top = 0.90
+    hcell = nb.m("DIVIDE", nb.m("ADD", cy, 0.5), N)
+    lit = nb.m("MULTIPLY", inbar, nb.m("LESS_THAN", hcell, nb.m("MULTIPLY", lvl, top)))
+    capy = nb.m("FLOOR", nb.m("MULTIPLY", nb.m("MULTIPLY", pkv, top), N))
+    cap = nb.m("MULTIPLY", nb.m("MULTIPLY", inbar, nb.m("COMPARE", cy, capy, 0.5)), nb.m("GREATER_THAN", pkv, 0.03))
+    grad = nb.mix(nb.mr(hcell, 0.0, 0.62), A, B)
+    grad = nb.mix(nb.mr(hcell, 0.62, 0.85), grad, (1.0, 0.18, 0.05))
+    c_vis = _scale_col(nb, grad, nb.m("MULTIPLY", lit, nb.m("ADD", 0.45, nb.m("MULTIPLY", 0.2, kenv))))   # < 1: keeps hue
+    c_vis = _add(nb, c_vis, _scale_col(nb, (1.0, 1.0, 1.0), nb.m("MULTIPLY", cap, 0.85)))
+    c_vis = _add(nb, c_vis, _scale_col(nb, A, nb.m("MULTIPLY", inbar, 0.035)))           # unlit bar ghosts
+    vis_on = nb.m("MAXIMUM", lit, cap)
+
+    # --- CIRCUIT CORE (bottom): square rings drifting outward, kick-lit centre
+    ring = nb.m("LESS_THAN", nb.m("FRACT", nb.m("SUBTRACT", nb.m("MULTIPLY", cheb, 6.0), nb.m("MULTIPLY", C["fr"], 0.02))), 0.16)
+    c_core = _scale_col(nb, A, nb.m("MULTIPLY", ring, nb.m("ADD", 0.12, nb.m("MULTIPLY", 0.6, kenv))))
+    c_core = _add(nb, c_core, _scale_col(nb, B, nb.m("MULTIPLY", nb.m("LESS_THAN", cheb, 0.11), nb.m("ADD", 0.3, nb.m("MULTIPLY", 0.7, kenv)))))
+
+    # select by face
+    c = c_logo
+    for k, ck in ((1, c_album), (2, c_rings), (3, c_vis), (4, c_top), (5, c_core)):
+        c = nb.mix(isf[k], c, ck)
+    border = nb.m("GREATER_THAN", cheb, nb.m("SUBTRACT", 0.5, nb.m("DIVIDE", 1.0, N)))
+    c = _add(nb, c, _scale_col(nb, nb.mix(0.5, A, NEON_A), nb.m("MULTIPLY", border, 0.9)))
+    not_album = nb.m("SUBTRACT", 1.0, isf[1])
+    c = _scale_col(nb, c, nb.m("ADD", isf[1], nb.m("MULTIPLY", not_album, C["gain"])))     # album has its own level
     c = _add(nb, c, (0.0033, 0.0033, 0.0056))                          # an unlit LED still shows (11,11,17)
     c = _scale_col(nb, c, dot)
+    # --- circuitry between the cells (all faces but the album): dim traces + travelling pulses
+    ctex = nb.tex(tex["circuit"], nb.xyz(nb.m("FRACT", nb.m("ADD", uvx, nb.m("MULTIPLY", face, 0.31))),
+                                         nb.m("FRACT", nb.m("ADD", uvy, nb.m("MULTIPLY", face, 0.17))), 0.0), interp="Linear")
+    trace, along, via = nb.sep(ctex.outputs["Color"])
+    pulse = nb.m("LESS_THAN", nb.m("FRACT", nb.m("SUBTRACT", nb.m("MULTIPLY", along, 2.0),
+                                                    nb.m("ADD", nb.m("DIVIDE", C["fr"], 75.0), nb.m("MULTIPLY", face, 0.13)))), 0.07)
+    lit_any = nb.m("ADD", nb.m("MULTIPLY", nb.m("ADD", isf[0], nb.m("ADD", isf[2], isf[4])), lay), nb.m("MULTIPLY", isf[3], vis_on))
+    cpow = nb.m("MULTIPLY", nb.m("MULTIPLY", trace, nb.m("SUBTRACT", 1.0, nb.m("MINIMUM", lit_any, 1.0))),
+                nb.m("ADD", nb.m("ADD", 0.05, nb.m("MULTIPLY", 0.06, via)), nb.m("MULTIPLY", pulse, nb.m("ADD", 0.25, nb.m("MULTIPLY", 0.55, I)))))
+    cpow = nb.m("MULTIPLY", cpow, nb.m("MULTIPLY", not_album, nb.m("ADD", 1.0, isf[5])))
+    cpow = nb.m("MULTIPLY", cpow, nb.m("ADD", 0.3, nb.m("MULTIPLY", 0.7, C["gain"])))
+    c = _add(nb, c, _scale_col(nb, nb.mix(0.45, B, NEON_B), cpow))
+    # panel seams: the face is four tiles (album excepted) — dark grooves, no emission
+    seam = nb.m("MULTIPLY", not_album, nb.m("MAXIMUM", nb.m("LESS_THAN", nb.m("ABSOLUTE", nb.m("SUBTRACT", uvx, 0.5)), 0.006),
+                                              nb.m("LESS_THAN", nb.m("ABSOLUTE", nb.m("SUBTRACT", uvy, 0.5)), 0.006)))
+    c = _scale_col(nb, c, nb.m("SUBTRACT", 1.0, seam))
     b = X.principled(nb, (0.012, 0.012, 0.014), 0.16, 0.0)
     nb.link(c, b.inputs["Emission Color"])
     nb.set(b.inputs["Emission Strength"], LED_K)
@@ -149,8 +225,22 @@ def edge_material(ng):
     C = ctrl_node(nb, ng)
     A = _rgb(nb, C["Ar"], C["Ag"], C["Ab"])
     wh = nb.m("ADD", nb.m("MULTIPLY", C["strobe"], 1.0), nb.m("MULTIPLY", C["senv"], nb.m("MULTIPLY", C["hot"], 0.6)), clamp=True)
-    col = nb.mix(wh, nb.mix(0.35, A, (1, 1, 1)), (1, 1, 1))
-    st = nb.m("MULTIPLY", nb.m("ADD", nb.m("MULTIPLY", C["gain"], 14.0), nb.m("MULTIPLY", C["strobe"], 60.0)), 1.0)
+    col = nb.mix(wh, nb.mix(0.45, A, NEON_A), (1, 1, 1))
+    st = nb.m("MULTIPLY", nb.m("ADD", nb.m("MULTIPLY", C["gain"], 18.0), nb.m("MULTIPLY", C["strobe"], 60.0)), 1.0)
+    e = nb.n("ShaderNodeEmission")
+    nb.link(col, e.inputs["Color"])
+    nb.link(st, e.inputs["Strength"])
+    nb.link(e.outputs[0], out.inputs["Surface"])
+    return m
+
+
+def trim_material(ng):
+    """neon face trim (a lit rectangle around every panel): magenta-leaning colour B, pumps on kicks"""
+    m, nb, out = X.new_mat("CubeTrimNeon")
+    C = ctrl_node(nb, ng)
+    B = _rgb(nb, C["Br"], C["Bg"], C["Bb"])
+    col = nb.mix(nb.m("MULTIPLY", C["strobe"], 0.8), nb.mix(0.5, B, NEON_B), (1, 1, 1))
+    st = nb.m("ADD", nb.m("MULTIPLY", C["gain"], 12.0), nb.m("MULTIPLY", C["kenv"], nb.m("MULTIPLY", C["hot"], 10.0)))
     e = nb.n("ShaderNodeEmission")
     nb.link(col, e.inputs["Color"])
     nb.link(st, e.inputs["Strength"])
@@ -224,8 +314,8 @@ def _panel(name, n, coll, parent, mat):
     return ob
 
 
-def _edges_mb(t, off):
-    mb = X.MB()
+def _edges_mb(t, off, shorten=0.0, mb=None):
+    mb = mb or X.MB()
     for ax in range(3):
         for s1 in (-1, 1):
             for s2 in (-1, 1):
@@ -234,12 +324,45 @@ def _edges_mb(t, off):
                 c[o[0]] = s1 * (HS + off)
                 c[o[1]] = s2 * (HS + off)
                 sz = [t, t, t]
-                sz[ax] = EDGE + 2 * off - (0.0 if off < 0.1 else 0.0)
+                sz[ax] = EDGE + 2 * off - shorten
                 mb.box(c, sz)
     return mb
 
 
-def cube(coll, T, R, ng, cuts=None):
+SIDE_AXES = [((0, -1, 0), (1, 0, 0), (0, 0, 1)), ((1, 0, 0), (0, 1, 0), (0, 0, 1)), ((0, 1, 0), (-1, 0, 0), (0, 0, 1)),
+             ((-1, 0, 0), (0, -1, 0), (0, 0, 1)), ((0, 0, 1), (1, 0, 0), (0, 1, 0)), ((0, 0, -1), (1, 0, 0), (0, -1, 0))]
+
+
+def _face_box(mb, k, cu, cv, du, dv, depth, out):
+    """box on face k: centre (cu, cv) in face units (m), extent du × dv, `depth` thick, centred `out` m from the centre"""
+    nrm, u, v = (np.array(a, float) for a in SIDE_AXES[k])
+    c = nrm * out + u * cu + v * cv
+    size = np.abs(u) * du + np.abs(v) * dv + np.abs(nrm) * depth
+    mb.box(tuple(c), tuple(size))
+
+
+def prepare_textures(song_wav, n, tex_dir, R):
+    """logo (v1), album cover (path-driven), baked spectrum atlas, circuitry → dict for led_material"""
+    lev, pk = FC.spectrum(song_wav, n)
+    spec = FC.write_png(FC.atlas(lev, pk), f"{tex_dir}/spectrum_atlas.png", "SpectrumAtlas")
+    circ = FC.write_png(FC.circuit(walkers=260), f"{tex_dir}/circuit.png", "Circuit")
+    apath, placeholder = FC.album_path()
+    # Zeke's own art: copied next to the generated textures (outside /data/iris_assets, so the credits tool counts it
+    # as OWN, not third-party). Swap = replace FC.ALBUM + rebuild — the copy is refreshed on every build.
+    import shutil
+    used = f"{tex_dir}/album_cover_used{os.path.splitext(apath)[1].lower()}"
+    shutil.copyfile(apath, used)
+    album = X.img(used, True)
+    w, h = album.size
+    sq = float(min(w, h))
+    R.log(f"[faces] album cover {'PLACEHOLDER — real cover missing at ' + FC.ALBUM if placeholder else apath} "
+          f"({w}×{h}, centre-cropped square); spectrum {FC.N_BARS} bars × {n} frames baked")
+    R.add("album_cover", dict(path=apath, placeholder=placeholder, size=[w, h]))
+    return dict(logo=X.img(LOGO_TEX, False), album=album, album_crop=(sq / w, sq / h), spec=spec,
+                spec_rows=spec.size[1], circuit=circ, levels=lev)
+
+
+def cube(coll, T, R, ng, tex, cuts=None):
     root = X.empty("CubeRoot", (0, 0, ZC), coll=coll)
     yaw = X.empty("CubeYaw", parent=root, coll=coll)
     fx = X.empty("CubeFlipX", parent=yaw, coll=coll)
@@ -251,19 +374,43 @@ def cube(coll, T, R, ng, cuts=None):
     bake(fx, "rotation_euler", T["flip_x"], index=0)
     bake(fy, "rotation_euler", T["flip_y"], index=1)
     fm = frame_material()
-    frame = _edges_mb(0.30, 0.0).obj("CubeFrame", fm, parent=fy, coll=coll)
+    # hard-edged frame (v2 cyberpunk): heavy chamfered edge bars, oversized corner blocks, edge clamps, panel-seam
+    # ribs on every face but the album, all one gunmetal object with a 1-segment (hard) chamfer
+    mb = _edges_mb(0.36, 0.0)
     for c in [(sx * HS, sy * HS, sz * HS) for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]:
-        pass
+        mb.box(c, (0.95, 0.95, 0.95))
+    for ax in range(3):                                        # two clamps per edge at ±HS/2
+        for s1 in (-1, 1):
+            for s2 in (-1, 1):
+                o = [i for i in range(3) if i != ax]
+                for t in (-0.5, 0.5):
+                    c = [0.0, 0.0, 0.0]
+                    c[o[0]], c[o[1]], c[ax] = s1 * HS, s2 * HS, t * HS
+                    sz = [0.56, 0.56, 0.56]
+                    sz[ax] = 0.34
+                    mb.box(c, sz)
+    for k in (0, 2, 3, 4, 5):                                  # panel seams (the shader's grooves line up)
+        _face_box(mb, k, 0.0, 0.0, 0.07, 2 * HS * 0.90, 0.06, HS * 0.985 + 0.02)
+        _face_box(mb, k, 0.0, 0.0, 2 * HS * 0.90, 0.07, 0.06, HS * 0.985 + 0.02)
+    frame = mb.obj("CubeFrame", fm, parent=fy, coll=coll)
     bev = frame.modifiers.new("Bevel", "BEVEL")
-    bev.width, bev.segments, bev.limit_method = 0.04, 3, "ANGLE"
-    frame.data.polygons.foreach_set("use_smooth", np.ones(len(frame.data.polygons), bool))
+    bev.width, bev.segments, bev.limit_method = 0.05, 1, "ANGLE"
     # dark backing box inside (no see-through between panel and frame)
     back = X.MB().box((0, 0, 0), (EDGE * 0.96, EDGE * 0.96, EDGE * 0.96)).obj("CubeCore", X.simple_mat("CubeCore", (0.01, 0.01, 0.012), 0.5), parent=fy, coll=coll)
-    panels = _panel("CubePanels", 6, coll, fy, led_material(ng))
-    strips = _edges_mb(0.07, 0.17).obj("CubeEdges", edge_material(ng), parent=fy, coll=coll)
+    panels = _panel("CubePanels", 6, coll, fy, led_material(ng, tex))
+    strips = _edges_mb(0.08, 0.20, shorten=1.2).obj("CubeEdges", edge_material(ng), parent=fy, coll=coll)
+    tmb = X.MB()                                               # neon trim rectangle around each panel
+    a_, tw, out = HS * 0.90 + 0.06, 0.05, HS * 0.985 + 0.015
+    for k in range(6):
+        for sgn in (-1, 1):
+            _face_box(tmb, k, 0.0, sgn * a_, 2 * a_ + tw, tw, 0.04, out)
+            _face_box(tmb, k, sgn * a_, 0.0, tw, 2 * a_ + tw, 0.04, out)
+    trim = tmb.obj("CubeTrim", trim_material(ng), parent=fy, coll=coll)
+    for o in (strips, trim):
+        o.visible_shadow = False
     R.log(f"[cube] edge {EDGE} m, bottom ≥ {ZC - HS + T['z_off'].min() * 1:.2f} m over the pan, "
-          f"{len(T['slams'])} kick slams, {len(T['flips'])} snare flips")
-    return dict(root=root, yaw=yaw, fx=fx, fy=fy, frame=frame, panels=panels, strips=strips, core=back)
+          f"{len(T['slams'])} kick slams, {len(T['flips'])} snare flips; faces {FC.FACE_NAMES}")
+    return dict(root=root, yaw=yaw, fx=fx, fy=fy, frame=frame, panels=panels, strips=strips, core=back, trim=trim)
 
 
 # ------------------------------------------------------------------------------------------------ GN helpers

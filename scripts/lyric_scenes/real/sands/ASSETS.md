@@ -26,4 +26,4 @@ Licence policy: **CC0 + CC-BY only** (Zeke 2026-10-15); map data with its attrib
 CC0 assets (no credit required — thank you): Charlotte Baglioni
 ```
 
-Own/generated files used (not credited): 1
+Own/generated files used (not credited): 2

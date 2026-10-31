@@ -207,6 +207,10 @@ def build(S, ear=None):
     spike = np.where(eage < 3 * fps, np.exp(-eage / (0.8 * fps)), 0.0)
     energy = np.clip(level + 0.30 * kenv * hot + spike * hot + 0.22 * build_ramp ** 2 * build_m, 0, 1)
     energy = np.where(black, 0.0, energy)
+    # GLITCH (v2 cyberpunk LED faces): row-shift bursts on drop snares, strobes and the pre-drop blackout; a tease on
+    # build snares as the build climbs; nothing in calm parts / the outro
+    glitch = np.clip(1.0 * senv * hot + 0.8 * strobe_env + 0.6 * black + 0.6 * senv * build_m * build_ramp ** 2, 0, 1)
+    glitch = np.where(glitch < 0.04, 0.0, glitch)
 
     # GROUND STRIKES on kicks in drops (every slam), round-robin slots; a slot is reused only after STRIKE_LIFE_S
     life = int(round(STRIKE_LIFE_S * fps))
@@ -226,7 +230,7 @@ def build(S, ear=None):
         slot_free[slot] = f
     return dict(n=n, fps=fps, I=I, hot=hot, big=big, level=level, kenv=kenv, senv=senv, yaw=yaw, flip_x=flip_x,
                 flip_y=flip_y, z_off=z_off, scale=scale, A=A, B=B, swap=swap, black=black, pre=pre, ph=ph,
-                bi=bi.astype(float), bar_beat=bar_beat, strobe=strobe_env, gain=gain, energy=energy,
+                bi=bi.astype(float), bar_beat=bar_beat, strobe=strobe_env, gain=gain, energy=energy, glitch=glitch,
                 slams=slam, flips=flips, entries=entries, strikes=strikes, build=build_m)
 
 
@@ -251,3 +255,35 @@ def strike_tracks(T, ground_fn, centre=(0.0, 0.0)):
         flash = np.where((age >= 0) & (age < 0.25), np.exp(-np.maximum(age, 0) / 0.06), 0.0)
         out.append(dict(end=end, age=age, seed=seed, flash=flash, events=ev))
     return out
+
+
+def aim_yaw(T, cam_loc, cube_c, targets, facing_fn, ramp_max_s=10.0, offset=0.15, slack=0.10):
+    """Zeke v2: every face must actually be SEEN. targets = [(f0, f1, face, name)] windows (0-based frames) in which
+    `face` should face the camera. For each target in time order pick the yaw shift Δ (72 candidates) maximising the
+    face's mean facing over its window (smallest |Δ| on ties), then ease it in over the calm-ish stretch BEFORE the
+    window (≤ ramp_max_s, after the previous window) — so the cube turns slowly between shots, never on the music and
+    never during a window. offset = a small 3/4 bias (rad) added after the head-on search so the next face peeks in. Returns (yaw, log)."""
+    n, fps = T["n"], T["fps"]
+    yaw = T["yaw"].copy()
+    prev_end = 0
+    log = []
+    cands = np.radians(np.arange(-180, 180, 5.0))
+    for f0, f1, face, name in sorted(targets):
+        w = np.arange(f0, f1)
+        scores = []
+        for d in cands:
+            fc = facing_fn(yaw[w] + d, T["flip_x"][w], T["flip_y"][w], cube_c[w], cam_loc[w])[:, face]
+            scores.append(float(np.mean(np.clip(fc, 0, 1))))
+        scores = np.array(scores)
+        ok = np.flatnonzero(scores >= scores.max() - slack)           # near-best → the SMALLEST turn (calm cube)
+        j = ok[np.argmin(np.abs(cands[ok]))]
+        sc, d = float(scores[j]), float(cands[j])
+        a = max(prev_end, f0 - int(ramp_max_s * fps))
+        L = max(f0 - a, 1)
+        u = np.clip((np.arange(n) - a) / L, 0, 1)
+        yaw += (d + offset) * u * u * (3 - 2 * u)
+        log.append(dict(shot=name, face=face, frames=[int(f0) + 1, int(f1)], shift_deg=round(float(np.degrees(d + offset)), 1),
+                        ramp_s=round(L / fps, 2), rate_deg_s=round(abs(float(np.degrees(d + offset))) / (L / fps) * 1.5, 1),
+                        mean_facing=round(sc, 2)))
+        prev_end = f1
+    return yaw, log
