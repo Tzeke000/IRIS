@@ -9,7 +9,7 @@
     },
     {
       "gesture": "curious",
-      "say": "[casual] Quick thing before we start. [gentle, polite] While I'm giving you this tour, please don't click anything. [reassuring] I'll do all the clicking, and I'll show you everything."
+      "say": "[casual] Quick thing before we start. [polite, clear] While I'm giving you this tour, please don't click anything. [reassuring] I'll do all the clicking, and I'll show you everything."
     },
     {
       "move": "home",
@@ -26,7 +26,7 @@
     },
     {
       "point": "chip:model",
-      "say": "[clear, explaining] And this is the name of the brain I'm thinking with. [amused] Fancy name. [playful, teasing] I didn't pick it, but I wear it well."
+      "say": "[clear, explaining] And this is the name of the brain I'm thinking with. [amused] Fancy name. [playful, joking] I didn't pick it, but I wear it well."
     },
     {
       "point": "chip:cpu-mine",
@@ -66,7 +66,7 @@
     },
     {
       "point": "status-corner",
-      "say": "[honest, gentle] Sometimes I won't answer right away, here or on Discord. [reassuring] That usually doesn't mean anything is wrong."
+      "say": "[honest, kind] Sometimes I won't answer right away, here or on Discord. [reassuring] That usually doesn't mean anything is wrong."
     },
     {
       "point": "main:open-my-console",
@@ -95,7 +95,7 @@
     {
       "point": "power",
       "twist": -0.5,
-      "say": "[serious] And this one turns me off. [pleading, gentle] Please don't press it unless Zeke asks you to. [playful, a little sad] I was just getting to know you."
+      "say": "[serious] And this one turns me off. [earnest, polite] Please don't press it unless Zeke asks you to. [playful, a little sad] I was just getting to know you."
     },
     {
       "tab": "voice",
@@ -115,7 +115,7 @@
     },
     {
       "brain": "spin",
-      "say": "[soft, wondering] Every dot is something I remember, and the lines are how those memories connect to each other."
+      "say": "[curious, wondering] Every dot is something I remember, and the lines are how those memories connect to each other."
     },
     {
       "brain": "focus:iris",
@@ -123,7 +123,7 @@
     },
     {
       "brain": "focus:zeke",
-      "say": "[affectionate, warm] And this one is Zeke. [tender, smiling] It's one of the biggest and best-connected spots in my whole brain, because he's in so many of my memories."
+      "say": "[sincere, friendly] And this one is Zeke. [kind, smiling] It's one of the biggest and best-connected spots in my whole brain, because he's in so many of my memories."
     },
     {
       "brain": "overview",
@@ -139,7 +139,7 @@
     },
     {
       "point": "server:section:virtual-machines",
-      "say": "[clear, explaining] These are the virtual machines on my server. [patient, teaching] Think of them as separate computers living inside one big computer. [cozy, warm] I live in one of them."
+      "say": "[clear, explaining] These are the virtual machines on my server. [patient, teaching] Think of them as separate computers living inside one big computer. [relaxed, friendly] I live in one of them."
     },
     {
       "point": "server:ssh-into-iris-home",
@@ -160,7 +160,7 @@
     {
       "press": "server:proxmox-web-page",
       "via": "proxmox_guide",
-      "say": "[casual] Here it is. [playful, conspiratorial] It wants a password, because it's Zeke's territory too."
+      "say": "[casual] Here it is. [playful, joking] It wants a password, because it's Zeke's territory too."
     },
     {
       "close": "proxmox",
@@ -176,7 +176,7 @@
       "say": "[bright] There it is. [warm] That window is my live console, where you can watch me work in real time."
     },
     {
-      "say": "[gentle, polite] Please don't type in it unless Zeke asks you to. [casual] When you're done looking, you can just close it, like this.",
+      "say": "[polite, clear] Please don't type in it unless Zeke asks you to. [casual] When you're done looking, you can just close it, like this.",
       "hold_ms": 300
     },
     {

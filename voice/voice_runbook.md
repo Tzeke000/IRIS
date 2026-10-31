@@ -179,3 +179,16 @@ script. The voice description is canonical in `CLAUDE.md` "How you sound".
   lane switches itself off there (logged once). Logs: `[backchannel] FIRE / played / not played`.
 - **Live partial for other processes:** `iris_live_words.read_current()` returns what he is saying right
   now (in-progress, < 3 s old) from `state/voice/live_partial.json`; display-only, never a turn.
+
+## Slow mode, spelling, tone tags (2026-10-31, Fish mouth)
+
+- **Slow mode (default OFF):** Fish has no speed knob, so the mouth time-stretches its own audio
+  (WSOLA, pitch kept, ~5-20 ms CPU per second of audio; `voice/iris_timestretch.py`). Per utterance: a
+  LEADING `[slow]` (0.85, `FISH_SLOW_SPEED`), `[slower]` (0.72, `FISH_SLOWER_SPEED`) or `[slow 0.8]` tag
+  (stripped before Fish), or JSON `"speed"` on `POST /` / `/synth`. Global, hot: `scratch/voice_control.json`
+  `"speech_speed"` (0.5-1.5; absent = 1.0). Precedence JSON > tag > global. Log: `[fish] slow mode: speed X`.
+- **Spelling:** 3+ single letters/digits ("C, A, T", "C-A-T", "U S A") are rewritten `C. A. T.` and kept as one
+  run (no sentence cut, no auto tag between letters). `FISH_SPELL_STYLE=period|comma|off`.
+- **Tone tags:** voice B reads `[soft, gentle tone]` sultry (Zeke 10-31). The tenderness mood row, two sentence cues
+  and 16 tour tags were swapped for plainer ones (A/B: `~/voice_lab/elevenlabs_2026-10-31/tag_ab.mp3`).
+  Avoid soft / tender / intimate / whisper / cozy / affectionate in new lines.
