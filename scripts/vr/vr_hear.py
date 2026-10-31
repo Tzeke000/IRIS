@@ -196,13 +196,13 @@ def speech_dbfs(x: np.ndarray) -> float:
 
 # ---------------------------------------------------------------------------------------------- backchannels
 def voiced_seconds(x: np.ndarray) -> float:
-    """Seconds of 20 ms frames that are speech (within 20 dB of the clip's speech level, above the hiss floor)."""
+    """Seconds of 20 ms frames that are speech (within 30 dB of the clip's speech level - about what a VAD calls voiced -, above the hiss floor)."""
     n = 320
     if x.size < n:
         return 0.0
     fr = x[: x.size // n * n].reshape(-1, n)
     db = 20 * np.log10(np.sqrt((fr ** 2).mean(axis=1) + 1e-12) + 1e-9)
-    bar = max(MIN_SPEECH_DBFS, speech_dbfs(x) - 20.0)
+    bar = max(MIN_SPEECH_DBFS, speech_dbfs(x) - 30.0)
     return float((db >= bar).sum() * 0.02)
 
 
@@ -326,8 +326,9 @@ class VRBackchannel:
                 self._predict = lambda a: float(wren_smartturn.predict_endpoint(a)["prob"])
             return float(self._predict(x.astype(np.float32)))
         except Exception as e:  # noqa: BLE001  no smart-turn ⇒ never guess: no backchannel
-            log("backchannel: smart-turn unavailable (%r)" % (e,))
-            self._predict = lambda a: (_ for _ in ()).throw(RuntimeError("smart-turn unavailable"))
+            if not getattr(self, "_st_warned", False):
+                self._st_warned = True
+                log("backchannel: smart-turn unavailable (%r)" % (e,))
             return None
 
     # -- clips
@@ -690,7 +691,7 @@ class Ears:
                         att = self.attn.get(who, 0.0) > time.time() or (
                             lv.get("utterance_id") == "vr-%s" % b["stem"] and addressed(str(lv.get("text", ""))))
                         what = self.bc.consider(who, b, att)
-                        if what.startswith(("played", "body refused", "priming")):
+                        if not what.startswith("off: vr_backchannel off"):      # one line per pause, only when on
                             log("backchannel %s: %s" % (who, what))
                     except Exception as e:  # noqa: BLE001  a backchannel must never cost me my ears
                         log("backchannel error: %r" % (e,))
