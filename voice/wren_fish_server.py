@@ -12,6 +12,8 @@ mouth can talk to this one by changing only the port:
     GET  /warm    re-load after /cold (background); 503 "warming" until ready
     GET  /cold    unload the model + free VRAM, keep listening
     GET  /fillers filler-clip diagnostics (fillers are OFF by default here, see below)
+    POST /backchannel  play ONE pre-synthesised "mm-hm"/"yeah" clip now (409 if busy/priming);
+                  GET /backchannel = diagnostics, GET /backchannel/prime = render the set (10-31)
     GET  /stats   JSON: measured synthesis speed (RTF), frames/word, VRAM, last utterance
 
 Synthesis: Fish Audio S2 Pro (DualAR text2semantic + DAC codec, 44.1 kHz), loaded ONCE and kept
@@ -1461,6 +1463,107 @@ def _next_filler():
     return arr
 
 
+# ── Backchannel clips (10-31, Zeke: "mm-hm / yeah / right" while HE is talking) ─────
+# The ears (wren_voice_core, IRIS_BACKCHANNEL) decide WHEN; this only plays a tiny clip that was
+# synthesised ONCE in my own voice, so a backchannel costs no GPU at the moment it plays (a live
+# synth's first audio is ~0.5-1.3 s - longer than the pause it is meant to fill). Primed lazily:
+# the first POST /backchannel (or GET /backchannel/prime) renders the set on the GPU thread in the
+# background and answers 409 "priming"; nothing plays until the set is ready. Never queues behind
+# speech: if the mouth is busy the clip is skipped (409), never delayed.
+#   POST /backchannel        play one (random, never the same twice in a row) -> JSON {text, dur_s}
+#   GET  /backchannel        diagnostics; GET /backchannel/prime starts priming
+BACKCHANNEL_PHRASES = tuple(p.strip() for p in os.environ.get(
+    "WREN_FISH_BACKCHANNELS", "Mm-hm.|Yeah.|Right.|Mm.").split("|") if p.strip())
+_BC_CACHE: list = []            # [(text, float32 array)]
+_BC_STATS: list = []
+_BC_STATE = {"priming": False, "last": -1, "played": 0}
+_BC_LOCK = threading.Lock()
+
+
+def _bc_ok(st: dict) -> bool:
+    return (st["finite"] and st["n"] > 0 and 0.12 <= st["dur_s"] <= 1.6
+            and 0.01 <= (st["rms"] or 0.0) <= 0.30)
+
+
+def _prime_backchannels() -> int:
+    """Runs on the GPU thread."""
+    global _BC_CACHE, _BC_STATS
+    rendered, stats = [], []
+    for ph in BACKCHANNEL_PHRASES:
+        try:
+            _seed_utterance(None)
+            ch = ChunkPlanner(_units(ph)).next(99)
+            arr, _c, _i = ENGINE.synth_chunk(ch, [])
+            arr = _trim_edges(arr, 3, True, True)
+            st = _filler_stats(arr)
+            st["text"] = ph
+            st["kept"] = _bc_ok(st)
+            stats.append(st)
+            if st["kept"]:
+                rendered.append((ph, np.clip(arr, -1.0, 1.0).astype(np.float32)))
+        except Exception as e:
+            _log(f"backchannel prime failed for {ph!r}: {e!r}")
+    _BC_CACHE, _BC_STATS = rendered, stats
+    _log(f"primed {len(rendered)}/{len(BACKCHANNEL_PHRASES)} backchannel clips")
+    return len(rendered)
+
+
+def _bc_prime_async() -> bool:
+    """Start priming in the background (once). True if a prime was started."""
+    with _BC_LOCK:
+        if _BC_STATE["priming"] or _BC_CACHE:
+            return False
+        _BC_STATE["priming"] = True
+
+    def _run():
+        try:
+            _GPU.call(_prime_backchannels)
+        except Exception as e:
+            _log(f"backchannel prime error: {e!r}")
+        finally:
+            _BC_STATE["priming"] = False
+    threading.Thread(target=_run, daemon=True, name="bc-prime").start()
+    return True
+
+
+def _bc_pick():
+    """(text, array) - random, never the same clip twice in a row; None if no cache."""
+    import random as _r
+    if not _BC_CACHE:
+        return None
+    i = _r.randrange(len(_BC_CACHE))
+    if i == _BC_STATE["last"] and len(_BC_CACHE) > 1:
+        i = (i + 1) % len(_BC_CACHE)
+    _BC_STATE["last"] = i
+    return _BC_CACHE[i]
+
+
+def play_backchannel() -> "tuple[int, dict]":
+    """Play one cached backchannel clip NOW, or decline. (http_code, info)."""
+    if not _BC_CACHE:
+        _bc_prime_async()
+        return 409, {"skipped": "priming"}
+    if not _SPEAK_LOCK.acquire(blocking=False):
+        return 409, {"skipped": "mouth busy"}
+    try:
+        pick = _bc_pick()
+        if pick is None:
+            return 409, {"skipped": "no clips"}
+        text, arr = pick
+        _STOP.clear()   # the lock is ours: no speech is in flight, a stale stop flag must not eat the clip
+        stream = _get_output_stream(_resolve_output_device())
+        if DRYRUN:
+            stream.begin(text, {"mode": "backchannel"})
+        ok = _write_stream(stream, arr)
+        set_amplitude(0.0, force=True)
+        if DRYRUN:
+            stream.end({"mode": "backchannel"})
+        _BC_STATE["played"] += 1
+        return 200, {"text": text, "dur_s": round(len(arr) / SAMPLE_RATE, 3), "completed": bool(ok)}
+    finally:
+        _SPEAK_LOCK.release()
+
+
 # ── Chunk schedule ────────────────────────────────────────────────────────────────
 def _growth_cap(k: int) -> int:
     if k < len(SCHEDULE):
@@ -1783,6 +1886,11 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/cold":
             _cold_unload()
             self._send(200, "cold")
+        elif self.path in ("/backchannel", "/backchannel/prime"):
+            started = _bc_prime_async() if (self.path.endswith("/prime") and _READY) else False
+            self._send(200, json.dumps({"cached": [t for t, _a in _BC_CACHE], "priming": _BC_STATE["priming"],
+                                        "prime_started": started, "played": _BC_STATE["played"],
+                                        "ready": _READY, "clips": _BC_STATS}), "application/json")
         elif self.path == "/fillers":
             self._send(200, json.dumps({"enabled": FILLERS_ENABLED, "cached": len(_FILLER_CACHE),
                                         "ready": _READY, "clips": _FILLER_STATS}), "application/json")
@@ -1799,6 +1907,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         n = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+        if self.path == "/backchannel":
+            try:
+                code, info = play_backchannel()
+            except Exception as e:
+                code, info = 500, {"error": repr(e)}
+            self._send(code, json.dumps(info), "application/json")
+            return
         if self.path == "/synth":
             try:
                 obj = json.loads(raw) if raw.strip().startswith("{") else {"text": raw.strip()}
