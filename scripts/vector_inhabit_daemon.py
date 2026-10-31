@@ -741,10 +741,9 @@ def _interoception_loop() -> None:
     while True:
         out = {"ok": False, "ts": time.time()}
         try:
+            from brain import vector_ssh as _vssh   # code review 10-29: pin the robot's host key
             p = _sp.run(
-                [ssh_bin, "-i", str(_SSH_KEY),
-                 "-o", "StrictHostKeyChecking=no",
-                 "-o", f"UserKnownHostsFile={os.devnull}",
+                [ssh_bin, "-i", str(_SSH_KEY), *_vssh.host_key_opts(),
                  "-o", "ConnectTimeout=8", "-o", "BatchMode=yes",
                  "-o", "HostKeyAlgorithms=+ssh-rsa",
                  "-o", "PubkeyAcceptedKeyTypes=+ssh-rsa",
@@ -763,6 +762,10 @@ def _interoception_loop() -> None:
                            temps=[round(t, 1) for t in temps],
                            wifi_link=float(w[0].rstrip(".")) if w else None,
                            wifi_dbm=float(w[1].rstrip(".")) if len(w) > 1 else None)
+            else:
+                why = _vssh.host_key_problem(p.stderr, str(ROBOT_IP))
+                if why:
+                    out["error"] = why
         except Exception:
             pass
         try:

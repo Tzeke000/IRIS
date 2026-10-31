@@ -33,6 +33,7 @@ from typing import Any
 from tools.tool_registry import register_tool
 
 _KEY = Path(__file__).resolve().parents[2] / "state" / "vector" / "dev" / "ssh_root_key"
+from brain import vector_ssh as _vssh
 from brain.iris_paths import paths as _iris_paths
 _JDOCS = getattr(_iris_paths, "wirepod_sdk_info", None) or (Path.home() / "AppData" / "Roaming" / "wire-pod" / "jdocs" / "botSdkInfo.json")  # live runtimes may hold an older iris_paths
 
@@ -104,7 +105,6 @@ def _ssh(cmd: str, timeout: float = 20.0) -> dict[str, Any]:
     if not _ensure_key():
         return {"ok": False, "error": "dev root key missing and fetch failed"}
     import os
-    null_hosts = "NUL" if os.name == "nt" else "/dev/null"
     ssh_bin = "ssh"
     if os.name == "nt":
         win_ssh = Path(os.environ.get("SystemRoot", r"C:\Windows")) / \
@@ -112,9 +112,7 @@ def _ssh(cmd: str, timeout: float = 20.0) -> dict[str, Any]:
         if win_ssh.exists():
             ssh_bin = str(win_ssh)  # pin the real Windows client (PATH may differ in-process)
     args = [
-        ssh_bin, "-i", str(_KEY),
-        "-o", "StrictHostKeyChecking=no",
-        "-o", f"UserKnownHostsFile={null_hosts}",
+        ssh_bin, "-i", str(_KEY), *_vssh.host_key_opts(),   # code review 10-29: pinned host key
         "-o", "ConnectTimeout=10",
         "-o", "BatchMode=yes",
         "-o", "HostKeyAlgorithms=+ssh-rsa",
@@ -125,9 +123,13 @@ def _ssh(cmd: str, timeout: float = 20.0) -> dict[str, Any]:
     try:
         p = subprocess.run(args, capture_output=True, text=True, timeout=timeout,
                            stdin=subprocess.DEVNULL)
-        return {"ok": p.returncode == 0, "rc": p.returncode, "ip": ip,
-                "stdout": (p.stdout or "")[:4000],
-                "stderr": (p.stderr or "")[:1000]}
+        res = {"ok": p.returncode == 0, "rc": p.returncode, "ip": ip,
+               "stdout": (p.stdout or "")[:4000],
+               "stderr": (p.stderr or "")[:1000]}
+        why = None if p.returncode == 0 else _vssh.host_key_problem(p.stderr, ip)
+        if why:
+            res["error"] = why
+        return res
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"ssh timed out after {timeout}s", "ip": ip}
     except FileNotFoundError:

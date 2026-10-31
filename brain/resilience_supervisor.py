@@ -318,8 +318,9 @@ def vic_restart() -> tuple[bool, str]:
     ssh = str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "OpenSSH" / "ssh.exe")
     if not Path(ssh).exists():
         ssh = "ssh"
-    rc, out = _run([ssh, "-i", str(SSH_KEY), "-o", "StrictHostKeyChecking=no",
-                    "-o", f"UserKnownHostsFile={os.devnull}", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes",
+    from brain import vector_ssh as _vssh   # code review 10-29: pinned host key, not StrictHostKeyChecking=no
+    rc, out = _run([ssh, "-i", str(SSH_KEY), *_vssh.host_key_opts(),
+                    "-o", "ConnectTimeout=8", "-o", "BatchMode=yes",
                     "-o", "HostKeyAlgorithms=+ssh-rsa", "-o", "PubkeyAcceptedKeyTypes=+ssh-rsa",
                     "-o", "LogLevel=ERROR", f"root@{robot_ip()}",
                     "systemctl restart vic-switchboard vic-cloud; sleep 2; "
