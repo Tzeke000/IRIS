@@ -35,6 +35,19 @@ _DEFAULT_ALLOW = ",".join(a for a in ("127.0.0.1", priv("iris_home_host")) if a)
 ALLOW = {a.strip() for a in os.environ.get("IRIS_AUDIO_SINK_ALLOW", _DEFAULT_ALLOW).split(",") if a.strip()}
 BLOCK_BYTES = 4096  # 1024 float32 samples ~ 43 ms at 24 kHz
 
+# Full-duplex AEC reference (2026-10-31, default OFF): with IRIS_AEC_REF=1 every block written to the
+# speaker is also sent, stamped with when it will PLAY, to mic_source's echo canceller on this machine
+# (voice/aec_bus.py, UDP 127.0.0.1 only). Fire-and-forget: a missing listener just drops datagrams.
+_REF = None
+if os.environ.get("IRIS_AEC_REF", "0").strip().lower() not in ("0", "off", "false", "no", ""):
+    try:
+        sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "voice"))
+        import aec_bus as _aec_bus
+        _REF = _aec_bus.RefPublisher()
+    except Exception as _e:  # noqa: BLE001  (AEC is optional; playback never depends on it)
+        _REF = None
+        print(f"[audio_sink] AEC reference disabled: {_e!r}", flush=True)
+
 _current: "socket.socket | None" = None
 _lock = threading.Lock()
 # 2026-10-30 crash fix: held by a session for the WHOLE life of its PortAudio stream. PortAudio is not
@@ -119,8 +132,15 @@ def _serve(conn: socket.socket, peer: str) -> None:
             pending += data
             n = (len(pending) // (4 * ch)) * (4 * ch)
             if n:
-                stream.write(np.frombuffer(pending[:n], dtype="<f4").reshape(-1, ch))
+                blk = np.frombuffer(pending[:n], dtype="<f4").reshape(-1, ch)
+                stream.write(blk)
                 pending = pending[n:]
+                if _REF is not None:
+                    try:
+                        _REF.publish(blk.mean(axis=1) if ch > 1 else blk[:, 0], sr,
+                                     _REF.play_start_after_write(blk.shape[0], sr, stream.latency))
+                    except Exception:
+                        pass
         log(f"session from {peer} ended")
     except Exception as e:
         log(f"session from {peer} error: {e!r}")

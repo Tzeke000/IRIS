@@ -218,6 +218,15 @@ else:
 
 SAMPLE_RATE = 44100   # the S2 Pro codec; confirmed against the decoder at load
 
+# Full-duplex DUCK tier (10-31): GET /duck?db=-12&ttl=3 lowers my volume while someone starts
+# talking over me; it ramps (no clicks) and EXPIRES on its own. Pure helper in voice/ (already on
+# sys.path above); missing = /duck answers 501 and playback is untouched.
+try:
+    from iris_duplex_watch import MouthDucker as _MouthDucker  # type: ignore
+    _DUCK = _MouthDucker(SAMPLE_RATE)
+except Exception:
+    _DUCK = None
+
 _SPEAK_LOCK = threading.Lock()
 _READY = False
 _STOP = threading.Event()
@@ -1384,6 +1393,8 @@ def _write_stream(stream, arr, stop_aware: bool = True) -> bool:
         if stop_aware and _STOP.is_set():
             return False
         blk = arr[i: i + _AMP_BLOCK]
+        if _DUCK is not None:
+            blk = _DUCK.apply(blk)
         _emit_amp(blk)
         try:
             stream.write(blk)
@@ -1758,6 +1769,17 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 _rewarm_async()
                 self._send(503, "warming")
+        elif self.path.startswith("/duck"):
+            if _DUCK is None:
+                self._send(501, "duck unavailable")
+            else:
+                from urllib.parse import parse_qs, urlparse
+                q = parse_qs(urlparse(self.path).query)
+                try:
+                    r = _DUCK.set(float(q.get("db", ["0"])[0]), float(q.get("ttl", ["3"])[0]))
+                    self._send(200, json.dumps(r), "application/json")
+                except ValueError:
+                    self._send(400, "bad db/ttl")
         elif self.path == "/cold":
             _cold_unload()
             self._send(200, "cold")

@@ -181,6 +181,12 @@ DAEMON_DRAIN_CAP_S = float(os.environ.get("IRIS_DAEMON_DRAIN_CAP_S", "180"))
 # barge_in_scoped_two_layer_2026-06-29 for the AEC+voiceprint stack that needs).
 BARGEIN_STOPS_TURN = os.environ.get("IRIS_BARGEIN_STOPS_TURN", "1").strip().lower() not in ("0", "off", "false", "no")
 BARGEIN_ON = os.environ.get("IRIS_BARGEIN", "1").strip().lower() not in ("0", "off", "false", "no")
+# Full-duplex tiers (2026-10-31, default OFF): ask the daemon for the TIERED barge watch
+# (voice/iris_duplex_watch.py) - a backchannel ("mm-hm") never stops me, a cough/my own echo resumes
+# my reply, real speech pauses then barges, and an unverified speaker's words come back as
+# '[barge-defer]' = queued as a (fenced) turn WITHOUT interrupting mine. Off = the binary watch, as
+# before. Needs the daemon reloaded with the tiers code (an old daemon ignores the arg).
+DUPLEX_TIERS = os.environ.get("IRIS_DUPLEX_TIERS", "0").strip().lower() not in ("0", "off", "false", "no", "")
 # Socket timeout for one watch window: must exceed the daemon-side cap (900s backstop;
 # in practice the host ends the window at turn end via bargein_hold False).
 BARGEIN_WATCH_TIMEOUT_S = float(os.environ.get("IRIS_BARGEIN_WATCH_TIMEOUT_S", "920"))
@@ -1405,7 +1411,10 @@ def _daemon_bargein_watch_once():
     (window closed with no interruption / not-warm / error markers). Runs in an
     executor, never on the event loop. Like _daemon_listen_once, a real barge returns
     (text, speaker meta)."""
-    raw = daemon_cmd("bargein_watch", {"structured": True}, timeout=BARGEIN_WATCH_TIMEOUT_S)
+    _args = {"structured": True}
+    if DUPLEX_TIERS:
+        _args["tiers"] = True
+    raw = daemon_cmd("bargein_watch", _args, timeout=BARGEIN_WATCH_TIMEOUT_S)
     try:
         resp = json.loads(raw)
     except Exception as e:
@@ -1424,6 +1433,16 @@ def _daemon_bargein_watch_once():
     # (no_barge / vad_not_warm / no_hold / errors) are normal window-closures.
     if result.startswith("[barge-in]"):
         return result, meta
+    if DUPLEX_TIERS and result.startswith("[barge-defer]"):
+        return result, meta      # his words are a turn; voice_reader does NOT interrupt mine
+    if result.startswith("[bargein_watch] ack:"):
+        # a backchannel while I talked: I kept going, no turn - but it is heard and logged
+        print("[host] heard an acknowledgement while speaking: " + result[len("[bargein_watch] ack:"):].strip()[:80],
+              flush=True)
+        try:
+            _blog("ears", result[:160], {"bargein": "ack", "speaker": meta})
+        except Exception:
+            pass
     return None
 
 
@@ -1559,6 +1578,8 @@ async def voice_reader(queue, loop, mic_gate):
                 # rest of a reply he had already cut off. Stop the turn too, so his words are
                 # the very next thing I answer (interrupt verified live: session survives).
                 _t, _c = _INBOX.get("turn"), _INBOX.get("client")
+                if barge.startswith("[barge-defer]"):
+                    _t = None            # tiers: a deferred overlap is queued, my turn keeps going
                 if BARGEIN_STOPS_TURN and _t is not None and _c is not None and _t.active and _t.speak_out:
                     try:
                         await _c.interrupt()

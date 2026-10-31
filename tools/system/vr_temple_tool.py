@@ -201,10 +201,57 @@ def _barge_since(t0: float) -> dict[str, Any] | None:
             if float(a.get("t_start", 0)) >= t0 + 0.3:
                 dist = a.get("dist_m")
                 if dist is None or float(dist) <= BARGE_MAX_DIST_M:
+                    if _VR_TIERS and not _vr_tier_says_stop(who, a):
+                        continue                      # a "yeah" / laugh / blip: keep talking
                     return {"speaker": who, **a}
         except Exception:
             continue
     return None
+
+
+# Full-duplex tiers in VR (2026-10-31, default OFF: IRIS_VR_TIERS=1). Without them ANY audible clip from
+# anyone within 6 m hushes me - a "yeah", a laugh, a cough. With them the clip runs through the same
+# classifier as the room (voice/iris_interrupt_tiers.py): explicit stop / real words / >=0.7 s of speech
+# still hush me at once; a backchannel or a short no-words blip doesn't. VR has no volume duck, so DUCK
+# and DEFER mean "keep talking" here. Identity in VR is the player name, not a voiceprint, so every
+# nearby speaker counts (it is rude not to stop for a guest who really talks to me).
+_VR_TIERS = os.environ.get("IRIS_VR_TIERS", "0").strip().lower() not in ("0", "off", "false", "no", "")
+_LIVE_VR = "/home/iris/IRIS/state/vr_temple/live_partial.json"
+_TIERS_MOD = None
+
+
+def _tiers():
+    global _TIERS_MOD
+    if _TIERS_MOD is None:
+        import importlib.util
+        import sys
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "voice", "iris_interrupt_tiers.py")
+        spec = importlib.util.spec_from_file_location("iris_interrupt_tiers_vr", p)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod                 # dataclasses resolve their module via sys.modules
+        spec.loader.exec_module(mod)
+        _TIERS_MOD = mod
+    return _TIERS_MOD
+
+
+def _vr_tier_says_stop(who: str, a: dict, live: "dict | None" = None) -> bool:
+    """One VR voice clip (vr_hear's voice_activity entry + that speaker's live partial) -> hush now?
+    Fails toward STOPPING (any error = the old behaviour)."""
+    try:
+        T = _tiers()
+        if live is None:
+            try:
+                with open(_LIVE_VR, encoding="utf-8") as f:
+                    live = (json.load(f) or {}).get(who) or {}
+            except Exception:
+                live = {}
+        text = str(live.get("text") or "") if float(live.get("ts", 0) or 0) >= float(a.get("t_start", 0)) - 0.5 else ""
+        dur_ms = max(0.0, (float(a.get("t_end", 0)) - float(a.get("t_start", 0))) * 1000.0)
+        c = T.OverlapClassifier(mouth_speaking=True)
+        d = c.update(T.Observation(voiced_ms=dur_ms, text=text or None))
+        return d.tier >= T.Tier.PAUSE
+    except Exception:
+        return True
 
 
 _HEARD = "/home/iris/IRIS/state/vr_temple/heard.jsonl"
