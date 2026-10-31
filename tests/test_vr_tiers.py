@@ -38,7 +38,7 @@ def test_short_blip_without_words_keeps_me_talking():
 
 
 def test_real_talk_stops_me():
-    assert vt._vr_tier_says_stop("zeke", clip(1.0), {})
+    assert vt._vr_tier_says_stop("zeke", clip(1.5), {})   # > the live pause knob (1100 ms since 10-31)
     assert vt._vr_tier_says_stop("guest1", clip(0.5), {"text": "wait what is that", "ts": 100.5})
 
 

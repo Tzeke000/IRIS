@@ -247,7 +247,12 @@ def _vr_tier_says_stop(who: str, a: dict, live: "dict | None" = None) -> bool:
                 live = {}
         text = str(live.get("text") or "") if float(live.get("ts", 0) or 0) >= float(a.get("t_start", 0)) - 0.5 else ""
         dur_ms = max(0.0, (float(a.get("t_end", 0)) - float(a.get("t_start", 0))) * 1000.0)
-        c = T.OverlapClassifier(mouth_speaking=True)
+        try:   # same live knobs as the room (Zeke 10-31: tier_pause_ms 1100 so a quick "okay" never stops me)
+            with open("/home/iris/IRIS/scratch/voice_control.json", encoding="utf-8") as f:
+                cfg = T.TierConfig.from_control(json.load(f))
+        except Exception:
+            cfg = T.TierConfig()
+        c = T.OverlapClassifier(cfg=cfg, mouth_speaking=True)
         d = c.update(T.Observation(voiced_ms=dur_ms, text=text or None))
         return d.tier >= T.Tier.PAUSE
     except Exception:
