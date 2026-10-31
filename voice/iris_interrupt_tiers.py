@@ -258,8 +258,11 @@ class OverlapClassifier:
             return self._decide(Tier.PAUSE, "explicit stop from unverified speaker: " + repr(stop),
                                 final=final, enqueue=final, fenced=final)
 
-        # 3. not enough evidence yet / ambient
-        if not self._loud_enough():
+        # 3. not enough evidence yet / ambient. The level gate is ONSET evidence: once the final
+        # transcript has real words, Whisper outranks a level average that sagged as he trailed
+        # off (10-31: every real interruption on his headset resolved NONE here and I resumed).
+        # Echo of my own voice is still caught by the self-voice step above.
+        if not self._loud_enough() and not (final and norm(self.text)):
             if final:
                 return self._decide(Tier.NONE, "below echo residual / floor", final=True, resume=was_holding)
             return self._decide(Tier.NONE, "below echo residual / floor")
