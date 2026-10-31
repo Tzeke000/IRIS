@@ -46,6 +46,17 @@ PYEOF
   echo 'exit $rc'
 } > "$INNER"
 chmod 700 "$INNER"
+[ -f "$OUT/$NAME.worker.log" ] && mv -f "$OUT/$NAME.worker.log" "$OUT/$NAME.worker.log.prev"   # fresh log: the admission check below reads it
 nohup "$PY" "$ROOT/scripts/server/worker.py" run --kind job --name "job-$NAME" --mem "$MEM" --timeout "$TIMEOUT" \
   --side-effects reversible -- bash "$INNER" >> "$OUT/$NAME.worker.log" 2>&1 &
+# 10-30: the launcher runs in the background, so a REFUSED admission used to be invisible ("started" printed
+# anyway; the vrsecbatch helper silently never ran). Wait for worker.py's verdict and say it.
+: > /dev/null
+for _i in $(seq 1 30); do
+  if grep -q '"admitted": true' "$OUT/$NAME.worker.log" 2>/dev/null; then break; fi
+  if grep -q '"admitted": false' "$OUT/$NAME.worker.log" 2>/dev/null; then
+    echo "REFUSED by worker admission:" >&2; grep -A4 '"why"' "$OUT/$NAME.worker.log" | tail -n +1 >&2; exit 3
+  fi
+  sleep 0.5
+done
 echo "job '$NAME' started (unit job-$NAME). output -> $OUT/$NAME.out"

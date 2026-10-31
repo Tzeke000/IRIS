@@ -296,13 +296,26 @@ def stop_unit(unit: str) -> None:
 
 
 # ── admission ──────────────────────────────────────────────────────────────────
+def slice_used(d) -> int:
+    """memory.current MINUS reclaimable page cache (inactive_file). 10-30: after the Sands render the slice held
+    11.1 GB of finished frames' page cache (anon 0) and admission refused every new job ("slice headroom 9 G")
+    although the kernel would have dropped that cache on demand. Active file pages still count (conservative)."""
+    cur = _read_int(d / "memory.current") or 0
+    try:
+        st = dict(l.split() for l in (d / "memory.stat").read_text().splitlines())
+        cur -= int(st.get("inactive_file", 0))
+    except Exception:  # noqa: BLE001
+        pass
+    return max(0, cur)
+
+
 def admit(kind: str, mem_req: int, gpu_mib: int = 0) -> tuple[bool, dict]:
     hist = kind_peaks(kind)
     est = max(mem_req, int(1.25 * p90(hist)), 1024 ** 3)
     running = running_workers()
     avail = meminfo_available()
     sl_max = _read_int(slice_dir() / "memory.max")
-    sl_cur = _read_int(slice_dir() / "memory.current") or 0
+    sl_cur = slice_used(slice_dir())
     why = []
     if len(running) >= CAP:
         why.append(f"{len(running)} workers running (cap {CAP})")
