@@ -205,7 +205,6 @@ class StreamResampler:
 
     def __init__(self, sr_in: int, sr_out: int, taps_per_phase: int = 24):
         from math import gcd
-        from scipy.signal import firwin
         g = gcd(int(sr_in), int(sr_out))
         self.up, self.down = int(sr_out) // g, int(sr_in) // g
         self.identity = self.up == 1 and self.down == 1
@@ -214,7 +213,11 @@ class StreamResampler:
         self._T = int(taps_per_phase)
         n = self._T * self.up
         cutoff = 0.95 / max(self.up, self.down)
-        self._h = (firwin(n, cutoff) * self.up).astype(np.float64)
+        # windowed-sinc low-pass (== scipy.signal.firwin(n, cutoff), Hamming) in plain numpy: the tower's
+        # venv needs only numpy + livekit for AEC
+        m = np.arange(n) - (n - 1) / 2.0
+        h = cutoff * np.sinc(cutoff * m) * np.hamming(n)
+        self._h = (h / h.sum() * self.up).astype(np.float64)
         self._hist = np.zeros(self._T, np.float64)   # the last T input samples
         self._in = 0                                  # absolute index of the next input sample
         self._P = 0                                   # absolute upsampled index of the next output
