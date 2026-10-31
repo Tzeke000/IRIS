@@ -46,6 +46,7 @@ import sys
 import re
 import socket
 import time
+import collections
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -867,12 +868,24 @@ def daemon_cmd(cmd, args=None, timeout=5.0):
         return buf.decode("utf-8", "replace").strip()
 
 
+# Sentences I recently queued to the mouth (ts, text). Lets an ACK ("yes") that lands while I'm
+# still talking be read as his ANSWER when my reply asked him something (Zeke 10-31).
+_RECENT_SPOKEN = collections.deque(maxlen=12)
+QUESTION_ACK_WINDOW_S = 90.0
+
+
+def _asked_a_question_recently(window_s=QUESTION_ACK_WINDOW_S) -> bool:
+    now = time.time()
+    return any(now - ts <= window_s and t.rstrip().endswith("?") for ts, t in list(_RECENT_SPOKEN))
+
+
 def speak(text, emotion=None, intensity=None):
     """Enqueue one finished sentence on the daemon's play queue. Non-fatal.
     emotion/intensity (round-2 fix 2.1) ride to the mouth; None = base prosody."""
     text = (text or "").strip()
     if not text:
         return
+    _RECENT_SPOKEN.append((time.time(), text))
     try:
         _args = {"text": text}
         if emotion:
@@ -1436,6 +1449,13 @@ def _daemon_bargein_watch_once():
     if DUPLEX_TIERS and result.startswith("[barge-defer]"):
         return result, meta      # his words are a turn; voice_reader does NOT interrupt mine
     if result.startswith("[bargein_watch] ack:"):
+        _ack = result[len("[bargein_watch] ack:"):].strip()
+        if DUPLEX_TIERS and _ack and _asked_a_question_recently():
+            # I asked him something and he said "yes"/"okay" while I was still talking: that is
+            # his ANSWER, not a backchannel - deliver it as a turn without cutting my reply.
+            print("[host] acknowledgement after my question -> his answer: " + _ack[:80], flush=True)
+            _RECENT_SPOKEN.clear()
+            return "[barge-defer] [said while I was still talking, right after I asked a question - treat as his answer] " + _ack, meta
         # a backchannel while I talked: I kept going, no turn - but it is heard and logged
         print("[host] heard an acknowledgement while speaking: " + result[len("[bargein_watch] ack:"):].strip()[:80],
               flush=True)
