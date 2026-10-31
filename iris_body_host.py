@@ -1913,7 +1913,9 @@ async def _inbox_post_tool_hook(input_data, tool_use_id, context):
             body = body[:INBOX_MAX_CHARS] + "\n[... truncated]"
         ctx = ("[INBOX CHECKPOINT - " + str(len(items)) + " message(s) arrived while I was mid-task. They are "
                "now MINE: removed from the queue, they will NOT come back as separate turns. For each one, "
-               "decide: answer now (short), or tell them I'll answer after this task, then CONTINUE the work. "
+               "decide: answer now (short); tell them I'll answer after this task; defer it (say when); or "
+               "delegate it to a helper/worker (delegated is not done - tell them, then check the result). "
+               "Then CONTINUE the work. "
                "A PRIORITY item means Zeke asked me to look up - answer it before the next work step.]\n\n" + body)
         return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": ctx}}
     except Exception as e:  # noqa: BLE001
