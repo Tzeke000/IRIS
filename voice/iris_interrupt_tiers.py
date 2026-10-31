@@ -11,7 +11,9 @@ becomes a whole new voice turn. This module is the decision layer that replaces 
 threshold. It is PURE: no audio, no I/O, no clock of its own; the caller feeds observations as they
 arrive (every VAD chunk, every live-words partial, the voiceprint verdict, the final transcript).
 
-Tiers (escalate only; a provisional tier can be RESOLVED back down when the final words arrive):
+Tiers (escalate only while he is still talking; EVERY decision before the final transcript is
+provisional - the mouth may duck/pause, but only the FINAL observation (full words + the voiceprint
+verdict, which needs the whole utterance) commits BARGE vs DEFER vs ACK, and it may resolve down):
   NONE   - nothing to do (not speech, too faint over my own echo residual, my own voice, mouth idle)
   ACK    - a backchannel ("mm-hm", "yeah", "right"): keep talking at full volume, no new turn;
            the words are logged as an acknowledgement
@@ -202,7 +204,7 @@ class OverlapClassifier:
 
     def _decide(self, tier: Tier, reason: str, *, final: bool = False, **kw) -> Decision:
         resume = kw.pop("resume", False)
-        if not resume and tier < self.tier and not final:
+        if not resume and tier < self.tier and not final:   # final decisions see everything: no hold
             tier, reason = self.tier, "hold " + self.tier.name + " (" + reason + ")"
         prev = self.tier
         self.tier = tier
@@ -252,7 +254,7 @@ class OverlapClassifier:
         # 2. explicit stop wins over everything but self-voice
         if stop and self._loud_enough():
             if owner_ok:
-                return self._decide(Tier.BARGE, "explicit stop: " + repr(stop), final=True)
+                return self._decide(Tier.BARGE, "explicit stop: " + repr(stop), final=final)
             return self._decide(Tier.PAUSE, "explicit stop from unverified speaker: " + repr(stop),
                                 final=final, enqueue=final, fenced=final)
 
@@ -294,11 +296,11 @@ class OverlapClassifier:
         nw = real_words(self.text) if self.text else 0
         # 7. addressed to me with real words
         if self.text and addressed(self.text) and nw >= 1:
-            return self._decide(Tier.BARGE, "addressed to me", final=True)
+            return self._decide(Tier.BARGE, "addressed to me", final=final)
         # 8. ladder
         if nw >= c.barge_words or self.voiced_ms >= c.barge_ms:
             return self._decide(Tier.BARGE, f"taking the floor ({nw} words, {int(self.voiced_ms)} ms)",
-                                final=True)
+                                final=final)
         if final:
             # short but real words (1-2, not a backchannel): a brief interjection - barge so it is
             # answered, unless it is a lone filler word

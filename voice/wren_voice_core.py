@@ -65,6 +65,12 @@ try:
     _HAVE_LIVE = True
 except ImportError:
     _HAVE_LIVE = False
+try:   # full-duplex tiers (10-31): only used when the HOST asks ({"tiers": true}); absent = binary watch
+    import iris_duplex_watch as _duplex
+    from iris_interrupt_tiers import TierConfig as _TierConfig
+    _HAVE_DUPLEX = True
+except Exception:  # noqa: BLE001
+    _HAVE_DUPLEX = False
     print("[wren-voice-core] iris_live_words not importable — live partials disabled",
           file=sys.stderr)
 
@@ -2056,6 +2062,209 @@ def cmd_bargein_hold(ctx, args: dict) -> dict:
     return {"hold": hold}
 
 
+def _barge_cut_marker(ctx) -> str:
+    """Where the cut landed, from ctx.barge_cut (set by the onset that stopped the mouth)."""
+    info = getattr(ctx, "barge_cut", None) or {}
+    cut = (info.get("cut") or "").strip()
+    played = int(info.get("played", 0) or 0)
+    flushed = int(info.get("flushed", 0) or 0)
+    if len(cut) > 160:
+        cut = cut[:157] + "..."
+    if cut:
+        marker = (f'[cut mid-sentence at: "{cut}" | {played} sentence(s) fully heard, '
+                  f"{flushed} never played]")
+    elif flushed:
+        marker = f"[cut between sentences | {played} heard, {flushed} never played]"
+    elif played:
+        marker = f"[reply had already finished playing — all {played} sentence(s) heard]"
+    else:
+        # played==0, flushed==0, nothing in the speaker: the barge landed BEFORE this
+        # reply produced ANY audio (host still thinking / TTS still synthesizing / new
+        # hold window just opened). The old label claimed "already finished playing —
+        # all 0 sentence(s) heard", which reads as if the reply played and vanished.
+        # It never started — and cmd_speak will drop it (bargein_fired), so the host
+        # must know the listener heard NONE of it and restate what matters.
+        # (Found live 2026-07-12 — his continuing speech kept landing in
+        # this gap and whole replies died silently while the marker said "finished".)
+        marker = ("[barge landed before the reply started playing — nothing had been "
+                  "spoken; the pending reply was dropped unheard]")
+    return marker
+
+
+def _tiers_enabled() -> bool:
+    """Daemon-side kill switch for the tiered watch: voice_control.json duplex_tiers (default
+    true - the HOST opts in per call with {"tiers": true}; this lets the room turn it off hot)."""
+    try:
+        from wren_voice_status import read_control
+        return bool(read_control().get("duplex_tiers", True))
+    except Exception:
+        return True
+
+
+def _cut_mouth(ctx) -> None:
+    """Stop the mouth NOW but keep the reply (the tiered PAUSE). Same steps as the binary watch's
+    onset: snapshot the cursor, mute the rest (bargein_fired), drain-and-KEEP the queue, /stop."""
+    cut_chunk = getattr(ctx, "now_playing", None)
+    heard_n = len(getattr(ctx, "played_chunks", None) or [])
+    ctx.bargein_fired = True
+    ctx.bargein_fired_ts = time.time()
+    _cancel_stall_bridge(ctx)
+    drained = _drain_play_queue(ctx)
+    ctx.barge_cut = {"cut": cut_chunk, "played": heard_n, "flushed": len(drained), "chunks": drained}
+    try:
+        _req.urlopen(ctx.server_url + "/stop", timeout=3).read()
+    except Exception:
+        pass
+    ctx.speaking = False
+    try:
+        set_state("listening", "you cut in")
+    except Exception:
+        pass
+
+
+def _mouth_duck(ctx, db: float, ttl_s: float = 3.0) -> None:
+    """Ask the mouth to lower (db<0) or restore (db=0) my volume. The mouth expires a duck after
+    ttl_s on its own, so a lost un-duck can never leave me quiet. An older mouth without /duck
+    404s - harmless (no duck, the rest of the ladder still works)."""
+    try:
+        _req.urlopen(f"{ctx.server_url}/duck?db={float(db):.1f}&ttl={float(ttl_s):.1f}", timeout=1).read()
+    except Exception:
+        pass
+
+
+def _cmd_bargein_watch_tiered(ctx, args: dict, live=None):
+    """Tiered barge-in watch (full-duplex, 10-31): ack / duck / pause / barge / defer.
+
+    Same window, mic, VAD, rms floor, self-voice drop, voice-id verdict and cut marker as the binary
+    watch; what differs is WHEN the mouth stops and WHAT comes back:
+      '[barge-in] <marker> <words>'      he took the floor - host interrupts my turn (as before)
+      '[barge-defer] <marker> <words>'   his words are a turn, but my turn is NOT interrupted
+                                         (unverified speaker / critical line)
+      '[bargein_watch] ack: <words>'     a backchannel - I kept talking, no turn
+      '[bargein_watch] no_barge' / 'self_voice_dropped' / 'interrupted (unclear)' - as before
+    Only reached when the host sent {"tiers": true}, so an old host never sees the new prefixes."""
+    with ctx.vad_lock:
+        model = ctx.vad_model
+    if model is None:
+        return "[bargein_watch] vad_not_warm"
+    if not getattr(ctx, "bargein_hold", False):
+        return "[bargein_watch] no_hold"
+    if is_muted():
+        time.sleep(0.5)
+        return "[bargein_watch] no_barge"
+    cap_s = float(args.get("cap_s", BARGEIN_WATCH_CAP_S))
+    deadline = time.time() + cap_s
+    try:
+        from wren_voice_status import read_control
+        _ctl = read_control()
+    except Exception:
+        _ctl = {}
+    try:
+        min_rms = float(_ctl.get("bargein_min_rms", BARGEIN_MIN_RMS))
+    except Exception:
+        min_rms = BARGEIN_MIN_RMS
+    try:
+        self_drop_bar = float(_ctl.get("self_voice_drop_bar", 0.5))
+    except Exception:
+        self_drop_bar = 0.5
+    cfg = _TierConfig.from_control(_ctl)
+    owners = tuple(n.strip().lower() for n in os.environ.get("IRIS_VOICE_OWNER_NAMES", "zeke").split(",") if n.strip())
+    try:
+        model.reset_states()
+    except Exception:
+        pass
+
+    def _active() -> bool:
+        return bool(getattr(ctx, "bargein_hold", False)) and time.time() < deadline
+
+    def _log(m):
+        print(f"[bargein_tiers] {m}", flush=True)
+
+    actions = _duplex.MouthActions(
+        duck=lambda db: _mouth_duck(ctx, db), unduck=lambda: _mouth_duck(ctx, 0.0),
+        pause=lambda: _cut_mouth(ctx),
+        resume=lambda: _restore_after_false_barge(ctx, "tiers: not a barge"), log=_log)
+    dev_idx = _trusted_mic_or_none(ctx)
+    if dev_idx is None:
+        return "[bargein_watch] no_barge"
+    stats: dict = {}
+    import torch
+
+    try:
+        with ctx.mic_lock:
+            with _net_audio.open_mic(sd, SAMPLE_RATE, dev_idx, VAD_CHUNK) as stream:
+                def _frames():
+                    while True:
+                        frame, _ov = stream.read(VAD_CHUNK)
+                        f = np.asarray(frame).flatten()
+                        if f.size != VAD_CHUNK:
+                            continue
+                        try:
+                            prob = float(model(torch.from_numpy(f), SAMPLE_RATE).item())
+                        except Exception:
+                            prob = 0.0
+                        yield f, prob
+                audio, clf = _duplex.tiered_accumulate(
+                    _frames(), _active, actions, cfg=cfg, critical=bool(args.get("critical", False)),
+                    threshold=VAD_THRESHOLD,
+                    preroll_chunks=max(1, round(BARGEIN_PREROLL_MS / VAD_CHUNK_MS)),
+                    end_silence_chunks=max(1, round(BARGEIN_END_SILENCE_MS / VAD_CHUNK_MS)),
+                    max_chunks=max(1, int(BARGEIN_MAX_CAPTURE_S * SAMPLE_RATE / VAD_CHUNK)),
+                    min_rms=min_rms, text_fn=(lambda: live.last_text) if live is not None else None,
+                    on_capture=(live.feed if live is not None else None), stats=stats)
+    except Exception as e:
+        if actions.state == "paused":
+            _restore_after_false_barge(ctx, f"watcher error {e!r:.60}")
+        elif actions.state == "ducked":
+            _mouth_duck(ctx, 0.0)
+        return f"[bargein_watch] watcher error: {e!r}"
+
+    if audio is None or clf is None:
+        if stats.get("faint_voiced") or stats.get("fizzled"):
+            _log(f"no_barge (faint {stats.get('faint_voiced', 0)}, fizzled {stats.get('fizzled', 0)})")
+        return "[bargein_watch] no_barge"
+    if live is not None:
+        live.stop()
+    try:
+        with _WHISPER_LOCK:
+            heard = (wl._transcribe_array(audio) or "").strip()
+    except Exception as e:
+        actions.settle(clf.update(_duplex.Observation(text="", final=True)))
+        return f"[bargein_watch] interrupted, transcription error: {e!r}"
+    _svs = _self_voice_score(audio, self_drop_bar) if heard else None
+    verdict = _voice_id_verdict(audio) if heard and _svs is None else None
+    spk = _duplex.speaker_class(verdict, _svs is not None, owners)
+    d = clf.update(_duplex.Observation(text=heard, final=True, speaker=spk))
+    was_paused = actions.state == "paused"
+    actions.settle(d)
+    _log(f"{d.tier.name}: {d.reason} | {' > '.join(h[1] for h in clf.history)} | {heard[:60]!r}")
+    if heard:
+        try:
+            wl.append_transcript(heard)
+        except Exception:
+            pass
+    if _svs is not None:
+        return f"[bargein_watch] self_voice_dropped (iris {_svs:.2f})"
+    if not heard:
+        return "[bargein_watch] interrupted (unclear)"
+    prefix = _duplex.final_marker(d)
+    if prefix.startswith("[bargein_watch]"):
+        return f"{prefix}: {heard}" if d.tier.name == "ACK" else prefix
+    if live is not None:
+        live.final_text = heard
+    if prefix == "[barge-in]":
+        marker = _barge_cut_marker(ctx)
+    elif was_paused and actions.state == "normal":
+        marker = "[talked over me; I paused, then resumed my reply]"
+    elif was_paused:
+        marker = _barge_cut_marker(ctx)          # an unverified 'stop': my mouth stays stopped
+    else:
+        marker = "[talked over me; my reply kept playing]"
+    vid = _voice_id_line(audio, verdict)
+    _save_utt_wav(audio, "barge")
+    return _with_speaker(f"{prefix} {marker}{(' ' + vid) if vid else ''} {heard}", verdict, args)
+
+
 def cmd_bargein_watch(ctx, args: dict):
     """Barge-in watch (see _cmd_bargein_watch_impl) + live words (10-29).
 
@@ -2066,7 +2275,10 @@ def cmd_bargein_watch(ctx, args: dict):
     live = _new_live("room-barge", ctx, transcribe_fn=_live_whisper_text)
     result = None
     try:
-        result = _cmd_bargein_watch_impl(ctx, args, live)
+        if args.get("tiers") and _HAVE_DUPLEX and _tiers_enabled():
+            result = _cmd_bargein_watch_tiered(ctx, args, live)
+        else:
+            result = _cmd_bargein_watch_impl(ctx, args, live)
         return result
     finally:
         if live is not None:
@@ -2214,30 +2426,7 @@ def _cmd_bargein_watch_impl(ctx, args: dict, live=None):
         live.final_text = heard   # passed the self-voice gate → the display's final words
     # Playback-cursor marker (2026-07-08): tell the host (and me) exactly where the
     # cut landed. Host only checks startswith('[barge-in]'), so extra info is safe.
-    info = getattr(ctx, "barge_cut", None) or {}
-    cut = (info.get("cut") or "").strip()
-    played = int(info.get("played", 0) or 0)
-    flushed = int(info.get("flushed", 0) or 0)
-    if len(cut) > 160:
-        cut = cut[:157] + "..."
-    if cut:
-        marker = (f'[cut mid-sentence at: "{cut}" | {played} sentence(s) fully heard, '
-                  f"{flushed} never played]")
-    elif flushed:
-        marker = f"[cut between sentences | {played} heard, {flushed} never played]"
-    elif played:
-        marker = f"[reply had already finished playing — all {played} sentence(s) heard]"
-    else:
-        # played==0, flushed==0, nothing in the speaker: the barge landed BEFORE this
-        # reply produced ANY audio (host still thinking / TTS still synthesizing / new
-        # hold window just opened). The old label claimed "already finished playing —
-        # all 0 sentence(s) heard", which reads as if the reply played and vanished.
-        # It never started — and cmd_speak will drop it (bargein_fired), so the host
-        # must know the listener heard NONE of it and restate what matters.
-        # (Found live 2026-07-12 — his continuing speech kept landing in
-        # this gap and whole replies died silently while the marker said "finished".)
-        marker = ("[barge landed before the reply started playing — nothing had been "
-                  "spoken; the pending reply was dropped unheard]")
+    marker = _barge_cut_marker(ctx)
     verdict = _voice_id_verdict(audio)
     vid = _voice_id_line(audio, verdict)
     _save_utt_wav(audio, "barge")

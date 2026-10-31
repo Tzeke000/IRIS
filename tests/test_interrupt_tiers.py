@@ -96,7 +96,14 @@ def test_long_speech_transcribed_as_backchannel_is_not_an_ack():
 
 def test_explicit_stop_is_immediate_even_short():
     c, out = run([O(voiced_ms=180, level_dbfs=-18, text="stop")])
-    assert out[-1].tier == Tier.BARGE and out[-1].interrupt_turn and not out[-1].provisional
+    assert out[-1].tier == Tier.BARGE and out[-1].interrupt_turn   # provisional until the final
+
+
+def test_barge_mid_capture_becomes_defer_when_verdict_says_unknown():
+    # the voiceprint verdict only exists for the whole utterance: a provisional BARGE must yield
+    c, out = run([O(voiced_ms=1500, level_dbfs=-18), O(text="is this the AI", final=True, speaker="unknown")])
+    assert out[0].tier == Tier.BARGE and out[0].provisional
+    assert out[1].tier == Tier.DEFER and out[1].fenced and not out[1].interrupt_turn
 
 
 def test_stop_beats_critical_line():
@@ -158,7 +165,7 @@ def test_never_deescalates_without_resolution():
 
 
 def test_closed_episode_is_inert():
-    c, out = run([O(voiced_ms=180, level_dbfs=-18, text="stop"), O(voiced_ms=3000, text="more")])
+    c, out = run([O(voiced_ms=180, level_dbfs=-18, text="stop", final=True), O(voiced_ms=3000, text="more")])
     assert out[1].tier == Tier.BARGE and out[1].reason == "episode closed"
 
 
