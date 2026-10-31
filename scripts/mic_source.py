@@ -34,6 +34,40 @@ ALLOW = {a.strip() for a in os.environ.get("IRIS_MIC_SOURCE_ALLOW", _DEFAULT_ALL
 MIC_SUBSTR = os.environ.get("WREN_MIC_SUBSTR", "Logitech PRO X")
 _LOG_FILE = Path(__file__).resolve().parents[1] / "state" / "mic_source.log"
 
+# Full-duplex echo cancellation (2026-10-31, default OFF). IRIS_AEC=1: 16 kHz sessions are served from
+# ONE shared capture stream through ONE WebRTC AEC3 canceller fed by audio_sink's reference
+# (IRIS_AEC_REF=1 on the sink) - so my own voice is removed from his mic before it leaves the tower and
+# the ears can stay open while I talk. A session can opt out with {"aec": false} in its header. Any AEC
+# failure falls back to the plain per-session stream (never deaf because of AEC).
+AEC_ON = os.environ.get("IRIS_AEC", "0").strip().lower() not in ("0", "off", "false", "no", "")
+_HUB = None
+_HUB_LOCK = threading.Lock()
+
+
+def _aec_hub():
+    """The shared AEC capture hub, created on first use (None = AEC off or unavailable)."""
+    global _HUB
+    if not AEC_ON:
+        return None
+    with _HUB_LOCK:
+        if _HUB is None:
+            try:
+                sys.path.append(str(Path(__file__).resolve().parents[1] / "voice"))
+                import aec_bus
+
+                def _open(sr, block):
+                    idx = find_named_mic(MIC_SUBSTR)
+                    if idx is None:
+                        raise RuntimeError(f"named mic '{MIC_SUBSTR}' not found")
+                    return sd.InputStream(samplerate=sr, channels=1, dtype="float32", device=idx, blocksize=block)
+
+                _HUB = aec_bus.MicHub(_open, backend=os.environ.get("IRIS_AEC_BACKEND", "webrtc"),
+                                      lead_ms=float(os.environ.get("IRIS_AEC_LEAD_MS", "40")), log=log)
+            except Exception as e:  # noqa: BLE001
+                log(f"AEC unavailable, plain mic: {e!r}")
+                return None
+        return _HUB
+
 
 def log(msg: str) -> None:
     line = f"[mic_source {time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
@@ -84,6 +118,20 @@ def _serve(conn: socket.socket, peer: str) -> None:
         if idx is None:
             log(f"REFUSED session from {peer}: named mic '{MIC_SUBSTR}' not found (no default-device fallback)")
             return
+        hub = _aec_hub() if (sr == 16000 and hdr.get("aec", True)) else None
+        if hub is not None:
+            import aec_bus
+            log(f"streaming ECHO-CANCELLED mic idx={idx} to {peer} ({sr} Hz, block {bs}, {hub.aec.name})")
+            q = hub.subscribe()
+            try:
+                for blk in aec_bus.session_reader(q, bs):
+                    conn.sendall(blk.astype("<f4").tobytes())
+            except ConnectionError as e:
+                if hub.error is None:
+                    raise                                   # the ears hung up: normal end
+                log(f"AEC hub failed ({hub.error}); session {peer} falls back to the plain mic")
+            finally:
+                hub.unsubscribe(q)
         log(f"streaming mic idx={idx} '{sd.query_devices(idx)['name']}' to {peer} ({sr} Hz, block {bs})")
         with sd.InputStream(samplerate=sr, channels=1, dtype="float32", device=idx, blocksize=bs) as s:
             while True:
