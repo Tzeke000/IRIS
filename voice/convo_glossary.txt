@@ -1,0 +1,37 @@
+# Names/terms from Iris's world for the word-finding fast layer (voice/iris_word_search.py).
+# One per line. PUBLIC repo: technical/product names only - no personal details (those go in a
+# *.local.txt the loader can be pointed at).
+Iris
+Wren
+Ava
+Vector
+Fish Speech
+StyleTTS2
+Piper
+Kokoro
+whisper
+smart-turn
+Silero VAD
+PersonaPlex
+Moshi
+Ollama
+little brain
+orb app
+VR temple
+Unreal Engine
+Blender
+geometry nodes
+EEVEE
+Cycles
+Proxmox
+iDRAC
+Tailscale
+Parsec
+Sunshine
+V100
+EMEET PIXY
+Discord
+post office
+ElevenLabs
+Ableton
+TikTok

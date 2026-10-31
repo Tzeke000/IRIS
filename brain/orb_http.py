@@ -290,6 +290,14 @@ async def _origin_guard(request, call_next):
     return await call_next(request)
 
 
+def _convo_lookups_summary() -> dict:
+    try:
+        from brain import iris_lookups as _lk
+        return _lk.summary(expire=False)
+    except Exception:
+        return {}
+
+
 def _inner_life_block() -> dict:
     """Inner thought block. Phase 41: thoughts older than 1 hour don't surface
     as "current" — they're history, not present. Lets the orb's UI fade
@@ -628,6 +636,9 @@ def snapshot() -> dict:
         # thinking_tier: App.tsx uses >=3 to hold the orb's "thinking" visual through
         # long-horizon turns. Serve the flag honestly (0 when nothing sets it).
         "thinking_tier": int(_g.get("_thinking_tier") or 0),
+        # 10-31 conversation layer: open "checking, give me a sec" lookups -> the eye shows
+        # thinking + glances away while any is pending (App.tsx). Read-only; {} if unavailable.
+        "convo_lookups": _convo_lookups_summary(),
         "tts": {
             "tts_speaking": bool(_g.get("_tts_speaking")),
             # My real mouth is the out-of-process StyleTTS2 daemon; _tts_ref is only

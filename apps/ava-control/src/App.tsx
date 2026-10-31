@@ -11,7 +11,7 @@ import VectorPanel from "./components/VectorPanel";
 import WorldPanel from "./components/WorldPanel";
 import RemindersPanel from "./components/RemindersPanel";
 import PcPanel from "./components/PcPanel";
-import { CUBE_MORPH_ENABLED, EMOTION_VISUALS, deriveOrbEmotion, deriveOrbSleep, deriveOrbState, mixHex, shadeHex, type EmotionVisual } from "./orbDerive";
+import { CUBE_MORPH_ENABLED, EMOTION_VISUALS, LOOKUP_GAZE, deriveOrbEmotion, deriveOrbSleep, deriveOrbState, lookupPending, mixHex, shadeHex, type EmotionVisual } from "./orbDerive";
 import OrbCanvas, { setBodyStyle, useBodyStyle } from "./components/OrbCanvas";
 import { listen } from "@tauri-apps/api/event";
 import GuideOverlay from "./guide/GuideOverlay";
@@ -2370,7 +2370,7 @@ export default function App() {
               state={shutdownInProgress ? "offline" : (orbPulseMode as any)}
               size={eyeSize}
               portsKey="home"
-              gaze={homeGaze}
+              gaze={orbPulseMode === "thinking" && lookupPending(snap as Record<string, unknown> | null) ? LOOKUP_GAZE : homeGaze}
               amplitude={ttsAmplitude}
               energy={moodEnergy}
               recenterTrigger={orbRecenterCounter}

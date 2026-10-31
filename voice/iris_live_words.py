@@ -30,6 +30,30 @@ _REPO = Path(__file__).resolve().parents[1]
 LIVE_FILE = Path(os.environ.get("IRIS_LIVE_PARTIAL_FILE")
                  or (_REPO / "state" / "voice" / "live_partial.json"))
 MIN_CADENCE_S = 0.5            # hard floor between partial decodes (GPU/CPU cost bound)
+SIL_FRAME_S = 0.032            # tail-silence analysis frame (one 512-sample capture chunk at 16 kHz)
+
+
+def tail_silence_s(buf, sample_rate: int = 16000, floor: float = 0.006, rel: float = 0.12,
+                   max_look_s: float = 4.0) -> float:
+    """Seconds of trailing quiet audio in buf (10-31, conversation layer). A frame is quiet when its
+    RMS is below max(floor, rel * the 90th-percentile frame RMS of the utterance). Pure numpy.
+
+    Why: a partial that hasn't changed is NOT evidence that he paused - partials refresh only every
+    ~0.6-0.8 s - so listeners that act inside his turn (word assist) need the audio's own silence,
+    measured on the same buffer the partial was decoded from."""
+    import numpy as np
+    n = int(SIL_FRAME_S * sample_rate)
+    x = np.asarray(buf, dtype=np.float32).reshape(-1)
+    k = len(x) // n
+    if k == 0:
+        return 0.0
+    rms = np.sqrt(np.mean(x[: k * n].reshape(k, n) ** 2, axis=1))
+    thr = max(floor, rel * float(np.percentile(rms, 90)))
+    look = min(k, int(max_look_s / SIL_FRAME_S))
+    tail = rms[-look:][::-1]
+    loud = np.nonzero(tail >= thr)[0]
+    quiet = int(loud[0]) if len(loud) else look
+    return round(quiet * SIL_FRAME_S, 2)
 
 _SEQ = itertools.count(1)
 _LAST: dict = {}               # last payload published by this process (daemon `live_partial` cmd)
@@ -111,7 +135,7 @@ class LiveWords:
         self.final_text = None              # set by the caller ONLY once the turn passed its gates
 
     # -- publishing ---------------------------------------------------------------------------
-    def publish(self, text: str, final: bool = False, dropped=None) -> bool:
+    def publish(self, text: str, final: bool = False, dropped=None, tail_sil=None) -> bool:
         if not self.enabled:
             return False
         with self._pub_lock:
@@ -128,7 +152,10 @@ class LiveWords:
                        "text": (text or "").strip(), "final": bool(final),
                        "ts": round(time.time(), 3), "started_ts": round(self.started_ts, 3),
                        "seq": self._seq, "mouth_busy": busy,
-                       "dropped": (str(dropped)[:200] if dropped else None)}
+                       "dropped": (str(dropped)[:200] if dropped else None),
+                       # trailing quiet audio (s) in the buffer this partial was decoded from; None on
+                       # finals / old writers. A listener may treat "same text + tail >= x" as a pause.
+                       "tail_silence_s": (None if final or tail_sil is None else float(tail_sil))}
             ok = write_atomic(self.path, payload)
             if ok:
                 self.published = True
@@ -154,6 +181,7 @@ class LiveWords:
     def _loop(self) -> None:
         import numpy as np
         last_n = 0
+        last_sil = None
         while not self._stop.wait(self.cadence_s):
             with self._buf_lock:
                 snap = self._buf[:]
@@ -170,8 +198,17 @@ class LiveWords:
                     text = self._transcribe(buf)
                 self.passes += 1
                 text = (text or "").strip()
-                if text and text != self.last_text and not self._stop.is_set():
-                    self.publish(text)
+                try:
+                    sil = tail_silence_s(buf)
+                except Exception:
+                    sil = None
+                # New words -> publish. Same words but the trailing silence moved (he went quiet, or
+                # spoke a sound whisper didn't render) -> re-publish as a heartbeat for listeners;
+                # the display text is unchanged.
+                if text and not self._stop.is_set() and (
+                        text != self.last_text or (sil is not None and sil != last_sil)):
+                    self.publish(text, tail_sil=sil)
+                    last_sil = sil
             except Exception as e:          # best-effort: a failed partial never touches capture
                 print(f"[live_words] partial pass failed (non-fatal): {e!r}", file=sys.stderr)
 

@@ -147,6 +147,15 @@ export function deriveOrbSleep(snap: Rec | null) {
 
 /** The orb's state ladder, identical for both windows. Window-local signals (the main window's own chat
  *  send / mic / fast TTS poll) are passed in; the widget passes what it can see. */
+/** Open conversation-layer lookups (server snapshot convo_lookups.pending, brain/iris_lookups.py). */
+export function lookupPending(snap: Rec | null): boolean {
+  return Number(rec(snap?.convo_lookups)?.pending ?? 0) > 0;
+}
+
+/** Where the eye rests while a lookup is pending: a glance to the LEFT and a little up (people look away
+ *  to think). x<0 = the viewer's left (IrisBody: x = viewer's right). Which "left" Zeke meant is UNVERIFIED. */
+export const LOOKUP_GAZE = { x: -0.45, y: 0.3 };
+
 export function deriveOrbState(snap: Rec | null, o: {
   online: boolean; fallbackPulse: string; backendShutdown?: boolean; ttsSpeaking?: boolean;
   chatThinking?: boolean; sttListening?: boolean; deepMode?: boolean;
@@ -164,6 +173,9 @@ export function deriveOrbState(snap: Rec | null, o: {
   if (Number(snap.thinking_tier ?? 0) >= 3) return "thinking";
   if (vlActive && vlState === "speaking") return "speaking";
   if (vlActive && vlState === "thinking") return "thinking";
+  // 10-31 (Zeke: "checking, give me a second" -> my eye goes blue thinking while the lookup runs and the talk
+  // flows on). Below speaking, above the always-on listening state, so it actually shows during a call.
+  if (lookupPending(snap) && !speaking) return "thinking";
   if (vlActive && vlState === "listening") return "listening";
   if (vlActive && vlState === "attentive") return "attentive";
   if (speaking) return "speaking";

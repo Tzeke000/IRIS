@@ -189,6 +189,34 @@ def test_vr_hear_per_speaker_partials_then_final() -> None:
     assert d["final"] and d["text"] == "hey Iris can you hear me"
 
 
+
+
+def test_tail_silence_measures_trailing_quiet() -> None:
+    sr = 16000
+    rng = np.random.default_rng(0)
+    speech = (0.2 * rng.standard_normal(sr)).astype(np.float32)
+    quiet = (0.001 * rng.standard_normal(int(0.8 * sr))).astype(np.float32)
+    assert lw.tail_silence_s(speech) < 0.05
+    assert abs(lw.tail_silence_s(np.concatenate([speech, quiet])) - 0.8) <= 0.07
+    assert lw.tail_silence_s(np.zeros(10, np.float32)) == 0.0
+
+
+def test_unchanged_text_republishes_when_silence_grows() -> None:
+    p = _tmpfile()
+    sr = 16000
+    lwo = lw.LiveWords("t", path=p, transcribe_fn=lambda b: "what's it called", cadence_s=0.5)
+    rng = np.random.default_rng(1)
+    lwo.feed((0.2 * rng.standard_normal(sr)).astype(np.float32))
+    time.sleep(0.8)
+    first = json.loads(p.read_text(encoding="utf-8"))
+    lwo.feed(np.zeros(int(0.7 * sr), np.float32))
+    time.sleep(0.8)
+    later = json.loads(p.read_text(encoding="utf-8"))
+    lwo.stop()
+    assert first["text"] == later["text"] == "what's it called"
+    assert later["seq"] > first["seq"] and later["tail_silence_s"] >= 0.6 > first["tail_silence_s"]
+
+
 if __name__ == "__main__":
     for _n, _f in list(globals().items()):
         if _n.startswith("test_") and callable(_f):
