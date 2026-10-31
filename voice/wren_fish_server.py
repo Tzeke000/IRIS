@@ -1359,8 +1359,29 @@ def _get_output_stream(dev_idx):
     return _OUT_STREAM
 
 
-def _request_stop():
-    """Interrupt in-flight playback (barge-in). Sets flag + aborts stream."""
+def _request_stop(fade_ms: "float | None" = None) -> str:
+    """Interrupt in-flight playback (barge-in). Hard stop = flag + abort the stream. With a fade
+    (FISH_HUSH_FADE_MS, or GET /stop?fade_ms=N) and audio actually flowing, trail off instead."""
+    ms = HUSH_FADE_MS if fade_ms is None else max(0.0, min(float(fade_ms), 2000.0))
+    if ms > 0 and not _STOP.is_set() and time.time() - _FADE["last_write"] < 0.5:
+        n = int(SAMPLE_RATE * ms / 1000.0)
+        with _FADE_LOCK:
+            if _FADE["total"] == 0:                  # a second /stop mid-fade doesn't restart the ramp
+                _FADE["gen"] += 1
+                _FADE.update(left=n, total=n)
+            gen = _FADE["gen"]
+        # backstop: if no audio comes through to carry the ramp (synth stalled), cut as before
+        t = threading.Timer(ms / 1000.0 + 0.3, _fade_backstop, args=(gen,))
+        t.daemon = True
+        t.start()
+        return "fading"
+    _hard_stop()
+    return "stopping"
+
+
+def _hard_stop() -> None:
+    with _FADE_LOCK:
+        _FADE.update(left=0, total=0)
     _STOP.set()
     s = _OUT_STREAM
     if s is not None:
@@ -1368,6 +1389,39 @@ def _request_stop():
             s.abort()
         except Exception:
             pass
+
+
+def _fade_backstop(gen: int) -> None:
+    with _FADE_LOCK:
+        live = _FADE["gen"] == gen and _FADE["total"] > 0
+    if live:
+        _hard_stop()
+
+
+# Graceful stop (2026-10-31, Zeke: when I'm hushed, fade out over ~300-500 ms instead of a hard cut - in the
+# room AND in VR). FISH_HUSH_FADE_MS > 0 => /stop (the ears' barge cut) ramps the NEXT N ms of what I was saying
+# down to silence, then stops; 0 (default) = the old instant abort. The ramp rides the normal write path, so it
+# starts within one block (~50 ms) and the producer is stopped only when it ends.
+HUSH_FADE_MS = max(0.0, min(float(os.environ.get("FISH_HUSH_FADE_MS", "0") or 0), 2000.0))
+_FADE = {"left": 0, "total": 0, "gen": 0, "last_write": 0.0}
+_FADE_LOCK = threading.Lock()
+
+
+def _fade_block(blk: np.ndarray) -> "tuple[np.ndarray, bool]":
+    """Apply the pending fade to one block. (block to write, fade finished => stop after it)."""
+    with _FADE_LOCK:
+        total, left = _FADE["total"], _FADE["left"]
+        if total <= 0:
+            return blk, False
+        m = min(len(blk), left)
+        done = total - left
+        ramp = 1.0 - (np.arange(done + 1, done + m + 1, dtype=np.float32) / float(total))
+        out = blk[:m] * np.clip(ramp, 0.0, 1.0)
+        _FADE["left"] = left - m
+        finished = _FADE["left"] <= 0
+        if finished:
+            _FADE.update(left=0, total=0)
+    return out.astype(np.float32, copy=False), finished
 
 
 # ── Live amplitude envelope for the orb (same as the StyleTTS2 mouth) ─────────────
@@ -1397,10 +1451,15 @@ def _write_stream(stream, arr, stop_aware: bool = True) -> bool:
         blk = arr[i: i + _AMP_BLOCK]
         if _DUCK is not None:
             blk = _DUCK.apply(blk)
+        blk, faded_out = _fade_block(blk) if (stop_aware and _FADE["total"]) else (blk, False)
         _emit_amp(blk)
         try:
             stream.write(blk)
         except Exception:
+            return False
+        _FADE["last_write"] = time.time()
+        if faded_out:
+            _STOP.set()                 # trailed off: now stop the line (the ramp itself plays out, no abort)
             return False
         i += _AMP_BLOCK
     return True
@@ -1551,6 +1610,7 @@ def play_backchannel() -> "tuple[int, dict]":
             return 409, {"skipped": "no clips"}
         text, arr = pick
         _STOP.clear()   # the lock is ours: no speech is in flight, a stale stop flag must not eat the clip
+        _FADE.update(left=0, total=0)   # a new line never inherits a stale fade
         stream = _get_output_stream(_resolve_output_device())
         if DRYRUN:
             stream.begin(text, {"mode": "backchannel"})
@@ -1728,6 +1788,7 @@ def speak_progressive(text: str, style: dict | None = None, seed=None) -> dict:
     style_tag = (style or {}).get("tag")
     _auto_tag_sentences(units, style_tag)
     _STOP.clear()
+    _FADE.update(left=0, total=0)   # a new line never inherits a stale fade
     t0 = time.perf_counter()
     dev_idx = _resolve_output_device()
     stream = _get_output_stream(dev_idx)
@@ -1812,6 +1873,7 @@ def _synth_whole(text: str, style_tag: str | None, seed, max_words: int = 30) ->
 def speak_plain(text: str, style: dict | None = None, seed=None) -> dict:
     """Synthesize everything first, then play (fallback path)."""
     _STOP.clear()
+    _FADE.update(left=0, total=0)   # a new line never inherits a stale fade
     t0 = time.perf_counter()
     set_state("speaking", text[:400])
     stream = None
@@ -1863,9 +1925,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/health":
             self._send(200 if _READY else 503, "ok" if _READY else "loading")
-        elif self.path == "/stop":
-            _request_stop()
-            self._send(200, "stopping")
+        elif self.path == "/stop" or self.path.startswith("/stop?"):
+            fade = None
+            if "?" in self.path:
+                from urllib.parse import parse_qs, urlparse
+                try:
+                    fade = float(parse_qs(urlparse(self.path).query).get("fade_ms", [None])[0])
+                except (TypeError, ValueError):
+                    fade = None
+            self._send(200, _request_stop(fade))
         elif self.path == "/warm":
             if _READY:
                 self._send(200, "warm")

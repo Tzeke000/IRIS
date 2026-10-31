@@ -82,6 +82,46 @@ LIVE_CADENCE_S = 0.5  # 10-29 live words: min seconds between display partial de
 LIVE_KEEP_S = 120.0   # drop a speaker's live entry from the file this long after it went final
 
 
+# ── VR turn-taking (2026-10-31, default OFF; same switches as tools/system/vr_temple_tool.py vr_cfg) ──────
+# scratch/voice_control.json {"vr_turntaking": true} / {"vr_backchannel": true} (hot) or IRIS_VR_TURNTAKING /
+# IRIS_VR_BACKCHANNEL = 1|0 (forces). Read live each time - flipping them needs no restart of this service.
+CONTROL = Path(os.environ.get("IRIS_VR_CONTROL", str(REPO / "scratch" / "voice_control.json")))      # tests: their own
+MY_SPEECH = Path(os.environ.get("IRIS_VR_MY_SPEECH", str(REPO / "state" / "vr_temple" / "my_speech.json")))  # what vr_temple speak is saying / just said
+QUESTION_ACK_WINDOW_S = 90.0
+
+
+def control() -> dict:
+    try:
+        d = json.loads(CONTROL.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def switch(env: str, key: str, ctl: dict | None = None) -> bool:
+    e = os.environ.get(env, "").strip().lower()
+    if e:
+        return e not in ("0", "off", "false", "no")
+    return bool((control() if ctl is None else ctl).get(key, False))
+
+
+def my_speech() -> dict | None:
+    try:
+        d = json.loads(MY_SPEECH.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+def asked_question_recently(t: float, sp: dict | None = None) -> bool:
+    """A sentence of my temple line ending in '?' started playing before t, and ended ≤ 90 s before it."""
+    sp = my_speech() if sp is None else sp
+    for (a, e), txt in zip((sp or {}).get("spans") or [], (sp or {}).get("sentences") or []):
+        if str(txt).rstrip().endswith("?") and float(a) <= t and t - float(e) <= QUESTION_ACK_WINDOW_S:
+            return True
+    return False
+
+
 def log(*a) -> None:
     print("[vr_hear]", *a, flush=True)
 
@@ -154,6 +194,217 @@ def speech_dbfs(x: np.ndarray) -> float:
     return float(20 * np.log10(np.percentile(rms, 90) + 1e-9))
 
 
+# ---------------------------------------------------------------------------------------------- backchannels
+def voiced_seconds(x: np.ndarray) -> float:
+    """Seconds of 20 ms frames that are speech (within 20 dB of the clip's speech level, above the hiss floor)."""
+    n = 320
+    if x.size < n:
+        return 0.0
+    fr = x[: x.size // n * n].reshape(-1, n)
+    db = 20 * np.log10(np.sqrt((fr ** 2).mean(axis=1) + 1e-12) + 1e-9)
+    bar = max(MIN_SPEECH_DBFS, speech_dbfs(x) - 20.0)
+    return float((db >= bar).sum() * 0.02)
+
+
+class VRBackchannel:
+    """My "mm-hm / yeah / right" in the TEMPLE while a nearby player is mid-thought (10-31; the room's version is
+    voice/iris_backchannel.py + the mouth's /backchannel). Here a spool clip landing = the bot heard a pause; if
+    that speaker has talked ≥ min_speech_s (voiced) in the current merge buffer, is ≤ max_dist_m away, has my
+    attention, smart-turn says NOT done, I'm not mid-line myself, and the rate limits hold, my body plays ONE
+    clip pre-rendered in my own voice (cached wavs, never the LLM, never a live synth at the moment it plays).
+
+    Gates: switch vr_backchannel (default OFF); not quiet hours; not mouth_muted; speakers = backchannel_cfg
+    "vr_speakers" (default ["Zeke"], "*" = anyone). Self-voice: the bot's ears never capture its own voice, but a
+    player on open speakers can feed my clip back through his mic - a SHORT clip from anyone that sits inside my
+    clip's play window (+ the round trip) is dropped as my echo, never his words, never a barge."""
+
+    PHRASES = tuple(p.strip() for p in os.environ.get("WREN_FISH_BACKCHANNELS", "Mm-hm.|Yeah.|Right.|Mm.").split("|") if p.strip())
+    VOICE_DIR = Path("/tmp/iris_vr_voice")          # the only dir my sandboxed body may play from
+    MOUTH = os.environ.get("IRIS_MOUTH_URL", "http://localhost:8769")
+    CTL = ("localhost", int(os.environ.get("IRIS_VR_CTL_PORT", "7790")))
+    DEFAULTS = {"min_speech_s": 4.0, "min_gap_s": 6.0, "min_new_speech_s": 1.5, "incomplete_bar": 0.6,
+                "max_dist_m": 6.0, "echo_tail_s": 0.9}
+
+    def __init__(self, send=None, predict=None, synth=None, clock=time.time):
+        self.clips: list[tuple[str, float]] = []      # (path, seconds)
+        self.priming = False
+        self.last_fire = 0.0
+        self.fired_at_voiced: dict[str, float] = {}   # buffer stem → voiced seconds when I last fired in it
+        self.windows: list[tuple[float, float]] = []  # my clips' play windows
+        self.fires = 0
+        self._send = send or self._ctl_send
+        self._predict = predict
+        self._synth = synth or self._mouth_synth
+        self._clock = clock
+        self._last_pick = -1
+
+    # -- config / gates
+    def cfg(self, ctl: dict | None = None) -> dict:
+        ctl = control() if ctl is None else ctl
+        out = dict(self.DEFAULTS)
+        out["vr_speakers"] = ["zeke"]
+        over = ctl.get("backchannel_cfg") if isinstance(ctl.get("backchannel_cfg"), dict) else {}
+        for k, v in over.items():
+            if k == "vr_speakers" and isinstance(v, (list, str)):
+                out[k] = [str(x).lower() for x in ([v] if isinstance(v, str) else v)]
+            elif k in out:
+                try:
+                    out[k] = float(v)
+                except (TypeError, ValueError):
+                    pass
+        return out
+
+    def allowed(self, ctl: dict | None = None, now_dt: dt.datetime | None = None) -> tuple[bool, str]:
+        ctl = control() if ctl is None else ctl
+        if not switch("IRIS_VR_BACKCHANNEL", "vr_backchannel", ctl):
+            return False, "vr_backchannel off"
+        if bool(ctl.get("mouth_muted", False)):
+            return False, "mouth_muted"
+        n = now_dt or dt.datetime.now()
+        m = n.hour * 60 + n.minute
+        if m >= 22 * 60 + 30 or m < 5 * 60 + 10:
+            return False, "quiet hours"
+        return True, ""
+
+    # -- self-voice
+    def is_my_echo(self, t0: float, t1: float, cfg: dict | None = None) -> bool:
+        tail = (cfg or self.DEFAULTS)["echo_tail_s"]
+        return any(t0 >= a - 0.1 and t1 <= b + tail and (t1 - t0) <= (b - a) + tail for a, b in self.windows)
+
+    # -- decision
+    def consider(self, who: str, b: dict, attending: bool, now: float | None = None,
+                 ctl: dict | None = None, sp: dict | None = None, now_dt: dt.datetime | None = None) -> str:
+        """Called when a clip of `who` just landed (= the bot heard them pause). Returns what happened."""
+        now = self._clock() if now is None else now
+        ctl = control() if ctl is None else ctl
+        ok, why = self.allowed(ctl, now_dt)
+        if not ok:
+            return "off: " + why
+        c = self.cfg(ctl)
+        if "*" not in c["vr_speakers"] and who.lower() not in c["vr_speakers"]:
+            return "not a backchannel speaker"
+        if not attending:
+            return "not talking to me"
+        dist = b["meta"].get("dist_m")
+        if dist is None or float(dist) > c["max_dist_m"]:
+            return "too far"
+        sp = my_speech() if sp is None else sp
+        if sp and ((sp.get("state") == "speaking" and now - float(sp.get("t0") or 0) < 95.0)
+                   or (sp.get("state") == "done" and sp.get("spans") and now < float(sp["spans"][-1][1]) + 0.5)):
+            return "I'm talking"
+        voiced = voiced_seconds(b["x"])
+        if voiced < c["min_speech_s"]:
+            return "not long enough yet (%.1f s)" % voiced
+        if now - self.last_fire < c["min_gap_s"]:
+            return "rate limit"
+        if voiced - self.fired_at_voiced.get(b["stem"], -1e9) < c["min_new_speech_s"]:
+            return "no new speech since the last one"
+        prob = self.endpoint_prob(b["x"])
+        if prob is None:
+            return "no smart-turn"
+        if prob >= c["incomplete_bar"]:
+            return "they sound done (%.2f)" % prob
+        clip = self.pick()
+        if clip is None:
+            self.prime_async()
+            return "priming"
+        r = self._send({"cmd": "voice", "path": clip[0]})
+        if not r or not r.get("ok"):
+            return "body refused: %r" % (r,)
+        secs = float(r.get("seconds") or clip[1])
+        self.windows = [w for w in self.windows if w[1] > now - 30] + [(now, now + secs)]
+        self.last_fire = now
+        self.fired_at_voiced[b["stem"]] = voiced
+        self.fires += 1
+        return "played %s (%.2f s, smart-turn %.2f, %.1f s voiced)" % (os.path.basename(clip[0]), secs, prob, voiced)
+
+    def endpoint_prob(self, x: np.ndarray) -> float | None:
+        try:
+            if self._predict is None:
+                sys.path.insert(0, str(REPO / "voice"))
+                import wren_smartturn
+                self._predict = lambda a: float(wren_smartturn.predict_endpoint(a)["prob"])
+            return float(self._predict(x.astype(np.float32)))
+        except Exception as e:  # noqa: BLE001  no smart-turn ⇒ never guess: no backchannel
+            log("backchannel: smart-turn unavailable (%r)" % (e,))
+            self._predict = lambda a: (_ for _ in ()).throw(RuntimeError("smart-turn unavailable"))
+            return None
+
+    # -- clips
+    def pick(self) -> tuple[str, float] | None:
+        live = [c for c in self.clips if os.path.exists(c[0])]
+        if not live:
+            self.clips = []
+            return None
+        import random
+        i = random.randrange(len(live))
+        if i == self._last_pick and len(live) > 1:
+            i = (i + 1) % len(live)
+        self._last_pick = i
+        return live[i]
+
+    def prime(self) -> int:
+        """Render the phrase set once through my mouth (Fish /synth at 48 kHz) into /tmp/iris_vr_voice/bc_*.wav."""
+        import wave
+        self.VOICE_DIR.mkdir(parents=True, exist_ok=True)
+        got = []
+        for i, ph in enumerate(self.PHRASES):
+            path = self.VOICE_DIR / ("bc_%d.wav" % i)
+            try:
+                if not path.exists() or path.stat().st_size < 2000:
+                    data = self._synth(ph)
+                    tmp = path.with_suffix(".tmp")
+                    tmp.write_bytes(data)
+                    os.replace(tmp, path)
+                with wave.open(str(path)) as w:
+                    secs = w.getnframes() / float(w.getframerate())
+                if 0.12 <= secs <= 1.6:
+                    got.append((str(path), secs))
+                else:
+                    log("backchannel clip %r is %.2f s - not kept" % (ph, secs))
+                    path.unlink(missing_ok=True)
+            except Exception as e:  # noqa: BLE001
+                log("backchannel prime failed for %r: %r" % (ph, e))
+        self.clips = got
+        log("backchannel: %d/%d clips ready" % (len(got), len(self.PHRASES)))
+        return len(got)
+
+    def prime_async(self) -> None:
+        if self.priming:
+            return
+        self.priming = True
+        import threading
+
+        def _run():
+            try:
+                self.prime()
+            finally:
+                self.priming = False
+        threading.Thread(target=_run, daemon=True, name="vr-bc-prime").start()
+
+    def _mouth_synth(self, text: str) -> bytes:
+        import urllib.request
+        with urllib.request.urlopen(self.MOUTH + "/health", timeout=2) as r:
+            if r.status != 200:
+                raise RuntimeError("mouth not ready")
+        req = urllib.request.Request(self.MOUTH + "/synth", data=json.dumps({"text": text, "rate": 48000}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read()
+
+    def _ctl_send(self, req: dict) -> dict:
+        import socket
+        with socket.create_connection(self.CTL, timeout=2.0) as so:
+            so.sendall((json.dumps(req) + "\n").encode())
+            buf = b""
+            while not buf.endswith(b"\n"):
+                ch = so.recv(65536)
+                if not ch:
+                    break
+                buf += ch
+        return json.loads(buf.decode() or "{}")
+
+
 # ---------------------------------------------------------------------------------------------- service
 class Ears:
     def __init__(self, a):
@@ -170,6 +421,7 @@ class Ears:
         self.live_last: dict[str, float] = {}
         self.out.parent.mkdir(parents=True, exist_ok=True)
         self.spool.mkdir(parents=True, exist_ok=True)
+        self.bc = VRBackchannel()
         self.attn: dict[str, float] = {}           # speaker → attending until (wall clock)
         try:
             self.attn = {k: float(v) for k, v in json.loads(self.state_path.read_text()).get("until", {}).items()}
@@ -243,10 +495,14 @@ class Ears:
         if not n:
             log("drop (no words) %s" % base)
             return None
-        if n in HALLUCINATIONS and (secs < 3.0 or lvl < -40.0 or all(s.no_speech_prob > 0.3 for s in segs)):
+        t0 = float(meta["t_start"])
+        # "okay" is whisper's stock noise word, so a short one is dropped - but right after I asked a question it
+        # is the likeliest real ANSWER (10-31 VR turn-taking): then only the level / no-speech tests apply.
+        answer = n in ("okay", "ok", "yes", "yeah", "yep", "sure", "no") and switch("IRIS_VR_TURNTAKING", "vr_turntaking") \
+            and asked_question_recently(t0)
+        if n in HALLUCINATIONS and ((secs < 3.0 and not answer) or lvl < -40.0 or all(s.no_speech_prob > 0.3 for s in segs)):
             log("drop (hallucination-shaped %r) %s" % (text, base))
             return None
-        t0 = float(meta["t_start"])
         words = [w for s in segs for w in (s.words or [])]
         a = float((t0 + words[0].start) if words else (t0 + segs[0].start if segs else t0))
         b = float((t0 + words[-1].end) if words else meta.get("t_end", t0 + secs))
@@ -398,6 +654,7 @@ class Ears:
         while True:
             self.relay_gestures()
             items = self.pending()
+            landed: set[str] = set()
             for side in items:
                 got = self.load(side)
                 side.unlink(missing_ok=True)
@@ -408,7 +665,11 @@ class Ears:
                 who = str(meta.get("speaker", "?"))
                 t0 = float(meta.get("t_start", time.time()))
                 t1 = float(meta.get("t_end", t0 + x.size / 16000.0))
+                if self.bc.windows and self.bc.is_my_echo(t0, t1):
+                    log("drop (my own backchannel coming back through %s's mic, %.2f s)" % (who, t1 - t0))
+                    continue
                 self.activity(who, t0, t1, meta, x)
+                landed.add(who)
                 b = self.buf.get(who)
                 gap = t0 - b["t_end"] if b else 1e9
                 if b and -0.5 <= gap <= MERGE_GAP_S and (b["x"].size + x.size) / 16000.0 <= MERGE_MAX_S:
@@ -421,6 +682,18 @@ class Ears:
                     n += self._flush(who)
                     self.buf[who] = {"x": x.astype(np.float32), "meta": meta, "t_end": t1, "n": 1, "stem": side.stem}
                 self.live_partial(who)
+            for who in landed:                     # a pause was just heard: my "mm-hm"? (vr_backchannel, default off)
+                b = self.buf.get(who)
+                if b and not once:
+                    try:
+                        lv = self.live.get(who) or {}      # "Iris, …" in THIS utterance's live words counts too
+                        att = self.attn.get(who, 0.0) > time.time() or (
+                            lv.get("utterance_id") == "vr-%s" % b["stem"] and addressed(str(lv.get("text", ""))))
+                        what = self.bc.consider(who, b, att)
+                        if what.startswith(("played", "body refused", "priming")):
+                            log("backchannel %s: %s" % (who, what))
+                    except Exception as e:  # noqa: BLE001  a backchannel must never cost me my ears
+                        log("backchannel error: %r" % (e,))
             now = time.time()
             for who in [w for w, b in self.buf.items() if now - b["t_end"] >= MERGE_WAIT_S or once]:
                 n += self._flush(who)

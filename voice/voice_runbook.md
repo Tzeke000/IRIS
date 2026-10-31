@@ -179,3 +179,31 @@ script. The voice description is canonical in `CLAUDE.md` "How you sound".
   lane switches itself off there (logged once). Logs: `[backchannel] FIRE / played / not played`.
 - **Live partial for other processes:** `iris_live_words.read_current()` returns what he is saying right
   now (in-progress, < 3 s old) from `state/voice/live_partial.json`; display-only, never a turn.
+- **Graceful stop (Fish mouth, default OFF):** `FISH_HUSH_FADE_MS=400` in `~/.config/iris/voice.env` makes
+  every `/stop` (the ears' barge cut) ramp the next N ms of my line down to silence instead of an instant
+  abort; `GET /stop?fade_ms=N` overrides per call (`0` = hard cut). Only while audio is actually flowing;
+  a backstop hard-stops if no audio comes through to carry the ramp. Reply text: `fading` / `stopping`.
+
+## VR temple turn-taking (2026-10-31, the room's fixes ported; all default OFF, all HOT)
+
+Switches in `scratch/voice_control.json` (no restart once the code is loaded); env vars force them for tests:
+
+- `"vr_turntaking": true` (`IRIS_VR_TURNTAKING`) - host + vr_hear:
+  - **continuation merge:** his next temple line within `IRIS_VR_CONTINUATION_MERGE_S` (20) of his previous
+    one, after he barged my `vr_temple speak` before ANY sentence finished playing, arrives as ONE line
+    (`[continuation - they had NOT finished ...] <before> ... <after>`). Same speaker, barged by him.
+  - **ack while I talk:** a backchannel-only line ("yeah", "okay") said while my temple line was playing is
+    no turn (logged `VR turn-taking: acknowledgement while I talked`), unless my line asked something ("?")
+    within 90 s - then it wakes me tagged `[... treat as their answer]`. vr_hear also stops dropping a short
+    "okay"/"yes" as whisper noise right after my question.
+- `"vr_backchannel": true` (`IRIS_VR_BACKCHANNEL`) - vr_hear: my body plays one cached "mm-hm/yeah/right"
+  (`/tmp/iris_vr_voice/bc_*.wav`, rendered once through `/synth`) when a player within 6 m who has my
+  attention pauses after >= 4 s of voiced speech and smart-turn says they're not done. Off in quiet hours
+  and with `mouth_muted`; never while my own line plays; 6 s apart with new speech between. Speakers:
+  `backchannel_cfg.vr_speakers` (default `["zeke"]`, `"*"` = anyone; other keys as in `iris_backchannel`
+  plus `max_dist_m`, `echo_tail_s`). A short clip that comes back inside my clip's play window (open-speaker
+  echo through someone's mic) is dropped, never their words. Log: `backchannel <who>: played ...`.
+- `"vr_hush_fade_ms": 400` (`IRIS_VR_HUSH_FADE_MS`) - `vr_temple` hush (barge or the action) asks my body to
+  trail off over N ms (bot `hush {fade_ms}`, needs the new bot build; an old bot ignores it = hard cut).
+- `state/vr_temple/my_speech.json` is written by every `vr_temple speak` (spans of what actually played,
+  `heard_n` at a barge) - the shared fact all of the above read.
