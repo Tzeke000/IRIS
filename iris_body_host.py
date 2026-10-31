@@ -615,6 +615,49 @@ def _ev_discord_replay_prefix(msg_id):
     return "[unhandled before my restart] "
 
 
+def _ev_interrupt_stub(reason):
+    """V3 P1-H1 (flag on only): the host is about to interrupt() a WORKING turn (look-up phrase, idle
+    bound) - record where it stood before the turn ends, as a task checkpoint in the event store: which
+    events it held, the last tool and how long ago, the trace. The goal / steps / next action can only
+    come from me, so the stub says so and the next turn is told its task id (task_checkpoint mode=read).
+    Returns the task id or None. Never raises."""
+    if not _ev_on():
+        return None
+    try:
+        owner = _EV.get("owner") or "?"
+        last_ts = float(_INBOX.get("last_tool_ts") or 0.0)
+        cp = {"goal": "", "auto_stub": True, "reason": reason, "turn_owner": owner, "trace": _EV.get("trace"),
+              "events": [e.get("id") for e in (_EV.get("turn_evs") or [])],
+              "last_tool": _INBOX.get("last_tool_name"),
+              "last_tool_age_s": round(time.time() - last_ts, 1) if last_ts else None,
+              "steps_done": [], "files": [], "running_jobs": [], "locks": [],
+              "outstanding": ["the turn was interrupted mid-work - whatever it was doing may not have finished"],
+              "next_safe_action": "check what actually finished before redoing anything; then fill this in "
+                                  "with task_checkpoint(task_id=...) or close it"}
+        r = _ev_store().create_task("interrupted turn " + owner, kind="interrupted_turn",
+                                    parent_event_id=_EV.get("trace") or None, checkpoint=cp, actor="host",
+                                    idempotency_key="interrupt:" + owner + ":" + str(int(time.time() // 60)))
+        if r is None:
+            _ev_err("interrupt stub", _ev_store().last_error)
+            return None
+        _INBOX["interrupt_note"] = r.id
+        _blog("inbox", "interrupt checkpoint stub", {"task": r.id, "reason": reason, "trace": _EV.get("trace")})
+        return r.id
+    except Exception as e:  # noqa: BLE001
+        _ev_err("interrupt stub", e)
+        return None
+
+
+def _ev_interrupt_note_prefix():
+    """One-shot line for the next owner turn after an interrupt stub ('' when none)."""
+    tid = _INBOX.pop("interrupt_note", None)
+    if not tid:
+        return ""
+    return ("[host: my previous WORKING turn was interrupted; where it stood is stub checkpoint " + str(tid)
+            + " (task_checkpoint mode=read task_id=" + str(tid) + "). Answer this first, then resume or "
+            "close that work - check what finished before redoing it.]\n\n")
+
+
 def _ev_age_words(age_s):
     age_s = max(0.0, float(age_s))
     return (str(int(age_s)) + " s") if age_s < 120 else (str(int(age_s // 60)) + " min")
@@ -1889,6 +1932,8 @@ async def _inbox_post_tool_hook(input_data, tool_use_id, context):
     must not break a tool call)."""
     try:
         _INBOX["last_tool_ts"] = time.time()
+        if not (input_data or {}).get("agent_id"):
+            _INBOX["last_tool_name"] = str((input_data or {}).get("tool_name") or "")[:120] or None
         _ev_mark_reply(input_data)   # V3 (flag on only): a reply that went out is recorded, even from a helper
         # 10-30 bug: SDK hooks ALSO fire for sub-agent tool calls (Workflow/Agent helpers), so
         # Zeke's DMs were drained into a helper's context and never reached me. agent_id is
@@ -2111,6 +2156,7 @@ async def lookup_watcher():
                       + "s with no tool boundary - interrupting the working turn.", flush=True)
                 _blog("inbox", "look-up interrupt", _tr({"waited_s": LOOKUP_INTERRUPT_S}))
                 seen_since.clear()
+                _ev_interrupt_stub("look-up phrase waited " + str(int(LOOKUP_INTERRUPT_S)) + " s with no tool boundary")
                 await client.interrupt()
         except Exception as e:  # noqa: BLE001
             print("\n[host] lookup_watcher error (non-fatal): " + repr(e), file=sys.stderr)
@@ -2982,6 +3028,7 @@ async def _await_turn(turn, client, idle_max_s=None, grace_s=None, poll_s=30.0):
             except Exception:
                 pass
             interrupted_at = now
+            _ev_interrupt_stub("no stream message for " + str(int(idle)) + " s (turn idle bound)")
             try:
                 await client.interrupt()
             except Exception as e:  # noqa: BLE001
@@ -3636,6 +3683,8 @@ async def main():
                                   "voice" if (source == "voice" and not _voice_trusted(sender)[0]) else
                                   (source == "vr" and _vr_has_guest(sender)))
                     turn.emotion, turn.intensity = _turn_emotion() if speak_out else (None, 0.5)
+                    if not turn.guest and _INBOX.get("interrupt_note"):
+                        prompt = _ev_interrupt_note_prefix() + prompt   # V3 P1-H1: never into a guest turn
                     # Receipt marker (Zeke 2026-07-08: "i cant tell if youre thinking or
                     # have received from me") - one immediate line so the gap between
                     # his enter-press and my first text is visibly MINE, not dead air.
