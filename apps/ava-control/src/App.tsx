@@ -16,6 +16,7 @@ import OrbCanvas, { setBodyStyle, useBodyStyle } from "./components/OrbCanvas";
 import { listen } from "@tauri-apps/api/event";
 import GuideOverlay from "./guide/GuideOverlay";
 import { useAttentionGaze } from "./guide/useAttentionGaze";
+import { renderVisible, useRenderActivity, useRenderVisible } from "./renderGate";
 
 /** Operator HTTP API aggregate (brain/operator_server.py — started from avaagent.py). */
 type Snapshot = Record<string, unknown>;
@@ -528,7 +529,11 @@ export default function App() {
   const [onboardingStageIndex, setOnboardingStageIndex] = useState(0);
   const [onboardingStageCount, setOnboardingStageCount] = useState(13);
   const PHOTO_STAGES_UI = ["photo_front", "photo_left", "photo_right", "photo_up", "photo_down"];
-  const [liveFrameSrc, setLiveFrameSrc] = useState<string | null>(null);
+  const [liveFrameSrcRaw, setLiveFrameSrc] = useState<string | null>(null);
+  // 11-02: nobody can see the window (minimized / covered) ⇒ drop the MJPEG <img> source. That closes the stream,
+  // so ~19 fps of 1280x720 JPEGs stop being fetched + decoded for a thumbnail no one is looking at.
+  const windowSeen = useRenderVisible();
+  const liveFrameSrc = windowSeen ? liveFrameSrcRaw : null;
   // mem0 memory state — refreshed every 30s while Memory tab is active.
   const [mem0Entries, setMem0Entries] = useState<Array<Record<string, unknown>>>([]);
   const [mem0Searching, setMem0Searching] = useState<boolean>(false);
@@ -959,6 +964,7 @@ export default function App() {
       }
     };
     const fetchFrame = async () => {
+      if (!renderVisible()) { if (active) timeoutId = window.setTimeout(fetchFrame, 500); return; }   // unseen: idle
       try {
         const r = await getJson<{ ok: boolean; b64?: string; age_sec?: number }>("/api/v1/camera/live_frame");
         if (active) {
@@ -1219,7 +1225,7 @@ export default function App() {
 
   useEffect(() => {
     const id = window.setInterval(() => {
-      setCameraTick(Date.now());
+      if (renderVisible()) setCameraTick(Date.now());   // no stills for a window nobody can see
     }, 2000);
     return () => window.clearInterval(id);
   }, []);
@@ -1753,6 +1759,8 @@ export default function App() {
     ttsSpeaking, chatThinking, sttListening,
     deepMode: String(models?.cognitive_mode ?? "").includes("deep"),
   });
+  // Frame budget for the body + guide canvases (renderGate): full rate in conversation / after a mood change.
+  useRenderActivity(String(orbPulseMode), String(primaryEmotion));
   // Live speech text (above the orb) and inner-state line (below the orb).
   // Speech text streams word-by-word from /api/v1/snapshot speech.* fields
   // when Kokoro is playing; falls back to the last assistant message if TTS

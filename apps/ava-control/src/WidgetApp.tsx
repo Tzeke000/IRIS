@@ -17,6 +17,7 @@ import { API_BASE, authHeaders, getJson, postJson, withToken } from "./api";
 import { CUBE_MORPH_ENABLED, deriveOrbEmotion, deriveOrbSleep, deriveOrbState } from "./orbDerive";
 import { PANEL, WIDGET_BASE, ZMAX, useWidgetGuide } from "./guide/WidgetGuide";
 import type { OrbState } from "./components/orbShared";
+import { frameLimiter, onRenderResume, renderVisible, useRenderActivity } from "./renderGate";
 
 
 
@@ -156,6 +157,7 @@ export default function WidgetApp() {
   const { primaryEmotion: emotion, orbVisual, effectiveOrbColor: emotionColor } = deriveOrbEmotion(snap);
   const orbState = deriveOrbState(snap, { online, fallbackPulse: orbVisual.pulse });
   const { sleepProgress, sleepRemainingSeconds, wakeProgress } = deriveOrbSleep(snap);
+  useRenderActivity(String(orbState), String(emotion));
   const ttsAmplitude = getTtsAmplitude(snap);
   const moodEnergy = getEnergy(snap);
 
@@ -197,22 +199,27 @@ export default function WidgetApp() {
   // the thrust trail behind me while I fly (drawn in window coordinates; the particles live in screen px)
   const trailCv = useRef<HTMLCanvasElement | null>(null);
   useEffect(() => {
-    let raf = 0;
-    const loop = () => {
+    let raf = 0, drewLast = true;
+    const due = frameLimiter();
+    const loop = (now: number) => {
+      if (!renderVisible()) { raf = 0; return; }     // hidden / minimized: stop (renderGate resumes us)
       raf = requestAnimationFrame(loop);
       const cv = trailCv.current;
-      if (!cv) return;
+      if (!cv || !due(now)) return;
+      const tr = guide.trail.current;
+      if (!tr.puffs.length && !drewLast) return;      // nothing on the canvas and nothing to draw: skip the clear
       const W = window.innerWidth, H = window.innerHeight, dpr = window.devicePixelRatio || 1;
       if (cv.width !== Math.round(W * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
       const ctx = cv.getContext("2d");
       if (!ctx) return;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, W, H);
-      const tr = guide.trail.current;
-      if (tr.puffs.length) { const w = guide.winRef.current; tr.draw(ctx, emitColorRef.current, { x: w.x, y: w.y }, w.k); }
+      drewLast = tr.puffs.length > 0;
+      if (drewLast) { const w = guide.winRef.current; tr.draw(ctx, emitColorRef.current, { x: w.x, y: w.y }, w.k); }
     };
     raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
+    const offResume = onRenderResume(() => { if (!raf) raf = requestAnimationFrame(loop); });
+    return () => { cancelAnimationFrame(raf); offResume(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   // Panels pop OUT of me (squash-and-stretch entrance with a little overshoot) and shrink back INTO me on exit.
