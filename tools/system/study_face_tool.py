@@ -121,14 +121,43 @@ SEEN_THRESHOLD = 0.45                       # same cosine bar the engine uses fo
 SEEN_MAX_EMB = 12                           # per stranger; keeps the gallery cheap
 
 
-def _embed_frames(g: dict[str, Any], paths: list[str]) -> list[Any]:
-    """ArcFace embeddings of the LARGEST face in each saved frame, via the live
-    InsightFace engine (its own lock). Empty list if the engine is down."""
+def _unknown_faces(g: dict[str, Any], img: Any) -> list[tuple[float, list[int], Any]] | None:
+    """UNKNOWN faces in ONE image via the live InsightFace engine (its own lock):
+    [(area, [x1, y1, x2, y2], embedding)]. None if the engine is down. A burst
+    often has Zeke in it too, and neither the gallery nor the crop may take a
+    known person for the stranger."""
     engine = g.get("_insight_face")
     app = getattr(engine, "_app", None)
     lock = getattr(engine, "_lock", None)
     if app is None:
-        return []
+        return None
+    if lock is not None:
+        with lock:
+            faces = app.get(img)
+    else:
+        faces = app.get(img)
+    match = getattr(engine, "_match", None)
+    out = []
+    for z in faces or []:
+        emb = getattr(z, "embedding", None)
+        if emb is None:
+            continue
+        pid = "unknown"
+        if callable(match):
+            try:
+                pid, _sc = match(emb)
+            except Exception:
+                pid = "unknown"
+        if pid != "unknown":
+            continue
+        x1, y1, x2, y2 = [int(v) for v in z.bbox[:4]]
+        out.append((float((x2 - x1) * (y2 - y1)), [x1, y1, x2, y2], emb))
+    return out
+
+
+def _embed_frames(g: dict[str, Any], paths: list[str]) -> list[Any]:
+    """ArcFace embeddings of the LARGEST unknown face in each saved frame, via the
+    live InsightFace engine. Empty list if the engine is down."""
     try:
         import cv2  # type: ignore
         import numpy as np  # type: ignore
@@ -140,38 +169,41 @@ def _embed_frames(g: dict[str, Any], paths: list[str]) -> list[Any]:
             img = cv2.imread(pth)
             if img is None:
                 continue
-            if lock is not None:
-                with lock:
-                    faces = app.get(img)
-            else:
-                faces = app.get(img)
-            if not faces:
-                continue
-            # Largest UNKNOWN face: a burst often has Zeke in it too, and the
-            # gallery must never learn a known person as a "stranger".
-            match = getattr(engine, "_match", None)
-            cands = []
-            for z in faces:
-                emb = getattr(z, "embedding", None)
-                if emb is None:
-                    continue
-                pid = "unknown"
-                if callable(match):
-                    try:
-                        pid, _sc = match(emb)
-                    except Exception:
-                        pid = "unknown"
-                if pid != "unknown":
-                    continue
-                area = float((z.bbox[2] - z.bbox[0]) * (z.bbox[3] - z.bbox[1]))
-                cands.append((area, emb))
+            cands = _unknown_faces(g, img)
+            if cands is None:
+                return []
             if not cands:
                 continue
-            _area, emb = max(cands, key=lambda t: t[0])
-            out.append(np.asarray(emb, dtype="float32"))
+            out.append(np.asarray(max(cands, key=lambda t: t[0])[2], dtype="float32"))
         except Exception:
             continue
     return out
+
+
+def _crop_source(g: dict[str, Any], cv2: Any, saved: list[str], live_frame: Any,
+                 unknowns_now: list[dict]) -> tuple[Any, list[int] | None, str]:
+    """(frame, bbox, source) — the bbox ALWAYS found in that same frame.
+    (studyface-fix 11-01) The crop used to take the live frame with the bbox of
+    the face at the START of the study whenever the latest results had no
+    unknown in them — by then the servo had panned onto the person, so the old
+    box landed on the wall. Order: the newest saved burst frame the engine finds
+    an unknown face in (the burst only saves frames with a face); else the live
+    frame with the CURRENT results; else no crop."""
+    try:
+        for pth in reversed(saved):
+            img = cv2.imread(pth)
+            if img is None:
+                continue
+            cands = _unknown_faces(g, img)
+            if cands is None:
+                break                                   # engine down: no detector for saved frames
+            if cands:
+                return img, max(cands, key=lambda t: t[0])[1], "saved frame " + Path(pth).name
+    except Exception:  # noqa: BLE001
+        pass
+    if live_frame is not None and unknowns_now:
+        return live_frame, _face_summary(max(unknowns_now, key=lambda f: _face_summary(f)["face_px"]))["bbox"], "live frame + current face results"
+    return live_frame, None, "no unknown face in a saved frame or in the current results"
 
 
 def _gallery_load() -> list[dict[str, Any]]:
@@ -341,14 +373,16 @@ def _study_start(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     crop_info: dict[str, Any] = {"ok": False, "reason": "no live frame"}
     sheet_info: dict[str, Any] = {"ok": False}
     live = frame_store.get_buffered_frame(max_age_sec=3.0)
-    frame = live.frame
-    if frame is None and saved:
+    frame, bbox, source = _crop_source(g, cv2, saved, live.frame, unknowns_now)
+    crop_info["source"] = source
+    if frame is None and saved:                      # sheet only: no box belongs to this frame
         frame = cv2.imread(saved[-1])
-        crop_info["reason"] = "live frame stale — used last saved frame"
+        source = "live frame stale — sheet from the last saved frame, no crop"
     if frame is not None:
         h, w = frame.shape[:2]
-        target = max(unknowns_now or unknowns, key=lambda f: _face_summary(f)["face_px"])
-        x1, y1, x2, y2 = _face_summary(target)["bbox"]
+        x1, y1, x2, y2 = bbox or [0, 0, 0, 0]
+        if bbox is None:
+            crop_info["reason"] = source
         if x2 > x1 and y2 > y1:
             mx, my = int((x2 - x1) * 0.45), int((y2 - y1) * 0.6)
             cx1, cy1 = max(0, x1 - mx), max(0, y1 - my)
@@ -357,6 +391,7 @@ def _study_start(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
             crop_info = _write_small_jpeg(cv2, crop, out_dir / "crop.jpg",
                                           max_w=600, max_bytes=120_000)
             crop_info["bbox_used"] = [cx1, cy1, cx2, cy2]
+            crop_info["source"] = source
         # sheet: full frame (downscaled) with the crop inset top-left.
         try:
             sheet = frame.copy()
@@ -368,8 +403,9 @@ def _study_start(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
                     ins = cv2.resize(ins, (iw, ih), interpolation=cv2.INTER_AREA)
                     sheet[8:8 + ih, 8:8 + iw] = ins
                     cv2.rectangle(sheet, (8, 8), (8 + iw, 8 + ih), (0, 220, 0), 2)
-            for f in faces_now:
-                fx1, fy1, fx2, fy2 = _face_summary(f)["bbox"]
+            # boxes only where they belong to THIS frame (the current results describe the live one)
+            boxes = [_face_summary(f)["bbox"] for f in faces_now] if source.startswith("live frame +") else ([bbox] if bbox else [])
+            for fx1, fy1, fx2, fy2 in boxes:
                 cv2.rectangle(sheet, (fx1, fy1), (fx2, fy2), (0, 165, 255), 2)
             sheet_info = _write_small_jpeg(cv2, sheet, out_dir / "sheet.jpg")
         except Exception as e:  # noqa: BLE001
