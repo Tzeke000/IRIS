@@ -484,6 +484,11 @@ def _next_pending_chat() -> dict | None:
         # HTTP timeout gives proper slack.
         if (_t.time() - ts) > 600.0:
             continue
+        try:   # 2026-11-01: past the request's own deadline nobody is waiting (mirrors the LLM scan)
+            if data.get("deadline_ts") and _t.time() > float(data["deadline_ts"]):
+                continue
+        except Exception:
+            pass
         candidates.append((ts, data))
     if not candidates:
         return None

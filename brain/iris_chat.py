@@ -9,7 +9,7 @@ calls chat_reply(id, text) which writes the response file; the orb's
 long-poll picks it up.
 
 Files:
-  state/iris_chat/<id>.json   per-request, status=pending|answered|expired
+  state/iris_chat/<id>.json   per-request, status=pending|answered|expired|abandoned
   state/iris_chat/.pending    flag file: exists iff at least one pending
                               request. Cheap for the Stop hook to test.
 
@@ -115,6 +115,28 @@ _BASE: Path | None = None
 _DIR_NAME = "state/iris_chat"
 _FLAG_NAME = ".pending"
 _REQUEST_TTL_S = 600.0  # requests older than this are considered abandoned (10x HTTP timeout)
+# 2026-11-01 (docaudit item, mirrors brain/iris_llm): each request carries `deadline_ts` - the
+# moment nobody is waiting any more. Default = ts + _REQUEST_TTL_S, i.e. exactly the old flat TTL;
+# a caller whose waiter is the ONLY consumer passes deadline_s= (and abandon_on_timeout=True to
+# wait_for_reply) so a dead waiter's request is marked "abandoned" instead of lingering 600 s.
+# A deadline can only SHORTEN a request's life: the flat TTL stays the hard cap (the Stop hook
+# checks both). Files written before this change have no deadline_ts -> the flat TTL alone.
+
+
+def _past_deadline(data: dict) -> bool:
+    now = time.time()
+    try:
+        if (now - float(data.get("ts") or 0.0)) > _REQUEST_TTL_S:
+            return True
+    except Exception:
+        return True
+    dl = data.get("deadline_ts")
+    if dl:
+        try:
+            return now > float(dl)
+        except Exception:
+            pass
+    return False
 
 
 def configure(base_dir: Path | str) -> None:
@@ -168,8 +190,7 @@ def _refresh_flag_locked() -> None:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, dict) and data.get("status") == "pending":
-                ts = float(data.get("ts") or 0.0)
-                if (time.time() - ts) <= _REQUEST_TTL_S:
+                if not _past_deadline(data):
                     has_pending = True
                     break
         except Exception:
@@ -190,17 +211,21 @@ def has_pending() -> bool:
 
 
 def submit(user_text: str, source: str = "orb", trusted: bool = True,
-           sender: Optional[str] = None, note: Optional[str] = None) -> str:
+           sender: Optional[str] = None, note: Optional[str] = None,
+           deadline_s: Optional[float] = None) -> str:
     """Write a new pending request, return request_id.
 
     10-29 (code review, security): `source`/`trusted`/`sender` are STRUCTURED fields. Untrusted senders
     (e.g. a Discord DM relayed from someone who isn't Zeke) get their own wrapper + a talk-only turn in
     the host, and the Stop hook leaves them to the host - their text can no longer pose as Zeke's.
-    `note` = trusted delivery instructions written by OUR code (never the sender's words)."""
+    `note` = trusted delivery instructions written by OUR code (never the sender's words).
+    `deadline_s` = how long anyone will wait for the reply (default: the flat _REQUEST_TTL_S)."""
     request_id = uuid.uuid4().hex[:12]
+    _now = time.time()
     entry = {
         "id": request_id,
-        "ts": time.time(),
+        "ts": _now,
+        "deadline_ts": _now + float(deadline_s if deadline_s else _REQUEST_TTL_S),
         "user_text": str(user_text or "")[:8000],
         "source": str(source or "orb"),
         "trusted": bool(trusted),
@@ -300,9 +325,9 @@ def list_pending() -> list[dict[str, Any]]:
         if data.get("status") != "pending":
             continue
         ts = float(data.get("ts") or 0.0)
-        if (time.time() - ts) > _REQUEST_TTL_S:
+        if _past_deadline(data):
             # mark as expired so we don't keep trying (compare-and-set: an answer wins)
-            _set_status_if_pending(path, "expired", "ttl")
+            _set_status_if_pending(path, "expired", "deadline" if data.get("deadline_ts") else "ttl")
             continue
         candidates.append((ts, data))
     candidates.sort(key=lambda kv: kv[0])
@@ -354,13 +379,20 @@ def mark_answered(request_id: str, reply: str) -> bool:
     return True
 
 
-def wait_for_reply(request_id: str, timeout_s: float = 60.0) -> Optional[str]:
+def wait_for_reply(request_id: str, timeout_s: float = 60.0,
+                   abandon_on_timeout: bool = False) -> Optional[str]:
     """Block up to timeout_s for the request to flip to answered. Returns
     the reply string on success, None on timeout or expired.
 
     Phase 41: also returns None immediately if the request status flips
     to expired (e.g. iris_runtime down, or stale-cleanup ran). Avoids
     the waiter blocking the full timeout when the answer will never come.
+
+    2026-11-01: "abandoned" is terminal too. abandon_on_timeout=True (for callers whose waiter is
+    the only consumer of the reply) flips a still-pending request to "abandoned" on give-up, as
+    brain/iris_llm does, so the Stop hook / host never spend a turn answering nobody. Default
+    False: the orb's 60 s long-poll ends long before I may answer, and that late reply still
+    reaches him through the transcript - so an orb chat must stay pending until its deadline.
     """
     deadline = time.time() + max(0.5, float(timeout_s))
     path = _request_path(request_id)
@@ -381,10 +413,21 @@ def wait_for_reply(request_id: str, timeout_s: float = 60.0) -> Optional[str]:
                 status = data.get("status")
                 if status == "answered":
                     return str(data.get("reply") or "")
-                if status == "expired":
+                if status in ("expired", "abandoned"):
                     return None
         time.sleep(0.2)
+    if abandon_on_timeout:
+        abandon(request_id, "waiter timed out")
     return None
+
+
+def abandon(request_id: str, reason: Optional[str] = None) -> bool:
+    """The waiter gave up: pending -> abandoned (compare-and-set; an answer that already landed
+    wins). Refreshes the flag. True iff this call flipped it."""
+    try:
+        return _set_status_if_pending(_request_path(str(request_id)), "abandoned", reason)
+    except Exception:
+        return False
 
 
 def get(request_id: str) -> Optional[dict[str, Any]]:
