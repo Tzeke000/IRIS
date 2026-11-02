@@ -1,0 +1,42 @@
+# ~/.config/systemd/user/iris-stream-asr.service - streaming-ASR sidecar for my ears (Nemotron Speech
+# Streaming 0.6B, cache-aware RNN-T, fp32, 160 ms chunks) on the V100. 2026-11-02.
+# The ears daemon (iris-ears) talks to it over a localhost-only UNIX socket in $XDG_RUNTIME_DIR
+# (iris-stream-asr.sock, mode 0600) when scratch/voice_control.json has "stream_asr": "on"; with the
+# flag off - or this unit down/hung - the ears run on whisper exactly as before.
+# Its own NeMo venv (never iris-v100): /data/asr_bench/venv (torch 2.10 cu126 + nemo_toolkit 3.0.0),
+# model cached in /data/asr_bench/hf (HF_HUB_OFFLINE=1: never downloads at start).
+# NOT installed by anything. Install:
+#   cp scripts/server/iris-stream-asr.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+#   systemctl --user enable --now iris-stream-asr
+#   journalctl --user -u iris-stream-asr -f        # "listening on ..." = loaded + warm (~1 min)
+# ~3 GB VRAM, ~0.35 CPU-s per second of speech, ~0 when idle (blocked on accept/queue).
+[Unit]
+Description=Iris ears streaming ASR sidecar (Nemotron streaming RNN-T on the V100, unix socket)
+After=network-online.target
+StartLimitIntervalSec=900
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/IRIS
+Environment=PATH=/data/asr_bench/venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HF_HOME=/data/asr_bench/hf
+Environment=HF_HUB_OFFLINE=1
+Environment=PYTHONUNBUFFERED=1
+Environment=OMP_NUM_THREADS=2
+Environment=MKL_NUM_THREADS=2
+Environment=TOKENIZERS_PARALLELISM=false
+# 1 = 160 ms chunks (bench sweet spot); 6 = 560 ms (more robust on hard audio, ~0.2 s later words)
+Environment=IRIS_STREAM_ASR_RC=1
+ExecStart=/data/asr_bench/venv/bin/python %h/IRIS/voice/iris_stream_asr_server.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+# below the ears (nice 0) for CPU, never allowed to grow without bound
+Nice=5
+MemoryMax=6G
+MemoryHigh=5G
+OOMScoreAdjust=300
+
+[Install]
+WantedBy=default.target
