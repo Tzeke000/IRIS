@@ -6,7 +6,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "voice"))
 import iris_duplex_watch as W  # noqa: E402
-from iris_interrupt_tiers import Observation, OverlapClassifier, Tier  # noqa: E402
+from iris_interrupt_tiers import Observation, OverlapClassifier, Tier, TierConfig  # noqa: E402
 
 LOUD = np.full(512, 0.1, np.float32)       # -20 dBFS
 FAINT = np.full(512, 0.005, np.float32)    # -46 dBFS
@@ -35,17 +35,26 @@ def test_no_episode_returns_none_when_mouth_finishes():
     assert audio is None and clf is None and a.calls == []
 
 
-def test_faint_voiced_never_starts_an_episode():
+def test_faint_voiced_is_kept_but_never_drives_the_mouth():
+    # 11-02 (Zeke, a cold): VAD-voiced audio under the rms floor used to be thrown away. Now the
+    # floor only decides INTERRUPT: the episode is kept (fizzled) and nothing ducks or pauses.
     a = acts()
     st = {}
     n = [0]
-    audio, clf = W.tiered_accumulate(frames([(60, FAINT, 0.9)]), lambda: (n.__setitem__(0, n[0] + 1) or n[0] < 60),
-                                     a, min_rms=0.02, stats=st)
-    assert audio is None and st["faint_voiced"] >= 50 and a.calls == []
+    cfg = TierConfig(min_rms_dbfs=-34.0)
+    audio, clf = W.tiered_accumulate(frames([(20, FAINT, 0.9), (30, QUIET, 0.0)]),
+                                     lambda: (n.__setitem__(0, n[0] + 1) or n[0] < 60),
+                                     a, cfg=cfg, min_rms=0.02, stats=st)
+    assert audio is not None and clf.fizzled and st["faint_voiced"] >= 4
+    assert "duck" not in a.calls and "pause" not in a.calls
+    d = clf.update(Observation(text="No.", final=True, speaker="owner"))
+    assert d.tier == Tier.DEFER and d.enqueue and not d.interrupt_turn
+    assert W.final_marker(d) == "[barge-defer]"
 
 
-def test_short_blip_fizzles_and_watch_continues():
-    # 5 voiced chunks (160 ms) then silence: episode starts (>=120 ms) but never reaches DUCK (200 ms)
+def test_short_blip_fizzles_and_is_kept_for_a_deferred_turn():
+    # 5 voiced chunks (160 ms) then silence: episode starts (>=120 ms) but never reaches DUCK
+    # (200 ms). It used to be reset + dropped; now it comes back for a transcript.
     a = acts()
     st = {}
     spec = [(5, LOUD, 0.9), (25, QUIET, 0.0), (30, QUIET, 0.0)]
@@ -55,7 +64,32 @@ def test_short_blip_fizzles_and_watch_continues():
         n[0] += 1
         return n[0] < 55
     audio, clf = W.tiered_accumulate(frames(spec), speaking, a, stats=st)
-    assert audio is None and st.get("fizzled") == 1 and "pause" not in a.calls
+    assert audio is not None and clf.fizzled and st.get("fizzled") == 1 and "pause" not in a.calls
+    d = clf.update(Observation(text="Yeah, no.", final=True))
+    assert d.tier == Tier.DEFER and W.final_marker(d) == "[barge-defer]"
+
+
+def test_fizzled_noise_with_no_words_is_not_a_turn():
+    a = acts()
+    audio, clf = W.tiered_accumulate(frames([(5, LOUD, 0.9), (25, QUIET, 0.0)]), lambda: True, a)
+    d = clf.update(Observation(text="", final=True))
+    assert d.tier == Tier.NONE and W.final_marker(d) == "[bargein_watch] no_turn"
+
+
+def test_mouth_finishing_mid_episode_does_not_drop_his_words():
+    # 11-02 11:54 "No." -> 'NONE: episode closed': the window closed while he spoke under the floor
+    a = acts()
+    n = [0]
+
+    def speaking():
+        n[0] += 1
+        return n[0] < 10           # my line ends 1 chunk into his episode
+    cfg = TierConfig(min_rms_dbfs=-34.0)
+    audio, clf = W.tiered_accumulate(frames([(4, QUIET, 0.0), (12, FAINT, 0.9), (25, QUIET, 0.0)]),
+                                     speaking, a, cfg=cfg)
+    assert audio is not None and not clf.done
+    d = clf.update(Observation(text="No.", final=True, speaker="owner"))
+    assert d.tier == Tier.DEFER and d.enqueue
 
 
 def test_long_speech_ducks_then_pauses_then_barges_and_returns_audio():
@@ -179,3 +213,45 @@ def test_ducker_stereo_blocks():
     d.set(-6, now=0.0)
     y = d.apply(np.ones((4410, 2), np.float32), now=0.0)
     assert y.shape == (4410, 2) and abs(y[-1, 0] - 10 ** (-6 / 20)) < 1e-3
+
+
+# ------------------------------------------------------------------ answers vs backchannels (11-02)
+
+def _final(text, question, ms=450, level=-18.0):
+    c = OverlapClassifier(question=question)
+    c.update(Observation(voiced_ms=ms, level_dbfs=level))
+    return c.update(Observation(text=text, final=True, speaker="owner"))
+
+
+def test_no_after_my_question_is_a_turn_not_a_cut():
+    d = _final("No.", True)
+    assert d.tier == Tier.DEFER and d.enqueue and not d.interrupt_turn and not d.fenced
+
+
+def test_yes_after_my_question_is_a_turn_not_an_ack():
+    for t in ("Yes.", "Yeah.", "Yep", "Okay.", "Correct.", "Maybe.", "It is.", "It's not.", "Nope."):
+        d = _final(t, True)
+        assert d.tier == Tier.DEFER and d.enqueue, t
+
+
+def test_mm_hm_mid_sentence_is_still_an_ack():
+    for t in ("Mm-hm.", "Uh-huh.", "Right.", "Okay."):
+        d = _final(t, False)
+        assert d.tier == Tier.ACK and not d.enqueue, t
+
+
+def test_hesitation_after_question_stays_an_ack():
+    assert _final("Uh...", True).tier == Tier.ACK
+
+
+def test_explicit_stop_after_question_still_barges():
+    d = _final("No, stop.", True)
+    assert d.tier == Tier.BARGE and d.interrupt_turn
+
+
+def test_self_voice_still_dropped_when_kept():
+    a = acts()
+    audio, clf = W.tiered_accumulate(frames([(5, LOUD, 0.9), (25, QUIET, 0.0)]), lambda: True, a)
+    clf.question = True
+    d = clf.update(Observation(text="Is it bigger than a breadbox?", final=True, speaker="self"))
+    assert d.tier == Tier.NONE and not d.enqueue and W.final_marker(d) == "[bargein_watch] no_turn"

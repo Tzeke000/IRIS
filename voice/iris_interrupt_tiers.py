@@ -37,6 +37,15 @@ Priority rules (in order):
   8. duration ladder: >= duck_ms DUCK, >= pause_ms PAUSE, >= barge_ms or a final with >=
      barge_words real words -> BARGE
 
+Keep rules (Zeke 11-02, "you should ALWAYS be listening no matter what if my mic is unmuted"; he had
+a cold, his voice sat under the floor, and "No." / "No, no hints" were transcribed then thrown away):
+  - the level floor decides whether to INTERRUPT, never whether to KEEP. An episode that never got
+    loud enough, or fizzled before escalating, still resolves on its final transcript - a would-be
+    BARGE becomes DEFER (his words are a turn, my reply is not cut).
+  - the mouth going idle mid-episode does not close it (that dropped his answer as I finished).
+  - question=True (my current/just-finished line asked something): a backchannel-shaped reply
+    ("yes", "yeah", "okay") is his ANSWER -> DEFER as a turn, not ACK. Hesitations stay ACK.
+
 Everything tunable lives in TierConfig so the daemon can hot-read voice_control.json.
 """
 from __future__ import annotations
@@ -120,6 +129,15 @@ def addressed(text: str) -> bool:
     return _strip_name(t)[1] or any(re.search(r"\b" + n + r"\b", t) for n in WAKE_NAMES)
 
 
+# Pure hesitation: never an answer, even right after I asked something ("Oh." / "Um.").
+HESITATION = {"uh", "um", "umm", "er", "erm", "hmm", "hm", "oh", "ah", "ahh", "huh", "mm"}
+
+
+def is_hesitation(text: str) -> bool:
+    toks = norm(text).split()
+    return bool(toks) and all(w in HESITATION for w in toks)
+
+
 def real_words(text: str) -> int:
     """Words that are not fillers/backchannel tokens."""
     return sum(1 for w in norm(text).split() if w not in BACKCHANNEL)
@@ -193,6 +211,13 @@ class OverlapClassifier:
     residual_dbfs: "float | None" = None
     history: list = field(default_factory=list)
     done: bool = False
+    question: bool = False                 # my current/just-finished line ended with a question
+    fizzled: bool = False                  # set by the watch: the episode ended without escalating
+    mouth_seen: bool = False               # the mouth was speaking at some point in this episode
+    loud_seen: bool = False                # the level gate passed at least once before the final
+
+    def __post_init__(self):
+        self.mouth_seen = bool(self.mouth_speaking)
 
     # ---------------------------------------------------------------- helpers
     def _loud_enough(self) -> bool:
@@ -226,6 +251,30 @@ class OverlapClassifier:
     def update(self, obs: Observation) -> Decision:
         if self.done:
             return Decision(tier=self.tier, reason="episode closed", provisional=False)
+        d = self._update(obs)
+        if not d.provisional:
+            d = self._keep_rules(d)
+        return d
+
+    def _keep_rules(self, d: Decision) -> Decision:
+        """Final-decision rewrites: the floor never decides KEEP, and an answer is not an ack."""
+        loud = self.loud_seen or self._loud_enough()      # ever over the floor, onset or final
+        if d.tier == Tier.BARGE and (self.fizzled or not loud) \
+                and not d.reason.startswith("explicit stop"):
+            return self._decide(Tier.DEFER, "kept, below the barge floor (" + d.reason + ")",
+                                final=True, resume=d.resume)
+        if d.tier == Tier.BARGE and self.question and d.reason.startswith("short interjection"):
+            # "No." / "Nope." / "It is." over my question: an answer - a turn, not a cut
+            return self._decide(Tier.DEFER, "answer to my question (" + d.reason + ")",
+                                final=True, resume=d.resume)
+        if d.tier == Tier.ACK and self.question and self.text and not is_hesitation(self.text):
+            return self._decide(Tier.DEFER, "answer to my question (" + d.reason + ")",
+                                final=True, resume=d.resume)
+        return d
+
+    def _update(self, obs: Observation) -> Decision:
+        if self.mouth_speaking:
+            self.mouth_seen = True
         if obs.voiced_ms is not None:
             self.voiced_ms = max(self.voiced_ms, float(obs.voiced_ms))
         if obs.text is not None:
@@ -240,9 +289,13 @@ class OverlapClassifier:
         final = bool(obs.final or obs.ended)
         was_holding = self.tier in (Tier.DUCK, Tier.PAUSE, Tier.DEFER)
 
-        # 0. mouth idle: overlap logic doesn't apply - the normal listen path owns the turn
-        if not self.mouth_speaking and self.tier == Tier.NONE:
+        # 0. mouth idle: overlap logic doesn't apply - the normal listen path owns the turn. Only
+        # when the mouth never spoke in this episode: once the watch owns his audio, finishing my
+        # line must not close the episode (11-02: his "No." was dropped exactly like that).
+        if not self.mouth_speaking and not self.mouth_seen and self.tier == Tier.NONE:
             return self._decide(Tier.NONE, "mouth idle", final=True)
+        if not final and self.voiced_ms >= c.onset_ms and self._loud_enough():
+            self.loud_seen = True
 
         # 1. my own voice
         if self.speaker == "self":

@@ -18,9 +18,9 @@ from collections import deque
 import numpy as np
 
 try:
-    from iris_interrupt_tiers import Observation, OverlapClassifier, Tier, TierConfig
+    from iris_interrupt_tiers import Decision, Observation, OverlapClassifier, Tier, TierConfig
 except Exception:  # noqa: BLE001
-    from .iris_interrupt_tiers import Observation, OverlapClassifier, Tier, TierConfig  # type: ignore
+    from .iris_interrupt_tiers import Decision, Observation, OverlapClassifier, Tier, TierConfig  # type: ignore
 
 CHUNK_MS = 32.0                 # one Silero chunk (512 samples @ 16 kHz)
 DUCK_REFRESH_S = 1.0            # the mouth's duck has a TTL; refresh while still ducked
@@ -99,9 +99,14 @@ def tiered_accumulate(frame_prob_iter, is_speaking, actions: MouthActions, *,
     residual_fn() -> predicted echo residual dBFS or None. text_fn() -> latest live partial or None.
     on_episode(clf) is called once when an episode starts (the caller creates its LiveWords there).
 
-    Returns (audio | None, classifier | None). audio is None when nothing needs a transcript: no
-    episode, or an episode resolved to NONE before end-of-speech (noise/too faint/too short) - in
-    that case the watch simply continues (episodes that fizzle never end the window)."""
+    Returns (audio | None, classifier | None). audio is None only when there was no episode.
+
+    KEEP, don't drop (Zeke 11-02, a cold: his words sat under the floor and were thrown away):
+    an episode starts on VAD alone - min_rms no longer gates the onset, it only feeds the
+    faint_voiced stat; whether a quiet episode may duck/pause/cut is the classifier's level gate
+    (TierConfig.min_rms_dbfs). An episode that ends without escalating past NONE (fizzled) is
+    returned with clf.fizzled = True, the mouth settled back to normal and the classifier still
+    open, so the caller transcribes it and delivers it as a deferred turn (never interrupting)."""
     cfg = cfg or TierConfig()
     onset_chunks = max(1, int(round(cfg.onset_ms / CHUNK_MS)))
     preroll = deque(maxlen=max(preroll_chunks, onset_chunks))
@@ -126,8 +131,7 @@ def tiered_accumulate(frame_prob_iter, is_speaking, actions: MouthActions, *,
             preroll.append(f)
             v = prob >= threshold
             if v and min_rms > 0.0 and float(np.sqrt(np.mean(f * f))) < min_rms:
-                v = False
-                if stats is not None:
+                if stats is not None:      # counted, NOT dropped: the floor only gates interrupting
                     stats["faint_voiced"] = stats.get("faint_voiced", 0) + 1
             run = run + 1 if v else 0
             if run >= onset_chunks:
@@ -164,20 +168,21 @@ def tiered_accumulate(frame_prob_iter, is_speaking, actions: MouthActions, *,
                                    level_dbfs=float(np.mean(voiced_lvls[-30:])) if voiced_lvls else None,
                                    residual_dbfs=residual_fn() if residual_fn else None,
                                    text=txt or None))
-        actions.apply(d)
+        if clf.mouth_speaking or d.resume or actions.state != "normal":
+            actions.apply(d)          # my line ended mid-episode: keep listening, never cut air
         if clf.done:
             # decided before end-of-speech (explicit stop / addressed / taking the floor): keep
             # capturing his words to the end, the decision itself stands
             pass
         if silence >= end_silence_chunks or len(collected) >= max_chunks:
             if clf.tier == Tier.NONE and not clf.done:
-                # fizzled: never escalated past NONE - not worth a transcript; reset and keep watching
-                d = clf.update(Observation(ended=True))
-                actions.settle(d)
+                # fizzled: never escalated past NONE (too quiet / too short to interrupt). It was
+                # still VAD-voiced, so it is KEPT: mouth back to normal, the classifier left open
+                # for the final transcript, which can only defer (clf.fizzled), never cut me.
+                clf.fizzled = True
+                actions.settle(Decision(tier=Tier.NONE, reason="fizzled"))
                 if stats is not None:
                     stats["fizzled"] = stats.get("fizzled", 0) + 1
-                clf, collected, voiced_lvls, run, preroll = None, [], [], 0, deque(maxlen=preroll.maxlen)
-                continue
             return np.concatenate(collected), clf
     if clf is not None and collected:
         return np.concatenate(collected), clf

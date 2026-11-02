@@ -2301,6 +2301,15 @@ def _mouth_duck(ctx, db: float, ttl_s: float = 3.0) -> None:
         pass
 
 
+def _line_asked_question(ctx) -> bool:
+    """My current or just-finished line ends with a question (the playback cursor of this hold
+    window). A yes/no said over it is his answer, not a backchannel."""
+    for t in (getattr(ctx, "now_playing", None), *(list(getattr(ctx, "played_chunks", None) or [])[-1:])):
+        if isinstance(t, str) and t.rstrip().rstrip('"\')').endswith("?"):
+            return True
+    return False
+
+
 def _cmd_bargein_watch_tiered(ctx, args: dict, live=None):
     """Tiered barge-in watch (full-duplex, 10-31): ack / duck / pause / barge / defer.
 
@@ -2309,7 +2318,10 @@ def _cmd_bargein_watch_tiered(ctx, args: dict, live=None):
       '[barge-in] <marker> <words>'      he took the floor - host interrupts my turn (as before)
       '[barge-defer] <marker> <words>'   his words are a turn, but my turn is NOT interrupted
                                          (unverified speaker / critical line)
-      '[bargein_watch] ack: <words>'     a backchannel - I kept talking, no turn
+      '[bargein_watch] ack: <words>'     a backchannel - I kept talking, no turn (structured: +speaker)
+    11-02 keep rules: a quiet or fizzled episode is still transcribed and comes back as
+    '[barge-defer]' (never a cut); args {"question": true} (or my playing line ending in '?')
+    turns a "yes"/"okay" into '[barge-defer]' instead of an ack.
       '[bargein_watch] no_barge' / 'self_voice_dropped' / 'interrupted (unclear)' - as before
     Only reached when the host sent {"tiers": true}, so an old host never sees the new prefixes."""
     with ctx.vad_lock:
@@ -2337,6 +2349,10 @@ def _cmd_bargein_watch_tiered(ctx, args: dict, live=None):
     except Exception:
         self_drop_bar = 0.5
     cfg = _TierConfig.from_control(_ctl)
+    if "tier_min_rms_dbfs" not in _ctl and min_rms > 0:
+        # ONE floor (11-02): the classifier's own -34 dBFS default ignored a hot-lowered
+        # bargein_min_rms, so lowering it to 0.008 for his cold changed nothing in the tiers.
+        cfg.min_rms_dbfs = 20.0 * float(np.log10(min_rms))
     owners = tuple(n.strip().lower() for n in os.environ.get("IRIS_VOICE_OWNER_NAMES", "zeke").split(",") if n.strip())
     try:
         model.reset_states()
@@ -2394,15 +2410,22 @@ def _cmd_bargein_watch_tiered(ctx, args: dict, live=None):
         return "[bargein_watch] no_barge"
     if live is not None:
         live.stop()
+    if clf.fizzled and is_muted():
+        # kept-but-quiet audio: the orb mute landed while he spoke -> his words are not for me
+        return "[bargein_watch] no_barge"
     try:
         with _WHISPER_LOCK:
             heard = (wl._transcribe_array(audio) or "").strip()
     except Exception as e:
         actions.settle(clf.update(_duplex.Observation(text="", final=True)))
         return f"[bargein_watch] interrupted, transcription error: {e!r}"
+    if heard and clf.fizzled and _is_phantom(heard, audio):
+        _log(f"phantom discarded (kept episode, {heard!r})")
+        heard = ""
     _svs = _self_voice_score(audio, self_drop_bar) if heard else None
     verdict = _voice_id_verdict(audio) if heard and _svs is None else None
     spk = _duplex.speaker_class(verdict, _svs is not None, owners)
+    clf.question = bool(args.get("question")) or _line_asked_question(ctx)
     d = clf.update(_duplex.Observation(text=heard, final=True, speaker=spk))
     was_paused = actions.state == "paused"
     actions.settle(d)
@@ -2415,14 +2438,24 @@ def _cmd_bargein_watch_tiered(ctx, args: dict, live=None):
     if _svs is not None:
         return f"[bargein_watch] self_voice_dropped (iris {_svs:.2f})"
     if not heard:
+        if clf.fizzled:
+            return "[bargein_watch] no_barge"     # kept audio held no words: noise, not a cut-in
         return "[bargein_watch] interrupted (unclear)"
     prefix = _duplex.final_marker(d)
+    if prefix == "[bargein_watch] no_turn":
+        # Real words, not my voice, yet no turn: never drop them (Zeke 11-02). Hand them over.
+        _log(f"no_turn with words -> deferred ({d.reason})")
+        prefix = "[barge-defer]"
     if prefix.startswith("[bargein_watch]"):
-        return f"{prefix}: {heard}" if d.tier.name == "ACK" else prefix
+        return _with_speaker(f"{prefix}: {heard}", verdict, args) if d.tier.name == "ACK" else prefix
     if live is not None:
         live.final_text = heard
     if prefix == "[barge-in]":
         marker = _barge_cut_marker(ctx)
+    elif d.reason.startswith("answer to my question"):
+        marker = "[said while I was still talking, right after I asked a question - treat as his answer]"
+    elif d.reason.startswith("kept,") or clf.fizzled:
+        marker = "[said quietly while I was talking; my reply kept playing]"
     elif was_paused and actions.state == "normal":
         marker = "[talked over me; I paused, then resumed my reply]"
     elif was_paused:
@@ -2973,7 +3006,7 @@ def cmd_backend(ctx, args: dict) -> str:
 def reload_helpers() -> list:
     """Hot-reload the helper modules so voice fixes take effect without a full relaunch.
 
-    Reloads: wren_prosody, wren_smartturn, wren_pace (each guarded in try/except).
+    Reloads: wren_prosody, wren_smartturn, wren_pace, the duplex tiers (each guarded in try/except).
     Does NOT reload wren_listen — that would reset the warm whisper singleton and
     force a re-load on the next call.
 
@@ -2987,6 +3020,17 @@ def reload_helpers() -> list:
             reloaded.append("wren_prosody")
         except Exception as e:
             print(f"[reload_helpers] wren_prosody reload failed: {e!r}", file=sys.stderr)
+
+    if _HAVE_DUPLEX:
+        try:   # tiers first: the watch imports Decision/OverlapClassifier from it at load
+            global _TierConfig
+            import iris_interrupt_tiers as _tiers_mod
+            importlib.reload(_tiers_mod)
+            importlib.reload(_duplex)
+            _TierConfig = _tiers_mod.TierConfig
+            reloaded += ["iris_interrupt_tiers", "iris_duplex_watch"]
+        except Exception as e:
+            print(f"[reload_helpers] duplex tiers reload failed: {e!r}", file=sys.stderr)
 
     if _HAVE_LIVE:
         try:

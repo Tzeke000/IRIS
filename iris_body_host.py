@@ -1515,6 +1515,8 @@ def _daemon_bargein_watch_once():
     _args = {"structured": True}
     if DUPLEX_TIERS:
         _args["tiers"] = True
+        if _asked_a_question_recently():
+            _args["question"] = True     # a "yes"/"no" over my line is his answer (daemon, 11-02)
     raw = daemon_cmd("bargein_watch", _args, timeout=BARGEIN_WATCH_TIMEOUT_S)
     try:
         resp = json.loads(raw)
@@ -1533,8 +1535,10 @@ def _daemon_bargein_watch_once():
     # Only a real interruption starts with '[barge-in]'; '[bargein_watch] ...' markers
     # (no_barge / vad_not_warm / no_hold / errors) are normal window-closures.
     if result.startswith("[barge-in]"):
+        _RECENT_SPOKEN.clear()   # he has the floor: my earlier question is answered/moot
         return result, meta
     if DUPLEX_TIERS and result.startswith("[barge-defer]"):
+        _RECENT_SPOKEN.clear()
         return result, meta      # his words are a turn; voice_reader does NOT interrupt mine
     if result.startswith("[bargein_watch] ack:"):
         _ack = result[len("[bargein_watch] ack:"):].strip()
