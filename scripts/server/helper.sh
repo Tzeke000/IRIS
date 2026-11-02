@@ -12,6 +12,7 @@
 # it stays OPEN (pending verification) until I check the work and close it with evidence.
 #
 # usage: helper.sh NAME PROMPT_FILE [--mem 8G] [--timeout 7200] [--cwd DIR] [--model M]
+#   LOCKED DOWN by default (11-02, V3 spec §6/§13): no sudo, no secrets, no ssh keys; --trusted-ssh keeps ~/.ssh only.
 #   report  -> state/helpers/NAME.report.md   (the helper's final answer)
 #   log     -> state/helpers/NAME.log         (stderr)
 #   status  -> scripts/server/worker.py status / history --kind helper ; stop: worker.py stop helper-NAME
@@ -20,9 +21,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PY="${IRIS_PYTHON:-$HOME/venvs/iris-v100/bin/python}"
 [ $# -ge 2 ] || { sed -n 2,18p "$0"; exit 2; }
 NAME=$1; PROMPT_FILE=$2; shift 2
-MEM=8G; TIMEOUT=7200; CWD="$ROOT"; MODEL="${IRIS_HELPER_MODEL:-claude-opus-5-5}"
+MEM=8G; TIMEOUT=7200; CWD="$ROOT"; MODEL="${IRIS_HELPER_MODEL:-claude-opus-5-5}"; LOCK=helper
 while [ $# -gt 0 ]; do
   case "$1" in
+    --trusted-ssh) LOCK=helper-ssh;;   # keeps ~/.ssh (tower/temple builds); still NO sudo, NO secrets
     --mem) MEM=$2; shift;; --timeout) TIMEOUT=$2; shift;; --cwd) CWD=$2; shift;; --model) MODEL=$2; shift;;
     *) echo "unknown arg $1" >&2; exit 2;;
   esac; shift
@@ -68,7 +70,7 @@ chmod 700 "$INNER"
 # --side-effects reversible: a helper edits repos/branches; it never deploys unless its prompt says so
 [ -f "$OUT/$NAME.worker.log" ] && mv -f "$OUT/$NAME.worker.log" "$OUT/$NAME.worker.log.prev"   # fresh log: the admission check below reads it
 nohup "$PY" "$ROOT/scripts/server/worker.py" run --kind helper --name "helper-$NAME" --mem "$MEM" \
-  --timeout "$TIMEOUT" --side-effects reversible --ledger -- bash "$INNER" >> "$OUT/$NAME.worker.log" 2>&1 &
+  --timeout "$TIMEOUT" --side-effects reversible --ledger --lockdown "$LOCK" -- bash "$INNER" >> "$OUT/$NAME.worker.log" 2>&1 &
 # 10-30: the launcher runs in the background, so a REFUSED admission used to be invisible ("started" printed
 # anyway; the vrsecbatch helper silently never ran). Wait for worker.py's verdict and say it.
 : > /dev/null

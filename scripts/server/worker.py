@@ -528,6 +528,24 @@ def ledger_exit(act_id: str | None, outcome: str, code=None, detail: str | None 
         print(f"worker: ledger exit note failed ({e!r})", file=sys.stderr)
 
 
+# HELPER LOCKDOWN (V3 spec §6/§13 "no worker or helper gets credentials, root or destructive tools"; the 11-01 doc
+# audit's top gap). Works in a USER unit with no sudo: NoNewPrivileges kills sudo/setuid, PrivateUsers gives the
+# unprivileged user namespace that InaccessiblePaths needs. Verified 11-02: sudo refused, secrets unreadable,
+# repos + /data/projects writable, GPU visible, `claude -p` answers. The helper still needs ~/.claude/.credentials.json
+# (its own login) — that one credential is unavoidable.
+_SECRET_PATHS = ["~/.iris_private.env", "~/IRIS/config/private.local.json", "~/.claude/channels",
+                 "~/.config/iris/secrets", "~/.anki_vector", "~/.config/gh", "~/.git-credentials"]
+
+
+def lockdown_props(mode) -> list:
+    if mode in (None, "", "off"):
+        return []
+    paths = list(_SECRET_PATHS) + ([] if mode == "helper-ssh" else ["~/.ssh"])
+    inacc = " ".join("-" + os.path.expanduser(p) for p in paths)   # '-' = ignore if the path doesn't exist
+    return ["-p", "NoNewPrivileges=yes", "-p", "PrivateUsers=yes", "-p", f"InaccessiblePaths={inacc}",
+            "-p", f"Environment=IRIS_LOCKDOWN={mode}"]
+
+
 def run(a) -> int:
     for k, v in RUN_DEFAULTS.items():  # programmatic callers may pass a namespace without the 10-30 fields
         if not hasattr(a, k):
@@ -583,6 +601,7 @@ def run(a) -> int:
         props += [f"--setenv=IRIS_TASK_ID={claim.task_id}", f"--setenv=IRIS_TASK_FENCE={claim.fence}"]
     if act_id:
         props += [f"--setenv=IRIS_ACT_ID={act_id}"]
+    props += lockdown_props(a.lockdown)
     cmd = ["systemd-run", "--user", "--quiet", "--collect", f"--unit={unit}", f"--slice={SLICE}",
            f"--working-directory={a.cwd or os.getcwd()}", *props, "--", *a.cmd]
     with db() as c:
@@ -757,6 +776,9 @@ def main() -> int:
     r.add_argument("--cpu-weight", type=int, default=CPU_WEIGHT)
     r.add_argument("--ledger", action="store_true",
                    help="record as a DELEGATED action in the act ledger (open = pending verification)")
+    r.add_argument("--lockdown", choices=["off", "helper", "helper-ssh"], default="off",
+                   help="V3 spec §6/§13 sandbox (11-02): 'helper' = NoNewPrivileges (no sudo/setuid), PrivateUsers, "
+                        "secrets + ssh keys + Discord channel creds INACCESSIBLE; 'helper-ssh' = same but keeps ~/.ssh")
     r.add_argument("cmd", nargs=argparse.REMAINDER)
     ad = sub.add_parser("admit")
     ad.add_argument("--kind", required=True)
