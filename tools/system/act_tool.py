@@ -31,7 +31,7 @@ from tools.tool_registry import register_tool
 
 def _brief(r: dict) -> dict:
     keys = ("id", "kind", "intent", "expected", "status", "outcome", "evidence", "reason",
-            "source", "lesson_id", "verify", "last_verify")
+            "source", "ref", "lesson_id", "verify", "last_verify", "delegate_exit")
     out = {k: r.get(k) for k in keys if r.get(k) is not None}
     for k in ("opened_ts", "deadline_ts", "closed_ts"):
         if r.get(k):

@@ -30,13 +30,23 @@ State (consumers named):
   state/actions/lessons.jsonl — failure lessons
       READ BY: open_action() — returns the last 3 lessons of the same kind to the
                caller at the moment it starts the same kind of thing again
+
+Delegated ≠ done (2026-11-01, V3 docaudit): work handed to a helper/worker unit
+(scripts/server/worker.py run --ledger, which helper.sh uses) opens a kind="delegated"
+action at launch. The unit's exit is only NOTED on the row (delegate_exit) — the action
+stays OPEN, i.e. pending verification, until I check the result and close it with
+evidence. A clean exit code is not a verified result.
+WRITERS are several processes now (runtime + worker.py), so writes take _xlock():
+the thread lock plus an flock on state/actions/.lock (fail-open after ~2 s).
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import socket
 import ssl
+import tempfile
 import threading
 import time
 import urllib.request
@@ -56,6 +66,53 @@ RETRY_WINDOW_S = 7 * 86400   # look-back for the loop-breaker
 RETRY_BUDGET = 2             # same kind+intent failing this many times => warn
 KEEP_CLOSED_S = 30 * 86400
 DEFAULT_DEADLINE_S = 6 * 3600
+DELEGATED_KIND = "delegated"
+_XLOCK_WAIT_S = 2.0
+_TL = threading.local()
+
+try:
+    import fcntl as _fcntl
+except Exception:            # non-POSIX: thread lock only, as before
+    _fcntl = None
+
+
+@contextlib.contextmanager
+def _xlock():
+    """_LOCK + an flock on <actions dir>/.lock so worker.py (another process) and the runtime
+    can't lose each other's rows. Re-entrant per thread; fails OPEN to the thread lock alone."""
+    with _LOCK:
+        depth = getattr(_TL, "depth", 0)
+        fh = None
+        if depth == 0 and _fcntl is not None:
+            try:
+                ACTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+                fh = open(ACTIONS_PATH.parent / ".lock", "a+")
+                t_end = time.monotonic() + _XLOCK_WAIT_S
+                while True:
+                    try:
+                        _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() > t_end:
+                            raise
+                        time.sleep(0.01)
+            except Exception:
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except Exception:
+                        pass
+                fh = None
+        _TL.depth = depth + 1
+        try:
+            yield
+        finally:
+            _TL.depth = depth
+            if fh is not None:
+                try:
+                    fh.close()      # closing the fd releases the flock
+                except Exception:
+                    pass
 
 
 # ── storage ─────────────────────────────────────────────────────────────────
@@ -69,14 +126,22 @@ def _load() -> dict:
 
 
 def _save(d: dict) -> None:
-    _DIR.mkdir(parents=True, exist_ok=True)
+    ACTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
     now = time.time()
     # prune old CLOSED rows; open rows are never pruned (they must be resolved)
     d = {k: v for k, v in d.items()
          if v.get("status") == "open" or now - float(v.get("closed_ts") or now) < KEEP_CLOSED_S}
-    tmp = ACTIONS_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(d, indent=1, default=str), encoding="utf-8")
-    os.replace(tmp, ACTIONS_PATH)
+    fd, tmp = tempfile.mkstemp(dir=str(ACTIONS_PATH.parent), prefix=".actions", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(d, indent=1, default=str))
+        os.replace(tmp, ACTIONS_PATH)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        raise
 
 
 def _lessons() -> list[dict]:
@@ -109,7 +174,7 @@ def lessons_for(kind: str, k: int = LESSON_K) -> list[dict]:
 
 def open_action(*, kind: str, intent: str, expected: str, verify: Optional[dict] = None,
                 source: str = "iris", deadline_s: Optional[float] = None,
-                ref: Optional[str] = None) -> dict:
+                ref: Optional[str] = None, recipes: bool = True) -> dict:
     """Start an action. Returns the row PLUS the past lessons for this kind and a
     loop warning if the same approach keeps failing. `expected` = the observable
     result that would make this a success (required — no expected result, no action)."""
@@ -120,7 +185,7 @@ def open_action(*, kind: str, intent: str, expected: str, verify: Optional[dict]
            "expected": str(expected), "verify": verify, "source": source, "ref": ref,
            "opened_ts": now, "deadline_ts": now + float(deadline_s or DEFAULT_DEADLINE_S),
            "status": "open"}
-    with _LOCK:
+    with _xlock():
         d = _load()
         recent_fail = [v for v in d.values()
                        if v.get("kind") == row["kind"] and v.get("outcome") in ("failure", "impossible")
@@ -132,12 +197,14 @@ def open_action(*, kind: str, intent: str, expected: str, verify: Optional[dict]
     out["lessons"] = lessons_for(row["kind"])
     # Voyager-style (10-05): verified recipes for this kind of intent come back WITH the
     # lessons — what worked and what failed arrive together at the moment of starting.
-    try:
-        from brain import skill_library as _sl
-        out["recipes"] = [{k: r[k] for k in ("name", "score", "description", "steps")}
-                          for r in _sl.find(f"{kind} {intent}", k=3)]
-    except Exception:
-        out["recipes"] = []
+    out["recipes"] = []
+    if recipes:   # off for the worker.py launcher: the MiniLM load costs seconds it doesn't have
+        try:
+            from brain import skill_library as _sl
+            out["recipes"] = [{k: r[k] for k in ("name", "score", "description", "steps")}
+                              for r in _sl.find(f"{kind} {intent}", k=3)]
+        except Exception:
+            out["recipes"] = []
     if len(recent_fail) >= RETRY_BUDGET:
         out["loop_warning"] = (f"this exact intent failed {len(recent_fail)}x in the last 7 days — "
                                f"change the approach, or close it as impossible with a reason")
@@ -155,7 +222,7 @@ def close_action(action_id: str, *, outcome: str, evidence: Any = None,
                          "(or close as uncertain)")
     if outcome == "abandoned" and not (reason or evidence):
         raise ValueError("abandoned needs a reason")
-    with _LOCK:
+    with _xlock():
         d = _load()
         row = d.get(action_id)
         if row is None:
@@ -169,6 +236,32 @@ def close_action(action_id: str, *, outcome: str, evidence: Any = None,
         d[action_id] = row
         _save(d)
         return {"ok": True, "row": row}
+
+
+def open_delegated(*, name: str, goal: str, ref: Optional[str] = None,
+                   deadline_s: Optional[float] = None, source: str = "worker") -> dict:
+    """A task handed to a helper/worker: open it as PENDING VERIFICATION. Nothing closes it
+    automatically - not the unit exiting 0, not a report file appearing."""
+    return open_action(kind=DELEGATED_KIND, intent=f"{name}: {goal}"[:300],
+                       expected=("I checked the delegated result myself (read the report/output, verified "
+                                 "the work) - the unit finishing is NOT the result"),
+                       verify=None, source=source, deadline_s=deadline_s, ref=ref, recipes=False)
+
+
+def record_delegate_exit(action_id: str, *, outcome: str, exit_code: Any = None,
+                         detail: Optional[str] = None) -> bool:
+    """Note how the delegated unit ended, WITHOUT closing the action (it stays open until
+    verified). False if the row is missing or already closed."""
+    with _xlock():
+        d = _load()
+        row = d.get(action_id)
+        if row is None or row.get("status") != "open":
+            return False
+        row["delegate_exit"] = {"ts": time.time(), "outcome": str(outcome), "exit_code": exit_code,
+                                **({"detail": str(detail)[:300]} if detail else {})}
+        d[action_id] = row
+        _save(d)
+    return True
 
 
 def _write_lesson(row: dict, lesson: dict) -> str:
@@ -187,7 +280,7 @@ def reflect(action_id: str, *, diagnosis: str, next_time: str) -> dict:
     """Attach a lesson to an already-closed failure (the Reflexion step, done later)."""
     if not diagnosis.strip() or not next_time.strip():
         raise ValueError("a lesson needs both a diagnosis and what to do next time")
-    with _LOCK:
+    with _xlock():
         d = _load()
         row = d.get(action_id)
         if row is None:
@@ -246,7 +339,7 @@ def ack_covered(kind: str, lesson_id: str) -> dict:
     if not any(l.get("id") == lesson_id for l in _lessons()):
         raise KeyError(f"no lesson {lesson_id}")
     n = 0
-    with _LOCK:
+    with _xlock():
         d = _load()
         for r in d.values():
             if (r.get("kind") == kind and r.get("outcome") in ("failure", "impossible")
@@ -346,7 +439,7 @@ def verify(action_id: str, *, close_on_result: bool = True) -> dict:
     """Run the action's verifier. Pass => close success with the probe as evidence.
     Fail => close failure only if past the deadline (it may still be in progress).
     Can't judge => leave open, note the attempt."""
-    with _LOCK:
+    with _xlock():
         row = _load().get(action_id)
     if row is None:
         raise KeyError(f"no action {action_id}")
@@ -360,7 +453,7 @@ def verify(action_id: str, *, close_on_result: bool = True) -> dict:
     if close_on_result and passed is False and time.time() > float(row.get("deadline_ts") or 0):
         return {"verify": res, **close_action(action_id, outcome="failure",
                                               evidence=res["evidence"], verifier="auto")}
-    with _LOCK:
+    with _xlock():
         d = _load()
         if action_id in d:
             d[action_id]["last_verify"] = {"ts": time.time(), **res}

@@ -334,3 +334,141 @@ def test_latency_report_voice_stages(tmp_path) -> None:
     assert "speech_end->stt_done" not in rep["events"][day]["discord"]["stages"]   # shown only where recorded
     assert "first_speak->first_audio" in lr.render_text(dict(rep, db="x"))
     st.close()
+
+
+# ---------------------------------------------------------------- 3. delegated != done (act ledger)
+import io  # noqa: E402
+import subprocess  # noqa: E402
+
+from brain import action_ledger as al  # noqa: E402
+
+GiB = 1024 ** 3
+
+
+class _FakeProc:
+    """Stands in for `systemd-run --wait` (same shape as tests/test_worker_v3_tasks.py)."""
+
+    def __init__(self, result="success", status=0):
+        self.returncode = None
+        self.stderr = io.StringIO(f"Finished with result: {result}\n"
+                                  f"Main processes terminated with: code=exited/status={status}\n")
+
+    def poll(self):
+        self.returncode = 0
+        return 0
+
+
+@pytest.fixture()
+def ledger(tmp_path, monkeypatch):
+    monkeypatch.setattr(al, "ACTIONS_PATH", tmp_path / "actions" / "actions.json")
+    monkeypatch.setattr(al, "LESSONS_PATH", tmp_path / "actions" / "lessons.jsonl")
+    return al
+
+
+@pytest.fixture()
+def wenv(ledger, tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_WORKER_DB", str(tmp_path / "jobs.sqlite"))
+    spec = importlib.util.spec_from_file_location("iris_worker_smallfix", ROOT / "scripts" / "server" / "worker.py")
+    w = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(w)
+    store = ev.EventStore(tmp_path / "events.sqlite")
+    monkeypatch.setattr(w, "_STORE", store)
+    monkeypatch.setattr(w, "running_workers", lambda: [])
+    monkeypatch.setattr(w, "meminfo_available", lambda: 30 * GiB)
+    monkeypatch.setattr(w, "slice_dir", lambda: tmp_path / "slice")
+    monkeypatch.setattr(w, "unit_cgroup", lambda unit: None)
+    monkeypatch.setattr(w, "gpu_by_unit", lambda: None)
+    monkeypatch.setattr(w.time, "sleep", lambda s: None)
+    (tmp_path / "slice").mkdir()
+    (tmp_path / "slice" / "memory.max").write_text(str(20 * GiB))
+    (tmp_path / "slice" / "memory.current").write_text(str(1 * GiB))
+    ns = types.SimpleNamespace(w=w, popen=[], proc=_FakeProc)
+
+    def popen(cmd, **kw):
+        ns.popen.append(cmd)
+        return ns.proc()
+    monkeypatch.setattr(w.subprocess, "Popen", popen)
+
+    def main(*argv):
+        monkeypatch.setattr(sys, "argv", ["worker.py", *argv])
+        return w.main()
+    ns.main = main
+    yield ns
+    store.close()
+
+
+def test_ledger_delegated_stays_open_after_exit(ledger) -> None:
+    row = ledger.open_delegated(name="helper-x", goal="do the thing", ref="unit task=t1")
+    assert row["kind"] == "delegated" and row["status"] == "open" and row["recipes"] == []
+    assert ledger.record_delegate_exit(row["id"], outcome="ok", exit_code=0)
+    r = ledger.list_actions(status="open")[-1]
+    assert r["id"] == row["id"] and r["delegate_exit"]["outcome"] == "ok"      # noted, NOT closed
+    assert ledger.verify(row["id"]).get("still_open")                         # no verifier => never auto-success
+    with pytest.raises(ValueError):
+        ledger.close_action(row["id"], outcome="success")                      # success still needs evidence
+    assert ledger.close_action(row["id"], outcome="success", evidence="read the report, tests pass")["ok"]
+    assert not ledger.record_delegate_exit(row["id"], outcome="ok")           # closed rows are left alone
+
+
+def test_ledger_writes_are_cross_process_safe(ledger, tmp_path) -> None:
+    """A child process holding the ledger flock must make a write here wait (no lost rows)."""
+    code = (
+        "import sys, time; sys.path.append(%r)\n"
+        "from pathlib import Path\n"
+        "from brain import action_ledger as al\n"
+        "al.ACTIONS_PATH = Path(%r)\n"
+        "with al._xlock():\n"
+        "    print('held', flush=True)\n"
+        "    time.sleep(0.8)\n"
+    ) % (str(ROOT), str(ledger.ACTIONS_PATH))
+    child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    assert child.stdout.readline().strip() == "held"
+    t0 = time.monotonic()
+    ledger.open_delegated(name="n", goal="g")
+    waited = time.monotonic() - t0
+    child.wait(timeout=10)
+    assert waited >= 0.5, waited
+    assert not list(ledger.ACTIONS_PATH.parent.glob("*.tmp"))
+
+
+def _env_act_id(cmd) -> str | None:
+    """IRIS_ACT_ID as passed to the unit (read from the systemd-run argv, not stdout: another test
+    module may have swapped sys.stdout, so capsys is unreliable across the full suite)."""
+    for a in cmd:
+        if a.startswith("--setenv=IRIS_ACT_ID="):
+            return a.split("=", 2)[2]
+    return None
+
+
+def test_worker_ledger_flag_opens_pending_action_and_notes_exit(wenv) -> None:
+    rc = wenv.main("run", "--kind", "helper", "--name", "helper-demo", "--mem", "1G", "--ledger",
+                   "--", "bash", "x.run.sh")
+    assert rc == 0
+    act = _env_act_id(wenv.popen[0])                                          # the helper can name it
+    (row,) = al.list_actions(kind="delegated")
+    assert row["id"] == act
+    assert row["status"] == "open"                                            # delegated != done
+    assert row["delegate_exit"]["outcome"] == "ok" and row["delegate_exit"]["exit_code"] == 0
+    assert row["source"] == "worker:helper" and "task=" in row["ref"] and "helper-demo" in row["intent"]
+
+
+def test_worker_failed_job_also_stays_open(wenv) -> None:
+    wenv.proc = lambda: _FakeProc(result="exit-code", status=2)
+    assert wenv.main("run", "--kind", "helper", "--name", "h2", "--mem", "1G", "--ledger", "--", "false") == 1
+    (row,) = al.list_actions(kind="delegated")
+    assert row["id"] == _env_act_id(wenv.popen[0])
+    assert row["status"] == "open" and row["delegate_exit"] == {**row["delegate_exit"], "outcome": "exit-code",
+                                                                 "exit_code": 2}
+
+
+def test_worker_without_flag_touches_no_ledger(wenv) -> None:
+    assert wenv.main("run", "--kind", "render", "--name", "r1", "--mem", "1G", "--", "true") == 0
+    assert al.list_actions() == []
+    assert _env_act_id(wenv.popen[0]) is None
+
+
+def test_helper_sh_delegates_through_the_ledger() -> None:
+    sh = (ROOT / "scripts" / "server" / "helper.sh").read_text()
+    assert "--side-effects reversible --ledger --" in sh
+    assert 'os.environ.get("IRIS_ACT_ID")' in sh and "pending verification" in sh
+    assert subprocess.run(["bash", "-n", str(ROOT / "scripts" / "server" / "helper.sh")]).returncode == 0

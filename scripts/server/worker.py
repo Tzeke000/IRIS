@@ -486,7 +486,46 @@ def precheck_task(store, task_id: str) -> tuple[dict | None, str]:
 
 # ── run ────────────────────────────────────────────────────────────────────────
 RUN_DEFAULTS = {"task_id": "", "priority": DEFAULT_PRIORITY, "side_effects": "none", "cancel_lower": False,
-                "lease": LEASE_S, "cpu_quota": CPU_QUOTA, "cpu_weight": CPU_WEIGHT}
+                "lease": LEASE_S, "cpu_quota": CPU_QUOTA, "cpu_weight": CPU_WEIGHT, "ledger": False}
+
+
+# ── "delegated != done": the act verification ledger (brain/action_ledger.py) - fail open ──────
+# With --ledger the job opens a kind="delegated" action at launch (pending verification), its id
+# rides into the unit as IRIS_ACT_ID, and the unit's exit is only NOTED on the row - Iris closes
+# it with evidence after checking the result. helper.sh always passes --ledger (2026-11-01).
+def _ledger():
+    try:
+        if str(ROOT) not in sys.path:
+            sys.path.append(str(ROOT))  # append, never insert(0)
+        from brain import action_ledger
+        return action_ledger
+    except Exception as e:  # noqa: BLE001
+        print(f"worker: action ledger unavailable ({e!r}); delegated task not recorded", file=sys.stderr)
+        return None
+
+
+def ledger_open(a, unit: str, task_id: str | None) -> str | None:
+    al = _ledger()
+    if al is None:
+        return None
+    try:
+        row = al.open_delegated(name=a.name, goal=" ".join(a.cmd)[:200], source=f"worker:{a.kind}",
+                                ref=f"{unit} task={task_id}", deadline_s=float(a.timeout) + al.DEFAULT_DEADLINE_S)
+        return row["id"]
+    except Exception as e:  # noqa: BLE001
+        print(f"worker: ledger open failed ({e!r}); delegated task not recorded", file=sys.stderr)
+        return None
+
+
+def ledger_exit(act_id: str | None, outcome: str, code=None, detail: str | None = None) -> None:
+    if not act_id:
+        return
+    al = _ledger()
+    try:
+        if al is not None:
+            al.record_delegate_exit(act_id, outcome=outcome, exit_code=code, detail=detail)
+    except Exception as e:  # noqa: BLE001
+        print(f"worker: ledger exit note failed ({e!r})", file=sys.stderr)
 
 
 def run(a) -> int:
@@ -534,6 +573,7 @@ def run(a) -> int:
     else:
         note = "untracked: event store unavailable"
 
+    act_id = ledger_open(a, unit, claim.task_id if claim else None) if a.ledger else None
     props = ["-p", f"MemoryMax={mem_limit}", "-p", f"MemorySwapMax={a.swap}", "-p", "OOMScoreAdjust=500",
              "-p", "KillMode=control-group", "-p", f"RuntimeMaxSec={a.timeout}", "-p", f"Nice={a.nice}",
              "-p", f"CPUQuota={a.cpu_quota}", "-p", f"CPUWeight={a.cpu_weight}",
@@ -541,6 +581,8 @@ def run(a) -> int:
     if claim:
         # the job can heartbeat/complete itself with these if it wants to (worker.py does it anyway)
         props += [f"--setenv=IRIS_TASK_ID={claim.task_id}", f"--setenv=IRIS_TASK_FENCE={claim.fence}"]
+    if act_id:
+        props += [f"--setenv=IRIS_ACT_ID={act_id}"]
     cmd = ["systemd-run", "--user", "--quiet", "--collect", f"--unit={unit}", f"--slice={SLICE}",
            f"--working-directory={a.cwd or os.getcwd()}", *props, "--", *a.cmd]
     with db() as c:
@@ -552,6 +594,8 @@ def run(a) -> int:
     hello = {"admitted": True, "job": jid, "unit": unit, "mem_limit": human(mem_limit),
              "estimate_from_history_n": info["history_n"], "priority": a.priority,
              "task_id": claim.task_id if claim else None, "fence": claim.fence if claim else None}
+    if act_id:
+        hello["act_id"] = act_id
     if info.get("cancelled"):
         hello["cancelled"] = info["cancelled"]
     if not a.detach:
@@ -562,11 +606,13 @@ def run(a) -> int:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         except OSError as e:
             _launch_failed(jid, claim, repr(e))
+            ledger_exit(act_id, "launch_failed", None, repr(e))
             return 1
-        return watch(jid, unit, proc, claim=claim)
+        return watch(jid, unit, proc, claim=claim, act_id=act_id)
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         _launch_failed(jid, claim, r.stderr[-500:])
+        ledger_exit(act_id, "launch_failed", r.returncode, r.stderr[-300:])
         print(r.stderr, file=sys.stderr)
         return r.returncode
     print(json.dumps(hello))
@@ -583,7 +629,8 @@ def _launch_failed(jid: int, claim: Claim | None, err: str) -> None:
         claim.store.fail(claim.task_id, claim.fence, note=f"launch failed: {err[-200:]}", actor="worker.py")
 
 
-def watch(jid: int, unit: str, proc: subprocess.Popen, poll: float = 1.0, claim: Claim | None = None) -> int:
+def watch(jid: int, unit: str, proc: subprocess.Popen, poll: float = 1.0, claim: Claim | None = None,
+          act_id: str | None = None) -> int:
     """Sample the unit's cgroup (+ per-unit VRAM) until `systemd-run --wait` returns, heartbeating the task
     claim, then record the outcome - into the jobs row always, into the task only with the CURRENT fence.
     Kernel 5.15 has no memory.peak, so the peak is the max of sampled memory.current."""
@@ -654,6 +701,7 @@ def watch(jid: int, unit: str, proc: subprocess.Popen, poll: float = 1.0, claim:
             task_result = "rejected"
             _append_note(jid, f"task result REJECTED: fence {claim.fence} is stale (task now "
                               f"{cur.get('status')} fence {cur.get('fence')})")
+    ledger_exit(act_id, outcome, code, f"job {jid}")   # noted only: the action stays open until verified
     print(json.dumps({"job": jid, "unit": unit, "outcome": outcome, "exit_code": code,
                       "peak_mem": human(peak or None), "cpu_s": round((cpu or 0) / 1e6, 1),
                       "gpu_mib": gpu_peak, "task_id": claim.task_id if claim else None,
@@ -707,6 +755,8 @@ def main() -> int:
     r.add_argument("--lease", type=float, default=LEASE_S, help="task lease seconds (heartbeat every lease/4)")
     r.add_argument("--cpu-quota", default=CPU_QUOTA)
     r.add_argument("--cpu-weight", type=int, default=CPU_WEIGHT)
+    r.add_argument("--ledger", action="store_true",
+                   help="record as a DELEGATED action in the act ledger (open = pending verification)")
     r.add_argument("cmd", nargs=argparse.REMAINDER)
     ad = sub.add_parser("admit")
     ad.add_argument("--kind", required=True)

@@ -8,6 +8,8 @@
 #
 # When the helper exits, a pending LLM-bridge request (kind helper_done) is written; the Stop hook /
 # idle nudge delivers it to me like any brain/* request, with the report path.
+# Delegated != done (11-01): worker.py --ledger opens a "delegated" action in the act ledger at launch;
+# it stays OPEN (pending verification) until I check the work and close it with evidence.
 #
 # usage: helper.sh NAME PROMPT_FILE [--mem 8G] [--timeout 7200] [--cwd DIR] [--model M]
 #   report  -> state/helpers/NAME.report.md   (the helper's final answer)
@@ -44,16 +46,20 @@ t0=\$(date +%s)
   < "$OUT/$NAME.prompt.md" > "$OUT/$NAME.report.md" 2> "$OUT/$NAME.log"
 rc=\$?
 cd "$ROOT" && "$PY" - "$NAME" "\$rc" "\$t0" <<'PYEOF'
-import sys, time
+import os, sys, time
 sys.path.insert(1, ".")
 from brain import iris_llm
 name, rc, t0 = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
 rep = f"state/helpers/{name}.report.md"
+act = os.environ.get("IRIS_ACT_ID")
+act_line = (f" Ledger action {act} (kind delegated) is OPEN = pending verification: after checking the work, "
+            f"close it with act close id={act} (success needs evidence; failure wants a lesson)."
+            if act else "")
 iris_llm.submit(
     f"[HELPER DONE - automated, not Zeke] Out-of-process helper '{name}' exited rc={rc} after "
     f"{(time.time()-t0)/60:.0f} min. Report: /home/iris/IRIS/{rep} (log: state/helpers/{name}.log). "
     "Read the report, review/verify the work as usual, tell Zeke on Discord if it matters, then reply here "
-    "with one line (e.g. 'seen') via llm_reply.",
+    "with one line (e.g. 'seen') via llm_reply." + act_line,
     kind="helper_done", requester="helper:" + name, deadline_s=24 * 3600, priority=2)
 PYEOF
 exit \$rc
@@ -62,7 +68,7 @@ chmod 700 "$INNER"
 # --side-effects reversible: a helper edits repos/branches; it never deploys unless its prompt says so
 [ -f "$OUT/$NAME.worker.log" ] && mv -f "$OUT/$NAME.worker.log" "$OUT/$NAME.worker.log.prev"   # fresh log: the admission check below reads it
 nohup "$PY" "$ROOT/scripts/server/worker.py" run --kind helper --name "helper-$NAME" --mem "$MEM" \
-  --timeout "$TIMEOUT" --side-effects reversible -- bash "$INNER" >> "$OUT/$NAME.worker.log" 2>&1 &
+  --timeout "$TIMEOUT" --side-effects reversible --ledger -- bash "$INNER" >> "$OUT/$NAME.worker.log" 2>&1 &
 # 10-30: the launcher runs in the background, so a REFUSED admission used to be invisible ("started" printed
 # anyway; the vrsecbatch helper silently never ran). Wait for worker.py's verdict and say it.
 : > /dev/null
