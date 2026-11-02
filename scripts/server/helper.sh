@@ -42,6 +42,9 @@ STANDING RULES (appended to every helper prompt): the IRIS repo is PUBLIC. Never
 data, or secrets in tracked files or commit messages. Test fixtures must not contain LITERAL secret-shaped strings
 either (Discord/GitHub/API-token shapes, private keys) even when fake - build them at runtime, e.g.
 ".".join([...]), or GitHub push protection will reject the push.
+ZEKE'S TOWER (if you touch it): NEVER screenshot or capture his screens (private DMs/apps are on them — find windows by
+process/window APIs instead), NEVER take focus from his game or apps (launch hidden/no-activate, restore focus), no
+console windows flashing (hidden spawns only).
 RULES
 CLAUDE="$(command -v claude || echo "$HOME/.local/bin/claude")"
 
