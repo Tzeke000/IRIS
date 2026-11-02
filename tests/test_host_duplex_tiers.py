@@ -123,3 +123,15 @@ def test_reader_defer_queues_without_interrupt(monkeypatch):
 def test_reader_barge_still_interrupts(monkeypatch):
     items, n_int = _run_reader_once(monkeypatch, "[barge-in] [cut mid-sentence] stop")
     assert n_int == 1 and len(items) == 1
+
+
+def test_question_flag_rides_to_the_daemon_and_clears_once_answered(monkeypatch):
+    import time as _t
+    h._RECENT_SPOKEN.clear()
+    h._RECENT_SPOKEN.append((_t.time(), "Is it bigger than a breadbox?"))
+    r, args = _watch(monkeypatch, "[barge-defer] [said while I was still talking, right after I asked "
+                                  "a question - treat as his answer] No.", True)
+    assert args.get("question") is True and r[0].endswith("No.")
+    assert not h._asked_a_question_recently()       # answered: a later "mm-hm" is an ack again
+    _r2, args2 = _watch(monkeypatch, "[bargein_watch] no_barge", True)
+    assert "question" not in args2

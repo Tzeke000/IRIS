@@ -168,3 +168,107 @@ def test_binary_watch_is_default(monkeypatch):
     assert core.cmd_bargein_watch(object(), {"tiers": True}) == "TIERED"
     monkeypatch.setattr(wren_voice_status, "read_control", lambda: {"duplex_tiers": False})
     assert core.cmd_bargein_watch(object(), {"tiers": True}) == "BINARY"
+
+
+# ------------------------------------------------------------------ keep rules (Zeke 11-02, a cold)
+
+ZEKE_COLD = np.full(512, 0.012, np.float32)     # his measured p50 capture rms 11-02 (< the 0.02 floor)
+
+
+class SoftVAD(FakeVAD):
+    def __call__(self, t, sr):
+        return _Prob(0.95 if float(t.abs().mean()) > 0.003 else 0.02)
+
+
+def test_faint_voiced_speech_during_playback_is_a_deferred_turn(rig):
+    urls, st = rig
+    st["script"], st["heard"] = [ZEKE_COLD] * 15 + [QUIET] * 25, "No, no hints, no hints."
+    st["verdict"] = {"status": "matched", "speaker": "zeke", "score": 0.7}
+    ctx = Ctx()
+    ctx.vad_model = SoftVAD()
+    out = core._cmd_bargein_watch_tiered(ctx, {"tiers": True}, None)
+    assert out.startswith("[barge-defer] [said quietly while I was talking; my reply kept playing]")
+    assert out.endswith("No, no hints, no hints.")
+    # the floor decided "don't interrupt": no stop, no duck, reply untouched
+    assert "/stop" not in urls and not any(u.startswith("/duck?db=-") for u in urls)
+    assert ctx.play_queue.qsize() == 1 and not ctx.bargein_fired
+
+
+def test_hot_lowered_floor_reaches_the_classifier(rig, monkeypatch):
+    urls, st = rig
+    monkeypatch.setattr(wren_voice_status, "read_control", lambda: {"bargein_min_rms": 0.008})
+    st["script"], st["heard"] = [ZEKE_COLD] * 60 + [QUIET] * 25, "hold on I want to change the plan here"
+    st["verdict"] = {"status": "matched", "speaker": "zeke", "score": 0.7}
+    ctx = Ctx()
+    ctx.vad_model = SoftVAD()
+    out = core._cmd_bargein_watch_tiered(ctx, {"tiers": True}, None)
+    assert out.startswith("[barge-in]") and "/stop" in urls     # 0.012 > 0.008: he CAN cut me now
+
+
+def test_fizzled_onset_is_a_deferred_turn(rig):
+    urls, st = rig
+    st["script"], st["heard"] = [LOUD] * 5 + [QUIET] * 25, "No."
+    ctx = Ctx()
+    out = core._cmd_bargein_watch_tiered(ctx, {"tiers": True}, None)
+    assert out.startswith("[barge-defer] [said quietly while I was talking") and out.endswith("No.")
+    assert "/stop" not in urls and ctx.play_queue.qsize() == 1
+
+
+def test_fizzled_phantom_and_empty_are_not_turns(rig):
+    urls, st = rig
+    st["script"], st["heard"] = [LOUD] * 5 + [QUIET] * 25, ""
+    assert core._cmd_bargein_watch_tiered(Ctx(), {"tiers": True}, None) == "[bargein_watch] no_barge"
+    quiet = np.full(512, 0.001, np.float32)
+    st["script"], st["heard"] = [quiet] * 5 + [QUIET] * 2, "Thank you."
+    ctx = Ctx()
+
+    class TinyVAD(FakeVAD):
+        def __call__(self, t, sr):
+            return _Prob(0.95 if float(t.abs().mean()) > 0.0005 else 0.02)
+    ctx.vad_model = TinyVAD()
+    out = core._cmd_bargein_watch_tiered(ctx, {"tiers": True}, None)
+    assert out == "[bargein_watch] no_barge"         # whisper's near-silence 'Thank you.' is a phantom
+
+
+def test_muted_kept_episode_is_dropped(rig, monkeypatch):
+    urls, st = rig
+    st["script"], st["heard"] = [LOUD] * 5 + [QUIET] * 25, "No."
+    mute = iter([False] + [True] * 10)
+    monkeypatch.setattr(core, "is_muted", lambda: next(mute))
+    assert core._cmd_bargein_watch_tiered(Ctx(), {"tiers": True}, None) == "[bargein_watch] no_barge"
+
+
+def test_yes_after_my_question_is_his_answer(rig):
+    urls, st = rig
+    st["script"], st["heard"] = speech(450), "Yes."
+    st["verdict"] = {"status": "matched", "speaker": "zeke", "score": 0.7}
+    ctx = Ctx()
+    ctx.now_playing = "Is it bigger than a breadbox?"
+    out = core._cmd_bargein_watch_tiered(ctx, {"tiers": True}, None)
+    assert out.startswith("[barge-defer] [said while I was still talking, right after I asked a question")
+    assert out.endswith("Yes.") and "/stop" not in urls and not ctx.bargein_fired
+
+
+def test_no_after_host_flagged_question_is_a_turn_not_a_cut(rig):
+    urls, st = rig
+    st["script"], st["heard"] = speech(450), "No."
+    ctx = Ctx()
+    out = core._cmd_bargein_watch_tiered(ctx, {"tiers": True, "question": True}, None)
+    assert out.startswith("[barge-defer]") and out.endswith("No.") and "/stop" not in urls
+
+
+def test_mm_hm_mid_sentence_is_still_an_ack_with_speaker(rig):
+    urls, st = rig
+    st["script"], st["heard"] = speech(450), "Mm-hmm."
+    st["verdict"] = {"status": "matched", "speaker": "zeke", "score": 0.7}
+    out = core._cmd_bargein_watch_tiered(Ctx(), {"tiers": True, "structured": True}, None)
+    assert out["text"] == "[bargein_watch] ack: Mm-hmm." and out["speaker"] == "zeke"
+
+
+def test_self_voice_kept_episode_still_dropped(rig):
+    urls, st = rig
+    st["script"], st["heard"], st["self"] = [LOUD] * 5 + [QUIET] * 25, "bigger than a breadbox", 0.9
+    ctx = Ctx()
+    ctx.now_playing = "Is it bigger than a breadbox?"
+    out = core._cmd_bargein_watch_tiered(ctx, {"tiers": True}, None)
+    assert out.startswith("[bargein_watch] self_voice_dropped")
