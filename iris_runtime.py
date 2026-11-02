@@ -112,6 +112,16 @@ os.environ.setdefault("HF_HOME", os.path.join(os.path.dirname(os.path.abspath(__
 # lock, hanging engine init silently with engine="none". Verified via
 # .tmp/iris_no_mcp_test.py: same code paths work when these imports are
 # resolved at module-level instead of inside worker threads.
+# Thread-pool caps (2026-11-02 efficiency pass, audit #8): OMP/MKL/BLAS env
+# BEFORE numpy/torch load; torch/cv2/ORT caps after the pre-imports below.
+# IRIS_THREAD_CAPS=0 turns both halves off. See brain/thread_caps.py.
+try:
+    from brain import thread_caps as _thread_caps
+    _thread_caps.apply_env()
+except Exception as _tce:
+    _thread_caps = None
+    print(f"[iris_runtime] thread caps unavailable (non-fatal): {_tce!r}", file=sys.stderr, flush=True)
+
 print("[iris_runtime] pre-loading engine deps (~5-10s)...", file=sys.stderr, flush=True)
 import numpy  # noqa: F401
 import sounddevice  # noqa: F401
@@ -134,6 +144,11 @@ try:
     import insightface.app  # noqa: F401
 except Exception as _e:
     print(f"[iris_runtime] insightface unavailable (vision phase 1 will be skipped): {_e!r}", file=sys.stderr, flush=True)
+if _thread_caps is not None:
+    try:
+        _thread_caps.apply_libs()
+    except Exception as _tce:
+        print(f"[iris_runtime] thread caps (libs) failed (non-fatal): {_tce!r}", file=sys.stderr, flush=True)
 print("[iris_runtime] engine deps loaded", file=sys.stderr, flush=True)
 
 from mcp.server.fastmcp import FastMCP
@@ -4368,9 +4383,23 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
     #   if InsightFace is down, expr/attn run ungated (pre-08-27 behavior).
     interval = 1.0 / 30.0        # capture pace target
     step_period = 1.0 / 30.0     # perception workers' pace target ("all equal")
+    # 2026-11-02 efficiency pass (audit #1): the MediaPipe steps — hands
+    # (gesture recognizer), expression + attention (face mesh) — run at
+    # IRIS_MEDIAPIPE_HZ (default 10) instead of 30. Measured cost at 30 Hz was
+    # ~2.7 cores across their three thread pools. Nothing that steers the head
+    # reads them: servo follow / person:any read _face_results (face worker,
+    # still 30 Hz), person_track + body_pose stay frame-paced. The hand wave
+    # heuristic needs >=6 wrist samples in its 1.6 s window — 10 Hz gives 16.
+    # Rollback: IRIS_MEDIAPIPE_HZ=30 (needs a stack restart; read once here).
+    try:
+        _mp_hz = float(os.environ.get("IRIS_MEDIAPIPE_HZ", "10") or 10)
+    except ValueError:
+        _mp_hz = 10.0
+    mediapipe_period = 1.0 / max(1.0, min(30.0, _mp_hz))
 
     from brain.camera_annotator import annotate_frame as _annotate
     from brain.frame_store import push_frame as _push_frame
+    from brain.frame_store import RAW_SIGNAL as _raw_signal
     try:
         from brain import iris_hands as _hands_mod
     except Exception as _he:
@@ -4537,11 +4566,14 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
         except Exception:
             pass
 
-    def _perception_worker(name: str, step_fn, gate_fn=None) -> None:
-        """30Hz self-paced worker over the newest raw frame. Never processes
-        the same frame twice; sleeps the remainder of its 33ms budget after
-        each pass (a step slower than 33ms just runs flat-out at its own
-        natural rate — no backlog, always the freshest frame)."""
+    def _perception_worker(name: str, step_fn, gate_fn=None,
+                           period: float = step_period) -> None:
+        """Self-paced worker over the newest raw frame (30Hz for face,
+        IRIS_MEDIAPIPE_HZ for the MediaPipe steps). Never processes the same
+        frame twice; sleeps the remainder of its period after each pass (a
+        step slower than its period just runs flat-out at its own natural
+        rate — no backlog, always the freshest frame). Waiting for a NEW frame
+        blocks on frame_store.RAW_SIGNAL (bounded) instead of a 4 ms poll."""
         last_ts = 0.0
         while True:
             try:
@@ -4550,32 +4582,38 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
                     continue
                 slot = g.get("_raw_frame_slot")
                 if not slot or slot[0] <= last_ts:
-                    time.sleep(0.004)            # wait for a NEW frame
+                    # wait for a NEW frame — signalled by the capture loop,
+                    # bounded ~0.1 s (IRIS_FRAME_EVENT_WAIT=0 = old 4 ms poll)
+                    _raw_signal.wait_newer(last_ts)
                     continue
                 if gate_fn is not None and not gate_fn():
                     last_ts = slot[0]
-                    time.sleep(step_period)      # gated off — idle at pace
+                    time.sleep(period)           # gated off — idle at pace
                     continue
                 t0 = time.time()
                 last_ts = slot[0]
                 step_fn(slot[1])
                 dt = time.time() - t0
                 g[f"_perc_{name}_last_ms"] = round(dt * 1000.0, 1)
-                time.sleep(max(0.0, step_period - dt))
+                time.sleep(max(0.0, period - dt))
             except Exception as _we:
                 print(f"[iris_video] {name} worker error: {_we!r}",
                       file=sys.stderr, flush=True)
                 time.sleep(1.0)
 
-    for _wname, _wfn, _wgate in (
-        ("face", _face_step, None),
-        ("hands", _hands_step, _hands_gate),
-        ("expr", _expr_step, _expr_gate),
-        ("attn", _attn_step, None),
+    for _wname, _wfn, _wgate, _wper in (
+        ("face", _face_step, None, step_period),
+        ("hands", _hands_step, _hands_gate, mediapipe_period),
+        ("expr", _expr_step, _expr_gate, mediapipe_period),
+        ("attn", _attn_step, None, mediapipe_period),
     ):
-        threading.Thread(target=_perception_worker, args=(_wname, _wfn, _wgate),
+        threading.Thread(target=_perception_worker, args=(_wname, _wfn, _wgate, _wper),
                          daemon=True, name=f"iris-{_wname}-worker").start()
-    print("[iris_video] perception workers started — face/hands/expr/attn @ 30Hz targets",
+    g["_perc_targets_hz"] = {"face": 30.0, "hands": round(1.0 / mediapipe_period, 1),
+                             "expr": round(1.0 / mediapipe_period, 1),
+                             "attn": round(1.0 / mediapipe_period, 1)}
+    print(f"[iris_video] perception workers started — face @ 30Hz, "
+          f"hands/expr/attn @ {1.0 / mediapipe_period:.0f}Hz targets",
           file=sys.stderr, flush=True)
 
     while True:
@@ -4609,6 +4647,7 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
             _pub_ts = time.time()
             _slot_prev = g.get("_raw_frame_slot")
             g["_raw_frame_slot"] = (_pub_ts, frame)
+            _raw_signal.publish(_pub_ts)     # wake the perception workers
             # Measured capture fps (EMA over inter-frame gaps) — Zeke directive
             # 2026-08-27: perception runs at the camera's ACTUAL rate. Workers
             # already frame-gate (a new frame is the tick), so this is the
