@@ -204,7 +204,10 @@ def _sentence_tag(features: Sequence[WordFeatures], total_s: float) -> str:
 # 2026-06-17 call), so an unbudgeted pitch loop is unbounded per-turn latency. Once the
 # cumulative pitch time crosses the budget, remaining words get pitch "?" (emphasis and
 # pauses — cheap numpy — still computed for every word). Env-tunable.
-PITCH_TIME_BUDGET_S = float(os.environ.get("IRIS_PITCH_TIME_BUDGET_S", "1.5"))
+# 11-02 voice-delay pass: librosa.pyin costs ~0.3 s PER WORD, and the 1.5 s budget was hit on ~80 of today's
+# turns, so pitch alone added ~1.5 s to nearly every reply (speech end -> my first sound p50 8.7 s). The budget is
+# now 0.4 s, and the LAST word is always pitched first: its rise/fall is the question-vs-statement signal that matters.
+PITCH_TIME_BUDGET_S = float(os.environ.get("IRIS_PITCH_TIME_BUDGET_S", "0.4"))
 
 
 def _extract_features(audio: np.ndarray, words_data) -> list[WordFeatures]:
@@ -215,7 +218,16 @@ def _extract_features(audio: np.ndarray, words_data) -> list[WordFeatures]:
     prev_end = None
     pitch_spent = 0.0
     pitch_budget_hit = False
-    for w in words_data:
+    words_data = list(words_data)
+    last_pitch = None
+    if words_data:   # the final word first, outside the budget (question rise); reused in the loop below
+        lw = words_data[-1]
+        ls = float(getattr(lw, "start", 0.0)); le = float(getattr(lw, "end", ls))
+        _t0 = time.time()
+        last_pitch = _pitch_direction(audio, ls, le if le > ls else ls + 0.05)
+        pitch_spent += time.time() - _t0
+    n_words = len(words_data)
+    for wi, w in enumerate(words_data):
         word = getattr(w, "word", str(w)).strip()
         start = float(getattr(w, "start", 0.0))
         end = float(getattr(w, "end", start))
@@ -225,7 +237,9 @@ def _extract_features(audio: np.ndarray, words_data) -> list[WordFeatures]:
         pause_before = max(0.0, start - prev_end) if prev_end is not None else 0.0
         rms = _word_rms(audio, start, end)
         ratio = rms / utterance_rms if utterance_rms > 0 else 1.0
-        if pitch_spent < PITCH_TIME_BUDGET_S:
+        if wi == n_words - 1 and last_pitch is not None:
+            pitch = last_pitch
+        elif pitch_spent < PITCH_TIME_BUDGET_S:
             _t0 = time.time()
             pitch = _pitch_direction(audio, start, end)
             pitch_spent += time.time() - _t0
