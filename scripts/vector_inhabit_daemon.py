@@ -138,6 +138,28 @@ BATTERY_JSON = REPO / "state" / "vector" / "battery.json"
 WIREPOD_SDK = "http://127.0.0.1:8080/api-sdk"
 BATTERY_POLL_S = float(os.environ.get("IRIS_BATTERY_POLL_S", "15.0"))  # 45->15 2026-07-23 (nervous system: battery is a sense too)
 BATTERY_LOW_LEVEL = 1     # Vector: 1=low, 2=nominal, 3=full/charging
+# BATTERY POLL BACK-OFF (2026-11-02 efficiency pass, audit #9). With the Vector
+# unreachable, every 15 s poll hung on wire-pod for the full 8 s timeout and kept
+# wire-pod busy retrying the robot. Now: failed reads double the interval
+# (15 -> 30 -> 60 -> 120 s cap); any good read snaps straight back to 15 s; while
+# the nerves are DELIBERATELY off the poll drops to every 5 min. The FIRST
+# failure is still reported on the very next write, so the lost-contact alarm
+# stays as prompt as before — only the repeats slow down (and those already back
+# off via COOLDOWN). IRIS_BATTERY_BACKOFF=0 = the old fixed 15 s.
+BATTERY_BACKOFF = os.environ.get("IRIS_BATTERY_BACKOFF", "1") != "0"
+BATTERY_MAX_BACKOFF_S = float(os.environ.get("IRIS_BATTERY_MAX_BACKOFF_S", "120.0"))
+BATTERY_OFF_POLL_S = float(os.environ.get("IRIS_BATTERY_OFF_POLL_S", "300.0"))
+
+
+def _battery_next_delay(ok: bool, fail_streak: int, nerves_off: bool) -> float:
+    """Seconds until the next battery poll. Pure — unit-tested."""
+    if not BATTERY_BACKOFF:
+        return BATTERY_POLL_S
+    if nerves_off:
+        return max(BATTERY_POLL_S, BATTERY_OFF_POLL_S)
+    if ok or fail_streak <= 0:
+        return BATTERY_POLL_S
+    return min(BATTERY_POLL_S * (2 ** min(fail_streak, 10)), max(BATTERY_POLL_S, BATTERY_MAX_BACKOFF_S))
 
 # --- POSSESSION (Zeke directive 2026-07-17 ~02:00: "not have the stock brain
 # take over ... you need to be able to take over anytime anywhere ... you can't
@@ -1288,6 +1310,7 @@ def _battery_watch_loop() -> None:
     import requests
     last_on_charger = True
     lost_streak = 0   # consecutive lost_contact fires with no successful read
+    read_fails = 0    # consecutive failed reads (drives the poll back-off)
     while True:
         level = volts = on_charger = None
         ok = False
@@ -1359,7 +1382,8 @@ def _battery_watch_loop() -> None:
                   f"charger seating.")
             lost_streak = n
             COOLDOWN["lost_contact"] = min(600.0 * (2 ** lost_streak), 7200.0)
-        time.sleep(BATTERY_POLL_S)
+        read_fails = 0 if ok else read_fails + 1
+        time.sleep(_battery_next_delay(ok, read_fails, _nerves_off()[0]))
 
 
 def main() -> None:
@@ -1410,7 +1434,7 @@ def main() -> None:
             if was_off is not True:
                 log(f"NERVES DELIBERATELY OFF — not attempting to reach Vector. "
                     f"({why}) Parked: gRPC senses/camera/nav-map/ears/"
-                    f"possession. Still live: battery poll, lost-contact alarm, "
+                    f"possession. Still live: battery poll (slowed to 5 min), lost-contact alarm, "
                     f"SSH interoception. Resume with vector_nerves_on or by "
                     f"clearing state/vector_deliberately_off.json.")
                 was_off = True

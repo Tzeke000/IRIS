@@ -37,9 +37,69 @@ _MIN_FACE_PX = 28          # smaller boxes are texture (vent grilles, screens) -
 # Live-loop identity cadence (see InsightFaceEngine._fast_get, 2026-10-07): the
 # identity models run every Nth frame (30fps capture -> ~10Hz re-identification);
 # in between, a face that IoU-matches the previous pass carries these attributes.
-_FULL_EVERY_N = 3
+def _env_int(name: str, default: int) -> int:
+    try:
+        v = int(os.environ.get(name, default))
+        return v if v > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+_FULL_EVERY_N = _env_int("IRIS_FACE_FULL_EVERY_N", 3)
 _CARRY_IOU = 0.3
 _CARRY_KEYS = ("embedding", "gender", "age", "landmark_3d_68", "pose")
+
+# 2026-11-02 efficiency pass (audit #5). Which buffalo_l models load at all.
+# Consumers checked by grep:
+#   detection        — everything (boxes, kps)
+#   recognition      — identity (person_id / confidence)
+#   landmark_3d_68   — head POSE: person_any.face_angles (servo person:any's
+#                      "looking at me" test; kps fallback is rougher) + HUD arrows
+#   landmark_2d_106  — "landmarks": the orb camera HUD dots/arrows only
+#                      (camera_annotator.annotate_display)
+#   genderage        — NOT loaded by default. Only ever displayed (orb_http
+#                      face_age/gender, study_face "insightface_guess"), and the
+#                      standing rule is that these are guesses, never facts —
+#                      they now read age 0 / gender "?" (the engine's existing
+#                      "no value" encoding).
+# IRIS_FACE_MODULES=all restores the old five-model load; or a comma list.
+_DEFAULT_FACE_MODULES = ("detection", "recognition", "landmark_3d_68", "landmark_2d_106")
+
+
+def _face_modules() -> Optional[list[str]]:
+    raw = os.environ.get("IRIS_FACE_MODULES", "").strip()
+    if raw.lower() == "all":
+        return None                                   # FaceAnalysis default: every model
+    mods = [m.strip() for m in raw.split(",") if m.strip()] if raw else list(_DEFAULT_FACE_MODULES)
+    if "detection" not in mods:
+        mods.insert(0, "detection")                   # FaceAnalysis asserts it exists
+    return mods
+
+
+# The 106-point landmarks used to run on EVERY frame (the only per-frame model
+# besides detection). They only feed the HUD, so by default they now run on the
+# identity cadence and, in between, are carried from the IoU-matched previous
+# pass, shifted + scaled with the box (good enough for dots on a thumbnail; the
+# annotator eases them anyway). IRIS_FACE_LM106_EVERY_FRAME=1 = old behaviour.
+_LM106_EVERY_FRAME = os.environ.get("IRIS_FACE_LM106_EVERY_FRAME", "0").strip().lower() in ("1", "on", "true", "yes")
+
+
+def _shift_landmarks(lm: Any, old_bbox: tuple, new_bbox: Any) -> Any:
+    """Move a carried landmark array from old_bbox's frame to new_bbox's
+    (translate centre, scale by box width). Returns lm unchanged on any error."""
+    try:
+        ox1, oy1, ox2, oy2 = (float(v) for v in old_bbox)
+        nx1, ny1, nx2, ny2 = (float(v) for v in new_bbox[0:4])
+        ow = max(1.0, ox2 - ox1)
+        k = max(1.0, nx2 - nx1) / ow
+        ocx, ocy = (ox1 + ox2) / 2.0, (oy1 + oy2) / 2.0
+        ncx, ncy = (nx1 + nx2) / 2.0, (ny1 + ny2) / 2.0
+        out = lm.copy()
+        out[:, 0] = (lm[:, 0] - ocx) * k + ncx
+        out[:, 1] = (lm[:, 1] - ocy) * k + ncy
+        return out
+    except Exception:
+        return lm
 
 _SINGLETON: Optional["InsightFaceEngine"] = None
 _SINGLETON_LOCK = threading.Lock()
@@ -176,14 +236,16 @@ class InsightFaceEngine:
             from contextlib import nullcontext as _logged_load  # fail-open
         try:
             with _logged_load(f"insightface:buffalo_l:{ordered[0]}"):
-                app = FaceAnalysis(name="buffalo_l", providers=ordered)
+                app = FaceAnalysis(name="buffalo_l", providers=ordered,
+                                   allowed_modules=_face_modules())
                 app.prepare(ctx_id=0, det_size=(640, 640))
         except Exception as e:
             self._init_error = f"prepare: {e!r}"
             print(f"[insight_face] FaceAnalysis prepare failed: {e!r}")
             # Retry CPU-only if GPU prepare fails
             try:
-                app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+                app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"],
+                                   allowed_modules=_face_modules())
                 app.prepare(ctx_id=-1, det_size=(640, 640))
                 ordered = ["CPUExecutionProvider"]
                 self._init_error = ""
@@ -261,7 +323,9 @@ class InsightFaceEngine:
             except Exception:
                 from contextlib import nullcontext as _logged_load  # fail-open
             with _logged_load(f"insightface:buffalo_l:small320:{providers[0]}"):
-                small = FaceAnalysis(name="buffalo_l", providers=providers)
+                # only embeddings are read from reference photos
+                small = FaceAnalysis(name="buffalo_l", providers=providers,
+                                     allowed_modules=["detection", "recognition"])
                 ctx = 0 if self._provider == "CUDAExecutionProvider" else -1
                 small.prepare(ctx_id=ctx, det_size=(320, 320))
             load_app = small
@@ -415,8 +479,10 @@ class InsightFaceEngine:
 
     def _fast_get(self, frame: Any) -> list:
         """30Hz-capable replacement for FaceAnalysis.get() on the LIVE loop only
-        (2026-10-07, Zeke: "everything at 30"). Detection + 106-pt landmarks run
-        EVERY frame (position/landmarks stay fresh); the identity-side models
+        (2026-10-07, Zeke: "everything at 30"). Detection runs EVERY frame
+        (position stays fresh; since 11-02 the 106-pt landmarks ride the
+        identity cadence and are box-shifted in between — see
+        _LM106_EVERY_FRAME); the identity-side models
         (recognition, genderage, 3d68 pose) run every _FULL_EVERY_N-th frame, or
         immediately for any face that doesn't IoU-match a face from the last
         pass. Matched faces carry their identity attributes forward. Measured on
@@ -458,15 +524,19 @@ class InsightFaceEngine:
             for taskname, model in app.models.items():
                 if taskname == "detection":
                     continue
-                if taskname == "landmark_2d_106" or match is None:
+                if match is None or (taskname == "landmark_2d_106" and _LM106_EVERY_FRAME):
                     model.get(frame, face)
             if match is not None:
                 for k, v in match["attrs"].items():
+                    if k == "landmark_2d_106":
+                        v = _shift_landmarks(v, match["bbox"], bboxes[i, 0:4])
                     face[k] = v
             faces.append(face)
             new_cache.append({
                 "bbox": tuple(float(v) for v in bboxes[i, 0:4]),
-                "attrs": {k: face[k] for k in _CARRY_KEYS if k in face},
+                "attrs": {k: face[k] for k in (_CARRY_KEYS if _LM106_EVERY_FRAME
+                                               else _CARRY_KEYS + ("landmark_2d_106",))
+                          if k in face},
             })
         d["_fg_cache"] = new_cache
         return faces

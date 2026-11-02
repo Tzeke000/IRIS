@@ -626,7 +626,12 @@ class PoseLoop:
                 if faces or tracks:
                     res = frame_store.get_buffered_frame(max_age_sec=2.0)
                     if res.frame is not None and float(res.capture_ts or 0.0) <= last_cap:
-                        period = 0.004           # no new frame yet — poll cheaply
+                        # No new frame yet — sleep until push_frame() announces
+                        # one (bounded ~0.1 s), then loop straight back. Was a
+                        # 4 ms poll; IRIS_FRAME_EVENT_WAIT=0 restores it.
+                        # 2026-11-02 efficiency pass, audit #3.
+                        frame_store.wait_for_buffered_frame(last_cap)
+                        period = 0.0
                         res = None
                     if res is not None and res.frame is not None:
                         last_cap = float(res.capture_ts or 0.0)

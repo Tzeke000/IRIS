@@ -35,6 +35,12 @@ if [ "$ENGINE" = "fish" ]; then
     # export IRIS_FISH_REF_WAV="$HOME/voice_lab/ref_expressive/x3.wav" IRIS_FISH_REF_TXT="$HOME/voice_lab/ref_expressive/x3.txt"
     export IRIS_FISH_REF_WAV="$HOME/voice_lab/ref_candidates/elB_20s.wav" IRIS_FISH_REF_TXT="$HOME/voice_lab/ref_candidates/elB_20s.txt"
     export IRIS_FISH_ROOT="$HOME/voice_lab/fish" TMPDIR="$HOME/voice_lab/tmp"
+    # 11-02 efficiency pass (audit #6): inductor forked 32 compile workers at warm-up and kept them for the
+    # life of the mouth (~9.9 GB private RAM, 0% CPU, the reason iris-oom-demote exists). 1 = compile in-process,
+    # no pool. Warm starts read the inductor cache and barely compile, so they cost ~nothing; a COLD cache
+    # (torch/Fish upgrade, cache wiped) compiles serially and the ~10 min first warm-up gets longer. Override
+    # per start with IRIS_FISH_COMPILE_THREADS=32 (the old behaviour) in the unit env.
+    export TORCHINDUCTOR_COMPILE_THREADS="${IRIS_FISH_COMPILE_THREADS:-1}"
     t0=$(date +%s)
     "$HOME/voice_lab/fish/venv/bin/python" "$ROOT/voice/wren_fish_server.py"
     rc=$?
