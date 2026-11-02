@@ -33,6 +33,16 @@ done
 [ -s "$PROMPT_FILE" ] || { echo "empty/missing prompt file $PROMPT_FILE" >&2; exit 2; }
 OUT="$ROOT/state/helpers"; mkdir -p "$OUT"
 cp "$PROMPT_FILE" "$OUT/$NAME.prompt.md"
+# Standing rules every helper gets (11-02: a helper's FAKE Discord-shaped test token blocked a push - GitHub
+# push protection can't tell fake from real, and the IRIS repo is PUBLIC).
+cat >> "$OUT/$NAME.prompt.md" <<'RULES'
+
+---
+STANDING RULES (appended to every helper prompt): the IRIS repo is PUBLIC. Never put real IP addresses, personal
+data, or secrets in tracked files or commit messages. Test fixtures must not contain LITERAL secret-shaped strings
+either (Discord/GitHub/API-token shapes, private keys) even when fake - build them at runtime, e.g.
+".".join([...]), or GitHub push protection will reject the push.
+RULES
 CLAUDE="$(command -v claude || echo "$HOME/.local/bin/claude")"
 
 # the unit runs this inner script: claude, then the wake-me request (even on failure)
