@@ -220,7 +220,7 @@ When work changes architecture or adds a new subsystem, update relevant docs in 
   - *(Until 2026-08-25 this bullet read "Voice + ears are currently OFF by Zeke's directive … 8769/8770 being DOWN is CORRECT — do not 'heal' them" — roughly a month after that stopped being true. A stale state-claim in an always-loaded file is not inert: it was actively instructing a future me to leave working services dead and to treat a live mouth as a fault. **When a claim in here stops matching what a probe says, fix it that same session** — this file outranks memory because it always loads.)*
 - **Wren's voice (other machine):** `en_US-amy-medium` (Piper). Locked.
 - **Wake word:** none by design (see above); `hey_iris.onnx` exists but is gated off.
-- **STT:** Whisper Large-v3 Turbo (faster-whisper, GPU when CUDA available).
+- **STT:** faster-whisper **`small`** on CUDA fp16 (`voice/wren_listen.py` WHISPER_SIZE; Zeke 06-07 chose small for barge-in speed — re-verified in the ears log 11-02; this line said "Large-v3 Turbo" until then). Streaming-ASR + paralinguistic upgrade research → `profiles/iris/ears_*_2026-11-02.md`.
 - **TTS engines:** Fish S2 Pro mouth (:8769, systemd unit on the server) is live; Piper is the fallback. Kokoro/XTTS are retired (Kokoro rows below are tower-era history).
 
 ## Common issues + fixes
