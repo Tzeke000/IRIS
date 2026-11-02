@@ -579,14 +579,25 @@ def ledger_exit(act_id: str | None, outcome: str, code=None, detail: str | None 
 # (its own login) — that one credential is unavoidable.
 _SECRET_PATHS = ["~/.iris_private.env", "~/IRIS/config/private.local.json", "~/.claude/channels",
                  "~/.config/iris/secrets", "~/.anki_vector", "~/.config/gh", "~/.git-credentials"]
+# Code that would later run OUTSIDE the sandbox if a helper could edit it.
+_PERSIST_PATHS = ["~/.config/systemd", "~/.bashrc", "~/.profile", "~/.bash_profile", "~/.claude/settings.json",
+                  "~/.claude/settings.local.json", "~/IRIS/.claude/settings.json", "~/IRIS/.claude/settings.local.json",
+                  "~/IRIS/scripts/hooks", "~/IRIS/scripts/voice_stop_hook.py"]
 
 
 def lockdown_props(mode) -> list:
     if mode in (None, "", "off"):
         return []
     paths = list(_SECRET_PATHS) + ([] if mode == "helper-ssh" else ["~/.ssh"])
+    # 11-02 ESCAPE FIX (docaudit_1102): a transient `systemd-run --user` unit is NOT sandboxed, so the user manager
+    # was a door out (it read ~/.iris_private.env). Deny the user bus + systemd's private socket, and make the files
+    # that run code later, outside the sandbox (user units, shell rc, CC settings hooks), read-only.
+    run_dir = f"/run/user/{os.getuid()}"
+    paths += [f"{run_dir}/bus", f"{run_dir}/systemd"]
     inacc = " ".join("-" + os.path.expanduser(p) for p in paths)   # '-' = ignore if the path doesn't exist
+    ro = " ".join("-" + os.path.expanduser(p) for p in _PERSIST_PATHS)
     return ["-p", "NoNewPrivileges=yes", "-p", "PrivateUsers=yes", "-p", f"InaccessiblePaths={inacc}",
+            "-p", f"ReadOnlyPaths={ro}", "-p", "UnsetEnvironment=DBUS_SESSION_BUS_ADDRESS",
             "-p", f"Environment=IRIS_LOCKDOWN={mode}"]
 
 
