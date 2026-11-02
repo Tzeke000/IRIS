@@ -2419,7 +2419,7 @@ def _cmd_bargein_watch_tiered(ctx, args: dict, live=None):
     except Exception as e:
         actions.settle(clf.update(_duplex.Observation(text="", final=True)))
         return f"[bargein_watch] interrupted, transcription error: {e!r}"
-    if heard and clf.fizzled and _is_phantom(heard, audio):
+    if heard and _is_phantom(heard, audio):   # 11-02: every KEPT episode, not only fizzled (a phantom "Thank you." leaked as DEFER: unverified speaker)
         _log(f"phantom discarded (kept episode, {heard!r})")
         heard = ""
     _svs = _self_voice_score(audio, self_drop_bar) if heard else None
