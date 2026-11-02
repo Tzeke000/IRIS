@@ -81,6 +81,14 @@ except Exception:  # noqa: BLE001
     print("[wren-voice-core] iris_live_words not importable — live partials disabled",
           file=sys.stderr)
 
+# Streaming ASR sidecar (11-02, Nemotron): voice/iris_stream_asr.py client, hot flag stream_asr.
+try:
+    import iris_stream_asr as _sasr
+    _HAVE_SASR = True
+except Exception:  # noqa: BLE001
+    _HAVE_SASR = False
+    print("[wren-voice-core] iris_stream_asr not importable — stream_asr stays off", file=sys.stderr)
+
 import numpy as np
 import sounddevice as sd
 # 2026-10-07 server port: the mic may be a NETWORK source (Zeke's headset on the tower,
@@ -428,6 +436,196 @@ class _StreamingPartials:
             return self._latest
 
 
+# ── Streaming ASR sidecar (11-02, Zeke: straight to ON) ─────────────────────────────────────────
+# Nemotron Speech Streaming 0.6B runs as its own process (voice/iris_stream_asr_server.py, unit
+# iris-stream-asr). Hot flag in scratch/voice_control.json:
+#   stream_asr            "off" (default) | "on"
+#   stream_asr_final_ms   how long turn-end waits for the sidecar final (default 150)
+#   stream_asr_preroll_s  pre-onset audio also fed to the sidecar for context (listen path, 0.3)
+# When on (in-call listens + the tiered barge watch):
+#   * the same mic frames go to the sidecar, non-blocking; its partials ARE the live words (and the
+#     backchannel's "heard" text). The whisper partial re-decode every 1.2 s does not run.
+#   * turn end: the sidecar final if it lands within stream_asr_final_ms and is non-empty, else the
+#     old whisper path, unchanged (an empty final never wins: whisper + the phantom gate decide).
+#   * prosody keeps WHISPER word timings, but off the critical path: ONE whisper word pass runs in the
+#     background when he pauses (PARTIAL_PAUSE_SILENCE_S of silence after new speech), i.e. inside the
+#     end-of-turn silence wait that happens anyway. If that pass covered all his speech and is done by
+#     the same deadline, its timings are aligned onto the sidecar words and enrich() marks them; if not,
+#     the turn goes out on time without emphasis marks (logged) - never late for prosody. If the sidecar
+#     misses, the same pass is a Route-1 HIT (no full pass) whenever it covered the speech.
+# Sidecar down / hung / slow: sessions break quietly (connect fails fast, bounded queue, flush
+# timeout), the client skips new sessions for 5 s, and every path falls back to whisper.
+STREAM_ASR_FINAL_MS = 150.0
+STREAM_ASR_PREROLL_S = 0.3
+STREAM_ASR_LOG = _IRIS_REPO / "state" / "health" / "stream_asr_turns.jsonl"
+
+
+def _stream_ctl() -> dict:
+    """{"on", "final_s", "preroll_s", "mode"} from voice_control.json (hot). on=False when the flag is
+    off, the client is missing, or the sidecar failed to connect in the last few seconds."""
+    try:
+        from wren_voice_status import read_control
+        c = read_control()
+    except Exception:
+        c = {}
+    mode = c.get("stream_asr", "off")
+    mode = "on" if (mode is True or str(mode).strip().lower() in ("on", "true", "1")) else "off"
+    def _f(k, d, lo, hi):
+        try:
+            return min(hi, max(lo, float(c.get(k, d))))
+        except Exception:
+            return d
+    on = mode == "on" and _HAVE_SASR and not _sasr.recently_failed()
+    return {"mode": mode, "on": on, "final_s": _f("stream_asr_final_ms", STREAM_ASR_FINAL_MS, 20, 2000) / 1000.0,
+            "preroll_s": _f("stream_asr_preroll_s", STREAM_ASR_PREROLL_S, 0.0, 1.0)}
+
+
+def _open_stream_session(on_partial, source: str):
+    """The real sidecar session (tests monkeypatch this with a fake)."""
+    return _sasr.StreamSession(on_partial=on_partial, source=source)
+
+
+class _StreamFeed:
+    """One utterance's feed to the sidecar. Opens lazily at onset (pre-onset frames buffered for
+    context), never blocks the caller, never raises. .text = freshest partial."""
+
+    def __init__(self, source: str, on_partial=None, preroll_s: float = 0.0, frame_s: float = 0.1):
+        self.source = source
+        self._user_cb = on_partial
+        self.preroll = collections.deque(maxlen=max(0, int(round(preroll_s / frame_s))))
+        self.sess = None
+        self.text = ""
+        self.failed = None          # reason the session could not be opened
+        self.t_end = None
+
+    def _on_partial(self, text: str) -> None:
+        self.text = text
+        if self._user_cb is not None:
+            try:
+                self._user_cb(text)
+            except Exception:
+                pass
+
+    @property
+    def broken(self) -> bool:
+        return self.failed is not None or (self.sess is not None and bool(getattr(self.sess, "broken", None)))
+
+    def pre_onset(self, f) -> None:
+        if self.sess is None and self.preroll.maxlen:
+            self.preroll.append(f)
+
+    def onset(self) -> None:
+        if self.sess is not None or self.failed is not None:
+            return
+        try:
+            self.sess = _open_stream_session(self._on_partial, self.source)
+        except Exception as e:  # noqa: BLE001
+            self.failed = f"open: {e!r}"
+            return
+        for f in self.preroll:
+            self.sess.feed(f)
+        self.preroll.clear()
+
+    def feed(self, f) -> None:
+        if self.sess is None:
+            self.onset()
+        if self.sess is not None:
+            try:
+                self.sess.feed(f)
+            except Exception:
+                pass
+
+    def flush(self, timeout_s: float) -> "dict | None":
+        if self.sess is None:
+            return None
+        try:
+            return self.sess.flush(timeout_s)
+        except Exception:
+            return None
+
+    def close(self) -> None:
+        if self.sess is not None:
+            try:
+                self.sess.close()
+            except Exception:
+                pass
+
+    def why_missing(self) -> str:
+        if self.sess is None:
+            return self.failed or "no session (sidecar skipped)"
+        b = getattr(self.sess, "broken", None)
+        return f"broken: {b}" if b else "final late"
+
+
+class _AlignedWord:
+    """faster-whisper-word-shaped (.word/.start/.end/.probability) for wren_prosody.enrich."""
+    __slots__ = ("word", "start", "end", "probability")
+
+    def __init__(self, word, start, end, probability=1.0):
+        self.word, self.start, self.end, self.probability = word, start, end, probability
+
+
+def _norm_tok(w: str) -> str:
+    return re.sub(r"[^a-z0-9']", "", (w or "").lower())
+
+
+def _align_stream_words(text: str, wwords: list, min_match: float = 0.5) -> list:
+    """Whisper word timings carried onto the SIDECAR's words (difflib alignment on normalised tokens).
+    Every sidecar word is kept (enrich builds the marked transcript from this list); unmatched ones get
+    times interpolated between matched neighbours. [] when under min_match of the words line up - then
+    the turn just goes out unmarked."""
+    import difflib
+    toks = (text or "").split()
+    if not toks or not wwords:
+        return []
+    wn = [_norm_tok(getattr(w, "word", "")) for w in wwords]
+    sn = [_norm_tok(t) for t in toks]
+    times: list = [None] * len(toks)
+    sm = difflib.SequenceMatcher(a=sn, b=wn, autojunk=False)
+    matched = 0
+    for a, b, n in sm.get_matching_blocks():
+        for k in range(n):
+            w = wwords[b + k]
+            times[a + k] = (float(w.start), float(w.end), float(getattr(w, "probability", 1.0) or 1.0))
+            matched += 1
+    if matched < max(1, min_match * len(toks)):
+        return []
+    out: list = []
+    i = 0
+    t0_all = float(wwords[0].start)
+    t1_all = float(wwords[-1].end)
+    while i < len(toks):
+        if times[i] is not None:
+            s_, e_, p_ = times[i]
+            out.append(_AlignedWord(" " + toks[i], s_, e_, p_))
+            i += 1
+            continue
+        j = i
+        while j < len(toks) and times[j] is None:
+            j += 1
+        lo = times[i - 1][1] if i > 0 else t0_all
+        hi = times[j][0] if j < len(toks) else t1_all
+        hi = max(hi, lo)
+        step = (hi - lo) / (j - i)
+        for k in range(i, j):
+            s_ = lo + step * (k - i)
+            out.append(_AlignedWord(" " + toks[k], s_, s_ + max(step, 0.05), 0.0))
+        i = j
+    return out
+
+
+def _stream_log(**rec) -> None:
+    """One line per streamed turn -> state/health/stream_asr_turns.jsonl (counts + timings only)."""
+    try:
+        import json as _json
+        rec["ts"] = round(time.time(), 3)
+        STREAM_ASR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(STREAM_ASR_LOG, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(rec) + "\n")
+    except Exception:
+        pass
+
+
 # ── Live words (10-29 full-duplex chunk 3, Zeke: "hear my words live, in VR and on the app") ──
 # Rolling DISPLAY-ONLY partials of the current utterance → state/voice/live_partial.json (see
 # voice/iris_live_words.py). Listen path: the existing Route-1 partial worker mirrors each pass.
@@ -524,7 +722,11 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                        hold_open_fn=None, extend_max_s: float = 0.0,
                        extend_recheck_s: float = 0.4,
                        backchannel: "_Backchannel | None" = None,
-                       timing: "dict | None" = None) -> "np.ndarray | None":
+                       timing: "dict | None" = None,
+                       asr_stream: "_StreamFeed | None" = None,
+                       prosody_on_pause: bool = False,
+                       text_partials: "_StreamingPartials | None" = None,
+                       worker_out: "dict | None" = None) -> "np.ndarray | None":
     """Block until speech onset (or timeout), then record until trailing silence or max
     length. Sets overlay state to listening when mic opens.
     Returns float32 audio, or None if nothing was said.
@@ -548,7 +750,14 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
     hold-open bar) whether the speaker sounds MID-THOUGHT; if so, keep capturing until
     extend_max_s of total silence (re-checking every extend_recheck_s so a flip to
     'complete' ends promptly). Speech resuming during the extension resets the silence
-    clock and the next crossing re-decides fresh. Any error → end as before. Best-effort."""
+    clock and the next crossing re-decides fresh. Any error → end as before. Best-effort.
+
+    Streaming ASR (11-02): `asr_stream` (a _StreamFeed) gets up to its preroll of pre-onset frames, then
+    every frame that goes into the capture buffer (after the backchannel self-window zeroing), never
+    blocking. With prosody_on_pause the whisper worker does NOT run on a cadence: it runs ONE word-
+    timed pass each time he pauses (PARTIAL_PAUSE_SILENCE_S of silence after new speech), and turn-end
+    does not wait for it - the thread is handed back in worker_out["thread"] so the caller waits only
+    as long as its own deadline allows. text_partials (default: partials) is the backchannel's text."""
     # Use the mic index resolved on the daemon's MAIN thread (ctx.mic_dev_idx). Calling
     # find_input_device (sd.query_devices) HERE on a worker connection thread hangs on
     # Windows. Fall back to find_input_device only if the daemon didn't set it.
@@ -573,8 +782,31 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
     # ── Background partial transcriber (Route 1) ──────────────────────────────
     stop_evt = threading.Event()
     pause_evt = threading.Event()   # set during trailing silence → worker skips passes (Wren 2026-06-27)
+    n_coll = [0, 0]                 # [samples in `collected`, samples at the last voiced frame]
     worker = None
-    if (partials is not None and transcribe_fn is not None and STREAMING_PARTIALS):
+    if (partials is not None and transcribe_fn is not None and prosody_on_pause):
+        def _partial_loop():
+            covered = 0
+            while not stop_evt.wait(0.05):
+                if not pause_evt.is_set() or n_coll[1] <= covered:
+                    continue          # still talking, or this pause's speech already has a pass
+                with buf_lock:
+                    snap = collected[:] if collected else None
+                    covered = n_coll[1]
+                if not snap:
+                    continue
+                n_samples = sum(len(x) for x in snap)
+                try:
+                    buf = np.concatenate(snap)
+                    t0 = time.time()
+                    with _WHISPER_LOCK:
+                        text, words = transcribe_fn(buf)
+                    partials.update((text or "").strip(), words, n_samples, time.time() - t0)
+                except Exception as e:  # best-effort: a failed pass never breaks capture
+                    print(f"[stream_asr] prosody pass failed (non-fatal): {e!r}", file=sys.stderr)
+        worker = threading.Thread(target=_partial_loop, daemon=True, name="wren-prosody-pass")
+        worker.start()
+    elif (partials is not None and transcribe_fn is not None and STREAMING_PARTIALS):
         def _partial_loop():
             last_n = 0
             min_samples = int(PARTIAL_MIN_AUDIO_S * SAMPLE_RATE)
@@ -639,6 +871,12 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                             backchannel.policy.on_frame(now, True, frame_s)
                         with buf_lock:
                             collected.append(f)
+                            n_coll[0] = n_coll[1] = f.size
+                        if asr_stream is not None:
+                            asr_stream.onset()
+                            asr_stream.feed(f)
+                    elif asr_stream is not None:
+                        asr_stream.pre_onset(f)
                 else:
                     voiced = peak >= CONTINUE_PEAK
                     if (backchannel is not None and backchannel.player.in_self_window(now)
@@ -651,6 +889,11 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                         backchannel.policy.on_frame(now, voiced, frame_s)
                     with buf_lock:
                         collected.append(f)
+                        n_coll[0] += f.size
+                        if voiced:
+                            n_coll[1] = n_coll[0]
+                    if asr_stream is not None:
+                        asr_stream.feed(f)
                     if voiced:
                         last_voice_t = now
                         pause_evt.clear()   # he's still talking → let partials run
@@ -665,7 +908,8 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                                                               end_silence_s)):
                         with buf_lock:
                             snap = collected[:]
-                        backchannel.maybe_fire(ctx, np.concatenate(snap), now, partials)
+                        backchannel.maybe_fire(ctx, np.concatenate(snap), now,
+                                               text_partials if text_partials is not None else partials)
                     if silence >= end_silence_s:
                         if not ext_enabled:
                             break  # he finished a thought (full end-silence reached)
@@ -731,6 +975,10 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
         stop_evt.set()
         if timing is not None and started:
             timing["speech_end_ts"] = last_voice_t
+        if worker is not None and prosody_on_pause:
+            if worker_out is not None:
+                worker_out["thread"] = worker   # caller waits on it only up to its own deadline
+            worker = None
         if worker is not None:
             _tj = time.time()
             worker.join(timeout=2.0)
@@ -852,6 +1100,59 @@ def _transcribe_in_call(audio: "np.ndarray", partials: "_StreamingPartials | Non
     with _WHISPER_LOCK:   # block if a partial pass is still in flight (no reentrant whisper)
         text, words = _prosody.transcribe(audio)
     return (text or "").strip(), words
+
+
+def _transcribe_stream_turn(audio: "np.ndarray", stream: "_StreamFeed",
+                            partials: "_StreamingPartials | None", pass_thread, final_s: float):
+    """Turn end with the streaming sidecar on -> (text, words_data). See the stream_asr block.
+
+    1. flush the sidecar and wait for its final until speech-capture end + final_s.
+    2. non-empty final -> it IS the text. Prosody timings: the once-per-pause whisper pass, if it
+       covered all the speech (silent tail) and finished by the same deadline -> aligned onto the
+       sidecar words; else [] (the turn goes out unmarked, on time).
+    3. no/late/empty final -> whisper exactly as before (_transcribe_in_call), after letting an
+       in-flight pause pass finish - it holds the whisper lock anyway and is usually a Route-1 HIT."""
+    t_end = stream.t_end or time.time()
+    deadline = t_end + final_s
+    fin = stream.flush(max(0.0, deadline - time.time()))
+    stream.close()
+    s_text = ((fin or {}).get("text") or "").strip()
+    rec = {"path": "listen", "audio_s": round(audio.size / SAMPLE_RATE, 2)}
+    if fin is not None:
+        rec.update(final_ms=fin.get("client_ms"), server_flush_ms=fin.get("flush_ms"))
+    if not s_text:
+        why = "empty final" if fin is not None else stream.why_missing()
+        print(f"[stream_asr] whisper fallback — {why}", file=sys.stderr)
+        if pass_thread is not None:
+            pass_thread.join(timeout=2.0)
+        t0 = time.time()
+        text, words = _transcribe_in_call(audio, partials)
+        rec.update(used="whisper", why=why, whisper_ms=round((time.time() - t0) * 1000))
+        _stream_log(**rec)
+        return text, words
+    if pass_thread is not None and pass_thread.is_alive():
+        pass_thread.join(max(0.0, deadline - time.time()))
+    words: list = []
+    latest = partials.latest() if partials is not None else None
+    if latest is None:
+        prosody = "pass-late" if (pass_thread is not None and pass_thread.is_alive()) else "no-pass"
+    else:
+        _p_text, p_words, p_n = latest
+        total = int(audio.shape[0])
+        tail = audio[p_n:] if 0 < p_n < total else audio[:0]
+        if not p_words:
+            prosody = "pass-empty"
+        elif tail.size and float(np.abs(tail).max()) >= PARTIAL_TAIL_SILENCE_PEAK:
+            prosody = "pass-stale"      # he spoke again after the last pause pass
+        else:
+            words = _align_stream_words(s_text, list(p_words))
+            prosody = "aligned" if words else "align-poor"
+    print(f"[stream_asr] final in {rec.get('final_ms')}ms (server flush {rec.get('server_flush_ms')}ms) "
+          f"used, no end-of-turn whisper; prosody {prosody}", file=sys.stderr)
+    rec.update(used="stream", prosody=prosody, words=len(s_text.split()),
+               turn_ms=round((time.time() - t_end) * 1000))
+    _stream_log(**rec)
+    return s_text, words
 
 
 def _run_with_timeout(fn, seconds: float, name: str = "") -> bool:
@@ -1083,8 +1384,36 @@ def cmd_status(ctx, args: dict) -> str:
         rich_degraded = _rich_health(ctx)
     except Exception:
         rich_degraded = []
+    try:
+        sa = _stream_status_line()
+    except Exception:
+        sa = "?"
     return (f"voice_server_warm={server_ok}  state={st.get('state')}  "
-            f"muted={muted}  rich_degraded={rich_degraded}  detail={st.get('detail','')!r}")
+            f"muted={muted}  rich_degraded={rich_degraded}  stream_asr={sa}  "
+            f"detail={st.get('detail','')!r}")
+
+
+def _stream_status_line() -> str:
+    """'off' | 'on(ok)' | 'on(DOWN -> whisper)' - cheap: one ping on the local socket."""
+    c = _stream_ctl()
+    if c["mode"] != "on":
+        return "off"
+    if not _HAVE_SASR:
+        return "on(client missing -> whisper)"
+    pong = _sasr.ping(timeout=0.3)
+    return "on(ok)" if (pong and pong.get("warm")) else "on(DOWN -> whisper)"
+
+
+def cmd_stream_asr_status(ctx, args: dict) -> dict:
+    """Streaming-ASR sidecar health for voice_status / health_snapshot: the hot flag, a live ping
+    of the sidecar socket, and this daemon's session counters (finals used / late / missing)."""
+    c = _stream_ctl()
+    pong = _sasr.ping(timeout=0.5) if _HAVE_SASR else None
+    h = _sasr.health() if _HAVE_SASR else {}
+    h.pop("server", None)
+    return {"mode": c["mode"], "effective": bool(c["on"] and pong and pong.get("warm")),
+            "final_ms": round(c["final_s"] * 1000), "sidecar": pong, "client": h,
+            "sock": _sasr.default_sock_path() if _HAVE_SASR else None}
 
 
 def cmd_speak(ctx, args: dict) -> str:
@@ -1777,6 +2106,18 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
     # same as the final pass), and skip while the mouth speaks (GPU-contention guard).
     in_call = getattr(ctx, "call_warm", False) and _HAVE_PROSODY
     partials = _StreamingPartials(live=live) if (in_call and STREAMING_PARTIALS) else None
+    # Streaming ASR (11-02): sidecar partials are the live words; whisper only runs once per pause
+    # for prosody timings (partials then holds those passes, with no display mirror).
+    sctl = _stream_ctl() if in_call else None
+    stream = None
+    stream_text = None            # _StreamingPartials mirroring the sidecar partials (live + backchannel)
+    wout: dict = {}
+    if sctl is not None and sctl["on"]:
+        stream_text = _StreamingPartials(live=live)
+        stream = _StreamFeed("listen",
+                             on_partial=lambda t: stream_text.update(t, None, 0, 0.0),
+                             preroll_s=sctl["preroll_s"])
+        partials = _StreamingPartials(live=None)
     ef_state: dict = {}   # _capture_utterance sets {"fired": True} if early-finalize triggered
     # Smart-extend (read per-listen, same hot pattern as the pace file): when enabled,
     # a turn that reaches the fast window but SOUNDS unfinished holds the mic open up
@@ -1798,12 +2139,22 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
                 extend_recheck_s=(ext_cfg["recheck_seconds"] if ext_cfg else 0.4),
                 backchannel=bc,
                 timing=timing,
+                asr_stream=stream,
+                prosody_on_pause=stream is not None,
+                text_partials=stream_text,
+                worker_out=wout,
             )
     except Exception as e:
+        if stream is not None:
+            stream.close()
         set_state("idle")
         return f"[voice_listen] capture error: {e!r}"
+    if stream is not None:
+        stream.t_end = time.time()
 
     if audio is None or audio.size == 0:
+        if stream is not None:
+            stream.close()
         set_state("idle")
         return f"[voice_listen] no speech within {timeout_s:.0f}s"
 
@@ -1826,7 +2177,10 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
     words_data: list = []
     final_ok = True   # False if a grace re-transcribe failed → audio/words mismatch, skip prosody
     try:
-        if in_call:
+        if in_call and stream is not None:
+            text, words_data = _transcribe_stream_turn(audio, stream, partials, wout.get("thread"),
+                                                       sctl["final_s"])
+        elif in_call:
             text, words_data = _transcribe_in_call(audio, partials)
         else:
             text = (wl._transcribe_array(audio) or "").strip()
@@ -2375,6 +2729,41 @@ def _cmd_bargein_watch_tiered(ctx, args: dict, live=None):
     stats: dict = {}
     import torch
 
+    # Streaming ASR (11-02): his words during my speech stream to the sidecar from the episode's
+    # pre-roll on; its partials are the live words + the classifier's text. If the session breaks
+    # mid-episode, the captured audio so far is replayed into the whisper LiveWords (old behaviour).
+    sctl = _stream_ctl()
+    bstream = None
+    cap_frames: list = []
+    if sctl["on"]:
+        bstream = _StreamFeed("barge", on_partial=(live.publish if live is not None else None))
+
+    replayed = [False]
+
+    def _on_capture(c):
+        if bstream is None:
+            if live is not None:
+                live.feed(c)
+            return
+        cap_frames.append(c)
+        if not bstream.broken:
+            bstream.feed(c)
+            if not bstream.broken:
+                return
+        if live is None:
+            return
+        if not replayed[0]:                 # sidecar just broke: whisper live words from the start
+            replayed[0] = True
+            for x in cap_frames:
+                live.feed(x)
+        else:
+            live.feed(c)
+
+    def _text_now():
+        if bstream is not None and not bstream.broken and bstream.text:
+            return bstream.text
+        return live.last_text if live is not None else None
+
     try:
         with ctx.mic_lock:
             with _net_audio.open_mic(sd, SAMPLE_RATE, dev_idx, VAD_CHUNK) as stream:
@@ -2395,9 +2784,13 @@ def _cmd_bargein_watch_tiered(ctx, args: dict, live=None):
                     preroll_chunks=max(1, round(BARGEIN_PREROLL_MS / VAD_CHUNK_MS)),
                     end_silence_chunks=max(1, round(BARGEIN_END_SILENCE_MS / VAD_CHUNK_MS)),
                     max_chunks=max(1, int(BARGEIN_MAX_CAPTURE_S * SAMPLE_RATE / VAD_CHUNK)),
-                    min_rms=min_rms, text_fn=(lambda: live.last_text) if live is not None else None,
-                    on_capture=(live.feed if live is not None else None), stats=stats)
+                    min_rms=min_rms,
+                    text_fn=_text_now if (live is not None or bstream is not None) else None,
+                    on_capture=_on_capture if (live is not None or bstream is not None) else None,
+                    stats=stats)
     except Exception as e:
+        if bstream is not None:
+            bstream.close()
         if actions.state == "paused":
             _restore_after_false_barge(ctx, f"watcher error {e!r:.60}")
         elif actions.state == "ducked":
@@ -2405,20 +2798,43 @@ def _cmd_bargein_watch_tiered(ctx, args: dict, live=None):
         return f"[bargein_watch] watcher error: {e!r}"
 
     if audio is None or clf is None:
+        if bstream is not None:
+            bstream.close()
         if stats.get("faint_voiced") or stats.get("fizzled"):
             _log(f"no_barge (faint {stats.get('faint_voiced', 0)}, fizzled {stats.get('fizzled', 0)})")
         return "[bargein_watch] no_barge"
+    if bstream is not None:
+        bstream.t_end = time.time()
     if live is not None:
         live.stop()
     if clf.fizzled and is_muted():
         # kept-but-quiet audio: the orb mute landed while he spoke -> his words are not for me
+        if bstream is not None:
+            bstream.close()
         return "[bargein_watch] no_barge"
-    try:
-        with _WHISPER_LOCK:
-            heard = (wl._transcribe_array(audio) or "").strip()
-    except Exception as e:
-        actions.settle(clf.update(_duplex.Observation(text="", final=True)))
-        return f"[bargein_watch] interrupted, transcription error: {e!r}"
+    heard = None
+    if bstream is not None:
+        fin = bstream.flush(sctl["final_s"])
+        bstream.close()
+        s_text = ((fin or {}).get("text") or "").strip()
+        rec = {"path": "barge", "audio_s": round(audio.size / SAMPLE_RATE, 2),
+               "final_ms": (fin or {}).get("client_ms"), "server_flush_ms": (fin or {}).get("flush_ms")}
+        if s_text:
+            heard = s_text
+            rec.update(used="stream", words=len(s_text.split()))
+            _log(f"stream final in {rec['final_ms']}ms used (no whisper)")
+        else:
+            why = "empty final" if fin is not None else bstream.why_missing()
+            rec.update(used="whisper", why=why)
+            _log(f"stream miss ({why}) -> whisper")
+        _stream_log(**rec)
+    if heard is None:
+        try:
+            with _WHISPER_LOCK:
+                heard = (wl._transcribe_array(audio) or "").strip()
+        except Exception as e:
+            actions.settle(clf.update(_duplex.Observation(text="", final=True)))
+            return f"[bargein_watch] interrupted, transcription error: {e!r}"
     if heard and clf.fizzled and _is_phantom(heard, audio):
         _log(f"phantom discarded (kept episode, {heard!r})")
         heard = ""

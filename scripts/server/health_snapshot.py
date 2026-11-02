@@ -264,6 +264,67 @@ def probe_ears(ctx: dict) -> dict:
     return _r("red", probe, err, **det)
 
 
+def stream_asr_ping(path: str, timeout: float = 1.0) -> dict:
+    """Ping the streaming-ASR sidecar (voice/iris_stream_asr.py wire format: type byte + u32 BE length)."""
+    import struct
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(path)
+        s.sendall(struct.pack(">cI", b"P", 0))
+        hdr = b""
+        while len(hdr) < 5:
+            b = s.recv(5 - len(hdr))
+            if not b:
+                raise ConnectionError("closed")
+            hdr += b
+        kind, n = struct.unpack(">cI", hdr)
+        body = b""
+        while len(body) < n:
+            b = s.recv(n - len(body))
+            if not b:
+                raise ConnectionError("closed")
+            body += b
+        return json.loads(body.decode("utf-8"))
+    finally:
+        s.close()
+
+
+def _stream_asr_sock() -> str:
+    p = os.environ.get("IRIS_STREAM_ASR_SOCK")
+    if p:
+        return p
+    rd = os.environ.get("XDG_RUNTIME_DIR") or (f"/run/user/{os.getuid()}" if os.path.isdir(f"/run/user/{os.getuid()}") else "")
+    return os.path.join(rd, "iris-stream-asr.sock") if rd else str(HOME / ".cache" / "iris" / "iris-stream-asr.sock")
+
+
+def probe_stream_asr(ctx: dict) -> dict:
+    """Streaming-ASR sidecar (Nemotron, 11-02). Flag stream_asr off -> off. On -> its socket must answer a warm
+    pong; when it doesn't the ears are on whisper (degraded, not deaf) -> warn, red only if the unit is gone."""
+    root = ctx["root"]
+    vc = _load(root / "scratch" / "voice_control.json", {})
+    mode = vc.get("stream_asr", "off")
+    on = mode is True or str(mode).strip().lower() in ("on", "true", "1")
+    probe = "stream-asr sidecar unix socket ping (warm) + flag stream_asr"
+    if not on:
+        return _r("off", probe, None, why="stream_asr flag is off (whisper ears)")
+    if ctx["voice_off"]:
+        return _r("off", probe, None, why="voice_deliberately_off.json says off")
+    det: dict = {}
+    try:
+        pong = stream_asr_ping(ctx.get("stream_asr_sock") or _stream_asr_sock())
+        det = {k: pong.get(k) for k in ("chunk_ms", "sessions", "errors", "last_flush_ms", "busy_s", "uptime_s")}
+        if pong.get("type") == "pong" and pong.get("warm"):
+            return _r("ok", probe, **det)
+        err = f"sidecar not warm: {str(pong)[:120]}"
+    except Exception as e:  # noqa: BLE001
+        err = f"ping failed: {e!r}"[:200]
+    up = unit_active_seconds(ctx.get("stream_asr_unit") or "iris-stream-asr")
+    det["unit_up_s"] = None if up is None else round(up)
+    det["fallback"] = "ears on whisper"
+    return _r("warn" if up is not None else "red", probe, err, **det)
+
+
 def probe_mouth(ctx: dict) -> dict:
     probe = "mouth :8769 GET /health == 200 'ok'"
     det = {"voice_flag_off": ctx["voice_off"]}
@@ -691,6 +752,7 @@ def parity_soak_update(path: Path, now: float, mismatched: set) -> dict:
 
 PROBES = {
     "ears": probe_ears,
+    "stream_asr": probe_stream_asr,
     "mouth": probe_mouth,
     "audio_sink": probe_audio_sink,
     "runtime": probe_runtime,

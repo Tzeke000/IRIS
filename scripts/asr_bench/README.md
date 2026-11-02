@@ -28,3 +28,23 @@ ctranslate2 needs the CUDA 12 libs that ship inside the torch wheels:
 
     SP=venv/lib/python3.11/site-packages/nvidia
     export LD_LIBRARY_PATH=$PWD/$SP/cublas/lib:$PWD/$SP/cudnn/lib:$PWD/$SP/cuda_runtime/lib
+
+## Live integration (2026-11-02, branch ears-stream-1102)
+
+The bench became the ears' streaming path:
+
+    voice/iris_stream_asr_engine.py   NeMo side: incremental log-mel (bit-identical to the whole-clip pass)
+                                      + the exact CacheAwareStreamingAudioBuffer chunk/cache schedule
+    voice/iris_stream_asr_server.py   the sidecar: unix socket, one session per utterance, partial + final
+    voice/iris_stream_asr.py          ears-side client (stdlib + numpy), "Iris" post-fix, health counters
+    scripts/server/iris-stream-asr.service   systemd --user unit (not auto-installed)
+    voice/wren_voice_core.py          flag `stream_asr` in scratch/voice_control.json (off|on), see the
+                                      "Streaming ASR sidecar" block
+
+Checks that go with it (NeMo venv for the first, ears venv for the second):
+
+    stream_replay.py BENCH_JSON [alpha] [phrases]   clips through the LIVE incremental path, 100 ms frames;
+                                                    text must equal the offline bench (31/31 on 11-02)
+    stream_e2e.py session|core [N]                  against a running test sidecar (IRIS_STREAM_ASR_SOCK):
+                                                    real-time feed -> final latency; `core` runs the real
+                                                    _capture_utterance + _transcribe_stream_turn
