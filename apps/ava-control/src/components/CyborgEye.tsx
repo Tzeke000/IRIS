@@ -13,6 +13,7 @@ import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment
 import IrisBody, { type IrisBodyProps } from "./IrisBody";
 import { deriveBlendColors, getCfg } from "./orbShared";
 import { EyeArms3D, controllerFor, eyeArms } from "./eyeArms3d";
+import { frameLimiter, onRenderResume, renderVisible, targetFps } from "../renderGate";
 
 export type PortKey = "right" | "down" | "left" | "up";
 export type PortInfo = { x: number; y: number; nx: number; ny: number };
@@ -176,10 +177,12 @@ function CyborgEyeInner(props: CyborgEyeProps) {
     let prevState = "", avertX = 0, avertY = 0, avertUntil = 0;    // the BODY looks away to think now
     let fpsWatchFrom = Infinity, frames = 0, gaveUp = false, badLow = 0, badHigh = 0, goodLow = 0;
     const v3 = new THREE.Vector3();
-    let raf = 0, last = performance.now(), paused = false;
+    let raf = 0, last = performance.now(), lastIrisFrame = -1;
+    const due = frameLimiter();
     const loop = (now: number) => {
+      if (!renderVisible()) { raf = 0; return; }        // nobody can see me: stop; the gate resumes the loop
       raf = requestAnimationFrame(loop);
-      if (paused) return;
+      if (!due(now)) return;                            // capped (renderGate): 30 fps active, 20 at rest
       const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now;   // rAF time can precede performance.now(): never integrate a NEGATIVE step
       const L = live.current;
       const cfg = getCfg(String(L.emotion || "calmness"));
@@ -226,9 +229,11 @@ function CyborgEyeInner(props: CyborgEyeProps) {
           irisTex?.dispose();
           irisTex = new THREE.CanvasTexture(cv);
           irisTex.colorSpace = THREE.SRGBColorSpace;
-          irisMat.map = irisTex; irisMat.needsUpdate = true;
+          irisMat.map = irisTex; irisMat.needsUpdate = true; lastIrisFrame = -1;
         }
-        if (!DBG.includes("notex")) irisTex.needsUpdate = true;
+        // re-upload only when the hidden iris actually drew a new frame (copying a WebGL canvas costs a readback)
+        const f = (cv as HTMLCanvasElement & { __frame?: number }).__frame ?? 0;
+        if (!DBG.includes("notex") && f !== lastIrisFrame) { lastIrisFrame = f; irisTex.needsUpdate = true; }
       }
       // page px → world (the z=0 plane through the ball centre), for the guide's arm targets
       const cr = container.getBoundingClientRect();
@@ -248,12 +253,15 @@ function CyborgEyeInner(props: CyborgEyeProps) {
         else if (now - fpsWatchFrom > 2500) {
           const fps = frames / ((now - fpsWatchFrom) / 1000);
           frames = 0; fpsWatchFrom = now;
+          // judged against the CAP, not 60 (11-02): the loop now draws 20-30 fps on purpose. Same ratios as the
+          // old uncapped thresholds (30 / 18 / 55 of 60).
+          const cap = targetFps();
           // two bad windows in a row before stepping down (a heavy tab or a screen recorder can dip one window)
-          badHigh = fps < 30 && quality === "high" ? badHigh + 1 : 0;
-          badLow = fps < 18 && quality === "low" ? badLow + 1 : 0;
+          badHigh = fps < cap * 0.5 && quality === "high" ? badHigh + 1 : 0;
+          badLow = fps < cap * 0.3 && quality === "low" ? badLow + 1 : 0;
           // …and the way BACK UP (Zeke 10-08: "a failsafe for the failsafe"): low quality only because something else
           // was hogging the GPU (his game) → once it runs smooth again, return to full quality
-          goodLow = fps >= 55 && quality === "low" && !software ? goodLow + 1 : 0;
+          goodLow = fps >= cap * 0.9 && quality === "low" && !software ? goodLow + 1 : 0;
           if (badHigh >= 2) { quality = "low"; applyQuality(); }
           else if (goodLow >= 4) { quality = "high"; goodLow = 0; applyQuality(); }
           else if (badLow >= 3) {
@@ -285,12 +293,16 @@ function CyborgEyeInner(props: CyborgEyeProps) {
       }
     };
     raf = requestAnimationFrame(loop);
-    const onVis = () => { paused = document.hidden; };
-    document.addEventListener("visibilitychange", onVis);
+    // hidden / minimized / covered ⇒ the loop stops; back in view ⇒ restart (and don't judge the gap as slow frames)
+    const offResume = onRenderResume(() => {
+      if (raf) return;
+      last = performance.now(); frames = 0; if (fpsWatchFrom !== Infinity) fpsWatchFrom = last;
+      raf = requestAnimationFrame(loop);
+    });
     return () => {
       disposed = true;
       cancelAnimationFrame(raf);
-      document.removeEventListener("visibilitychange", onVis);
+      offResume();
       if (portsKey) { eyePorts.delete(portsKey); eyeArms.delete(portsKey); }
       arms3d.dispose();
       irisTex?.dispose();

@@ -20,6 +20,7 @@ import { findEl, scanUi } from "./uiMap";
 import { speakLine, stripTags } from "./speech";
 import { fly, type Pose } from "./flight";
 import { Trail } from "./trail";
+import { frameLimiter, onRenderResume, renderVisible, targetFps } from "../renderGate";
 
 type Step = {
   brain?: string;               // "spin" | "overview" | "focus:<node id>" (e.g. focus:iris, focus:zeke)
@@ -89,11 +90,21 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
     (window as unknown as { __irisGuide?: unknown }).__irisGuide = { arms: arms.current, live: live.current };
     let raf = 0, last = performance.now();
     let slowAvg = 16, glow = true;                  // drop the glow blur if this machine can't keep up
+    const due = frameLimiter();
+    let drewLast = true;                            // a full-window clear is only paid when something was drawn
     const loop = (now: number) => {
+      if (!renderVisible()) { raf = 0; return; }    // hidden / minimized / covered: stop (the gate resumes us)
       raf = requestAnimationFrame(loop);
       const cv = canvasRef.current;
       if (!cv) return;
-      if (document.hidden) return;          // the 24%-GPU-while-hidden scar
+      if (!due(now)) return;                        // capped with the body (renderGate)
+      const L = live.current;
+      // the 3D body draws its own real cables; with no trail either there is nothing to paint on this canvas
+      if (eyeArms.has(L.floating ? "guide" : "home") && !trail.current.puffs.length) {
+        if (drewLast) { cv.getContext("2d")?.clearRect(0, 0, cv.width, cv.height); drewLast = false; }
+        return;
+      }
+      drewLast = true;
       const dpr = window.devicePixelRatio || 1;
       const W = window.innerWidth, H = window.innerHeight;
       if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
@@ -103,7 +114,6 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       if (!ctx) return;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, W, H);
-      const L = live.current;
       if (trail.current.puffs.length) trail.current.draw(ctx, colorRef.current.lightColor || "#6aa3ff");
       let center: Vec, size: number;
       if (L.floating) {
@@ -123,7 +133,7 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       const scale = Math.max(0.55, Math.min(1.6, R / 60));
       const dt = Math.max(0, Math.min(50, now - last)); last = now;
       slowAvg = slowAvg * 0.97 + dt * 0.03;
-      if (glow && slowAvg > 30) glow = false;
+      if (glow && slowAvg > 1.8 * (1000 / targetFps())) glow = false;   // 1.8× the frame budget (was 30 ms of 16.7, uncapped)
       const t = now / 1000;
       const c = colorRef.current;
       for (const k of ARM_KEYS) {
@@ -142,7 +152,8 @@ export default function GuideOverlay({ eye, activeTab, operatorOpen, onFloatingC
       }
     };
     raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
+    const offResume = onRenderResume(() => { if (!raf) { last = performance.now(); raf = requestAnimationFrame(loop); } });
+    return () => { cancelAnimationFrame(raf); offResume(); };
   }, []);
 
   // ---------------------------------------------------------------- eye travel (Disney timing)

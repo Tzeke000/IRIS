@@ -4,6 +4,7 @@ import IrisBody, { type IrisBodyProps } from "./IrisBody";
 import * as THREE from "three";
 
 import { type OrbState, type OrbProps, getCfg, deriveBlendColors, STATE_TINT } from "./orbShared";
+import { onRenderResume, renderVisible } from "../renderGate";
 
 
 function createGlowTex(color: string): THREE.Texture {
@@ -406,6 +407,8 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
 
     function animate(){
       if (renderPaused) return;
+      if (!renderVisible()) { pauseLoop(); return; }   // hidden / minimized / covered (renderGate resumes us)
+      // NOT frame-capped like the iris: this orb steps its motion per frame, so a cap would slow it down.
       fid=requestAnimationFrame(animate);
       const t=clock.getElapsedTime();
       const liveState = stateRef.current;
@@ -733,33 +736,13 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
     animate();
 
     // ── GPU discipline (2026-08-24): stop rendering when nobody can see us ──
-    // Found during Zeke's Half Sword session: the orb burned ~24% of the 3060
-    // even MINIMIZED — WebView2 keeps firing rAF for minimized Tauri windows,
-    // so document.hidden alone is not a reliable signal. Two hooks:
-    //   1. visibilitychange — catches hidden webview (covers most cases)
-    //   2. a 1s isMinimized() poll via the Tauri window API — catches minimize,
-    //      which WebView2 does not surface as visibility.
-    // Pause = stop requeueing rAF. Scene stays warm; resume picks up mid-breath
-    // (t derives from clock.getElapsedTime(), so no state is lost).
-    const onVisibility = () => { document.hidden ? pauseLoop() : resumeLoop(); };
-    document.addEventListener("visibilitychange", onVisibility);
-    let minimizedPoll: ReturnType<typeof setInterval> | undefined;
-    (async () => {
-      try {
-        const { getCurrentWindow } = await import("@tauri-apps/api/window");
-        const win = getCurrentWindow();
-        minimizedPoll = setInterval(async () => {
-          try {
-            if (await win.isMinimized()) pauseLoop();
-            else if (!document.hidden) resumeLoop();
-          } catch { /* window gone mid-poll — dispose will clear us */ }
-        }, 1000);
-      } catch { /* not running under Tauri (dev browser) — visibility hook still active */ }
-    })();
+    // Found during Zeke's Half Sword session: the orb burned ~24% of the 3060 even MINIMIZED — WebView2 keeps
+    // firing rAF for minimized Tauri windows. Since 11-02 one shared gate (renderGate) covers hidden, minimized
+    // AND covered windows for every loop. Pause = stop requeueing rAF; t derives from the clock, so no state is lost.
+    const offResume = onRenderResume(resumeLoop);
 
     disposeRef.current=()=>{
-      document.removeEventListener("visibilitychange", onVisibility);
-      if (minimizedPoll !== undefined) clearInterval(minimizedPoll);
+      offResume();
       cancelAnimationFrame(fid);
       renderer.dispose();
       [coreGeo,igGeo,shellGeo,pGeo].forEach(g=>g.dispose());

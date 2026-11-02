@@ -671,6 +671,59 @@ mod mouselock {
     }
 }
 
+/// Is the main window fully covered (a maximized Discord, a full-screen game on its monitor)? WebView2 only reports
+/// `document.hidden` for a minimize, so a covered window kept rendering at the full vsync rate (2026-11-02: ~35-57%
+/// of the tower's CPU while Zeke gamed). Hit-tests a 5x5 grid over the window: if no on-screen sample lands on one of
+/// my own windows, nobody can see me. Click-through overlays (Discord/NVIDIA) are skipped by WindowFromPoint, so this
+/// errs toward "visible".
+#[tauri::command]
+fn main_occluded(window: tauri::WebviewWindow) -> bool {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+        use windows_sys::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetAncestor, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, WindowFromPoint, GA_ROOT,
+        };
+        let Ok(h) = window.hwnd() else { return false };
+        let hwnd = h.0 as HWND;
+        if IsIconic(hwnd) != 0 || IsWindowVisible(hwnd) == 0 {
+            return true;
+        }
+        let mut r: RECT = std::mem::zeroed();
+        if GetWindowRect(hwnd, &mut r) == 0 {
+            return false;
+        }
+        let me = std::process::id();
+        let mut seen = 0;
+        for i in 0..5 {
+            for j in 0..5 {
+                let p = POINT { x: r.left + (r.right - r.left) * (2 * i + 1) / 10, y: r.top + (r.bottom - r.top) * (2 * j + 1) / 10 };
+                if MonitorFromPoint(p, MONITOR_DEFAULTTONULL).is_null() {
+                    continue; // that part of the window is off every screen
+                }
+                seen += 1;
+                let w = WindowFromPoint(p);
+                if w.is_null() {
+                    return false;
+                }
+                let root = GetAncestor(w, GA_ROOT);
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(root, &mut pid);
+                if root == hwnd || pid == me {
+                    return false; // a visible bit of me (or my widget over me)
+                }
+            }
+        }
+        seen > 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        false
+    }
+}
+
 /// Lock the person's mouse for `ttl_ms` (0 = unlock). Returns (clicks, moves) swallowed since the last call.
 #[tauri::command]
 fn desk_lock(ttl_ms: i64) -> (u32, u32) {
@@ -784,7 +837,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![server_vms, server_vm_power, server_reach, server_open, server_close, server_start_iris,
-            desk_cursor, desk_move, desk_click, desk_scroll, desk_type, desk_keys, desk_open, desk_close_new, desk_snap, desk_place, desk_lock, desk_find_taskbar, desk_play_audio])
+            desk_cursor, desk_move, desk_click, desk_scroll, desk_type, desk_keys, desk_open, desk_close_new, desk_snap, desk_place, desk_lock, desk_find_taskbar, desk_play_audio, main_occluded])
         .build(tauri::generate_context!())
         .expect("error while building Iris Control")
         .run(|app, event| {

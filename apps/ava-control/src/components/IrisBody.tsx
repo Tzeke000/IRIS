@@ -30,6 +30,7 @@
 import { memo, useEffect, useRef } from "react";
 import * as THREE from "three";
 import { type OrbState, type OrbProps, getCfg, deriveBlendColors, STATE_TINT } from "./orbShared";
+import { frameLimiter, onRenderResume, renderVisible } from "../renderGate";
 
 export interface IrisBodyProps extends OrbProps {
   /** Where the person I'm looking at is, -1..1 on each axis (x right, y up). Optional. */
@@ -349,9 +350,13 @@ function IrisBodyInner({ emotion, emotionColor, state, size = 320, shapeOverride
     let lookX = 0, lookY = 0;
     const blinkMean: Record<string, number> = { speaking: 2.3, listening: 3.0, attentive: 3.0, thinking: 5.0, deep: 6.0, bored: 3.0, excited: 2.6 };
 
+    const due = frameLimiter();
+    let drawn = 0;
     function animate() {
       if (renderPaused) return;
+      if (!renderVisible()) { renderPaused = true; return; }   // nobody can see me: stop; the gate resumes the loop
       fid = requestAnimationFrame(animate);
+      if (!due(performance.now())) return;                    // capped (renderGate): 30 fps active, 20 at rest
       const t = clock.getElapsedTime();
       const dt = Math.min(0.1, Math.max(0, t - lastT)); lastT = t;
       const L = live.current;
@@ -571,33 +576,17 @@ function IrisBodyInner({ emotion, emotionColor, state, size = 320, shapeOverride
       else wakeRingMat.opacity = Math.max(0, wakeRingMat.opacity - 0.05);
 
       renderer.render(scene, camera);
+      (renderer.domElement as HTMLCanvasElement & { __frame?: number }).__frame = ++drawn;   // CyborgEye re-uploads only new frames
     }
 
-    const pauseLoop = () => { if (renderPaused) return; renderPaused = true; cancelAnimationFrame(fid); };
     const resumeLoop = () => { if (!renderPaused) return; renderPaused = false; lastT = clock.getElapsedTime(); fid = requestAnimationFrame(animate); };
     animate();
 
-    // GPU discipline (2026-08-24): stop rendering when nobody can see us — same two hooks as the classic orb.
-    const onVisibility = () => { document.hidden ? pauseLoop() : resumeLoop(); };
-    document.addEventListener("visibilitychange", onVisibility);
-    let minimizedPoll: ReturnType<typeof setInterval> | undefined;
-    let disposed = false;
-    (async () => {
-      try {
-        const { getCurrentWindow } = await import("@tauri-apps/api/window");
-        if (disposed) return;
-        const win = getCurrentWindow();
-        minimizedPoll = setInterval(async () => {
-          try { if (await win.isMinimized()) pauseLoop(); else if (!document.hidden) resumeLoop(); }
-          catch { /* window gone mid-poll */ }
-        }, 1000);
-      } catch { /* not under Tauri (dev browser) — visibility hook still active */ }
-    })();
+    // GPU discipline (2026-08-24; one shared gate since 11-02): hidden / minimized / covered ⇒ no frames at all.
+    const offResume = onRenderResume(resumeLoop);
 
     return () => {
-      disposed = true;
-      document.removeEventListener("visibilitychange", onVisibility);
-      if (minimizedPoll !== undefined) clearInterval(minimizedPoll);
+      offResume();
       cancelAnimationFrame(fid);
       irisGeo.dispose(); irisMat.dispose(); moteGeo.dispose(); moteMat.dispose();
       zSprites.forEach(sp => { scene.remove(sp); (sp.material as THREE.SpriteMaterial).dispose(); });
