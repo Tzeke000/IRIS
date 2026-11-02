@@ -20,6 +20,9 @@ use MEASURED peaks per kind, not a snapshot.
     worker.py history [--kind K] [-n 20]
     worker.py stop NAME                           # stop one worker's whole group
     worker.py sweep                               # expired task leases -> needs_review; lost launchers
+    worker.py deps T                              # Phase 3: ready | waiting | blocked (+ why)
+    worker.py task new --goal G [--kind K] [--after T1,T2] [--key K] [--side-effects ...]
+    worker.py verify T --ref ACT_ID               # output_pending -> verified (unblocks dependants)
 
 Admission (conservative by design, start at 3 like the brief says):
   * running workers < IRIS_WORKER_CAP (default 3)
@@ -49,6 +52,16 @@ then newest first = least work lost) ONLY if a simulation shows that frees enoug
 touched. Never a job whose side_effects is `external`, never one whose priority/side_effects are unknown
 (rows from before 10-30, units not launched by this tool). Every cancel is logged to
 state/workers/cancel_log.jsonl + stderr; the job row says `cancelled`; its task is cancelled in the store.
+
+Task dependencies (V3 Phase 3, 2026-11-02, opt-in): a task may declare `after: [task_ids]`
+(`run --after T1,T2`, `task new --after`, or iris_events.create_task(after=...)). It is not claimed - so
+not admitted, not launched - until EVERY parent is done-and-verified (store status verified|committed;
+a worker's own `ok` only reaches output_pending, so a parent needs `worker.py verify T --ref ACT` or a
+store complete(status=verified) first). A parent that failed / was cancelled / is missing, or a cycle,
+makes the dependant `failed` with "not started: dependency X is failed" (`settle`, also run by `sweep`
+every watchdog minute). `run --wait-deps S` polls up to S seconds; the waiting state lives ONLY in the
+event store, so a killed scheduler loses nothing: re-run with `--task-id T` (or the same `--key`) and
+it resumes the wait. Exit 75 = still waiting, 65 = a dependency failed. No `after` => unchanged.
 
 CPU (P2-R4b): per job CPUQuota (default 1200% = 12 of the VM's 36 vCPUs) + CPUWeight; the slice caps ALL
 workers at 2400%. These only bite once the cpu controller is delegated to the user manager
@@ -87,7 +100,8 @@ CANCEL_WAIT_S = float(os.environ.get("IRIS_WORKER_CANCEL_WAIT_S", "30"))
 DEFAULT_PRIORITY = 5
 SIDE_EFFECTS = ("none", "reversible", "external")
 CANCELLABLE = ("none", "reversible")   # the only side_effects classes a lower-priority cancel may stop
-EX_TEMPFAIL, EX_NOPERM, EX_REJECTED = 75, 77, 3
+EX_TEMPFAIL, EX_NOPERM, EX_REJECTED, EX_DEPFAILED = 75, 77, 3, 65
+DEP_POLL_S = float(os.environ.get("IRIS_WORKER_DEP_POLL_S", "5"))
 _UNITS = {"K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
 
 
@@ -486,7 +500,37 @@ def precheck_task(store, task_id: str) -> tuple[dict | None, str]:
 
 # ── run ────────────────────────────────────────────────────────────────────────
 RUN_DEFAULTS = {"task_id": "", "priority": DEFAULT_PRIORITY, "side_effects": "none", "cancel_lower": False,
-                "lease": LEASE_S, "cpu_quota": CPU_QUOTA, "cpu_weight": CPU_WEIGHT, "ledger": False}
+                "lease": LEASE_S, "cpu_quota": CPU_QUOTA, "cpu_weight": CPU_WEIGHT, "ledger": False,
+                "after": "", "key": "", "wait_deps": 0.0}
+
+
+# ── task dependencies (V3 Phase 3) ──────────────────────────────────────────────
+def _split_ids(v) -> list[str]:
+    if not v:
+        return []
+    if isinstance(v, str):
+        v = v.split(",")
+    return [x.strip() for x in v if x and x.strip()]
+
+
+def wait_for_deps(store, task_id: str, wait_s: float, poll: float | None = None,
+                  sleep=time.sleep, clock=time.monotonic) -> dict:
+    """Poll the store until `task_id`'s parents are done-and-verified (state=ready), a parent fails
+    (settle -> the task is failed, state=blocked), or `wait_s` runs out (state=waiting). Nothing is
+    held in this process: kill it at any point and the next caller sees exactly the same state."""
+    poll = DEP_POLL_S if poll is None else poll
+    deadline = clock() + max(0.0, float(wait_s))
+    while True:
+        st = store.dependency_state(task_id)
+        if st is None:
+            return {"state": "unknown", "reason": f"task {task_id} not found / store error "
+                                                  f"({getattr(store, 'last_error', None)})"}
+        if st["state"] == "blocked":
+            store.settle_dependencies(actor="worker.py deps")
+            return st
+        if st["state"] == "ready" or clock() >= deadline:
+            return st
+        sleep(min(poll, max(0.05, deadline - clock())))
 
 
 # ── "delegated != done": the act verification ledger (brain/action_ledger.py) - fail open ──────
@@ -552,13 +596,38 @@ def run(a) -> int:
             setattr(a, k, v)
     mem = parse_size(a.mem) if a.mem else 0
     store = None
-    if a.task_id:
+    after = _split_ids(a.after)
+    if (after or a.key) and not a.task_id:
+        # Phase 3: a dependant task must exist in the store BEFORE we wait/launch (the wait survives us)
         store = events_store()
+        if store is None:
+            print(json.dumps({"admitted": False, "claimed": False,
+                              "why": ["event store unavailable - --after/--key need it"]}, indent=1))
+            return EX_NOPERM
+        r = store.create_task(f"{a.kind}: {a.name}", kind=f"worker:{a.kind}", side_effects=a.side_effects,
+                              idempotency_key=a.key or None, after=after, note=json.dumps(a.cmd)[:500],
+                              actor="worker.py")
+        if r is None:
+            print(json.dumps({"admitted": False, "claimed": False,
+                              "why": [f"could not create the task: {store.last_error}"]}, indent=1))
+            return EX_NOPERM
+        if not r.created and after and r.status == "admitted":
+            store.add_dependencies(r.id, after, actor="worker.py")   # same key, maybe new parents
+        a.task_id = r.id
+    if a.task_id:
+        store = store or events_store()
         task_row, why = precheck_task(store, a.task_id)
         if task_row is None:
             print(json.dumps({"admitted": False, "claimed": False, "why": [why]}, indent=1))
             return EX_NOPERM
         a.side_effects = task_row.get("side_effects") or a.side_effects
+        dep = wait_for_deps(store, a.task_id, float(a.wait_deps or 0))
+        if dep["state"] != "ready":
+            blocked = dep["state"] in ("blocked", "unknown")
+            print(json.dumps({"admitted": False, "claimed": False, "task_id": a.task_id,
+                              "deps": dep["state"], "why": [dep.get("reason")],
+                              "waiting_on": dep.get("waiting_on", [])}, indent=1))
+            return EX_DEPFAILED if blocked else EX_TEMPFAIL
     ok, info = admit_with_cancel(a, mem)
     if not ok and not a.force:
         print(json.dumps({"admitted": False, **info}, indent=1))
@@ -736,6 +805,8 @@ def sweep() -> dict:
     unit is gone and whose launcher stopped recording (killed) -> `launcher_lost`."""
     store = events_store()
     out: dict = {"store": store.sweep_expired(actor="worker.py sweep") if store is not None else None}
+    if store is not None:   # Phase 3: dependants of a failed/cancelled parent never wait forever
+        out["deps_failed"] = store.settle_dependencies(actor="worker.py sweep").get("failed", [])
     live = set(running_workers())
     now = time.time()
     lost = []
@@ -749,6 +820,30 @@ def sweep() -> dict:
                 lost.append(unit)
     out["launcher_lost"] = lost
     return out
+
+
+def task_cli(a) -> int:
+    store = events_store()
+    if store is None:
+        print(json.dumps({"ok": False, "why": "event store unavailable"}))
+        return EX_NOPERM
+    if a.op == "deps":
+        st = store.dependency_state(a.task_id)
+        print(json.dumps(st if st is not None else {"state": "unknown", "why": "no such task"}, indent=1))
+        return 0 if st and st["state"] == "ready" else (EX_TEMPFAIL if st and st["state"] == "waiting"
+                                                        else EX_DEPFAILED)
+    if a.op == "task":
+        r = store.create_task(a.goal, kind=a.kind, side_effects=a.side_effects, idempotency_key=a.key or None,
+                              after=_split_ids(a.after), actor="worker.py task")
+        print(json.dumps({"ok": r is not None, "task_id": r.id if r else None,
+                          "created": r.created if r else None, "why": None if r else store.last_error}))
+        return 0 if r else 1
+    # verify: the task's own current fence (it must already be output_pending - a result exists)
+    t = store.get_task(a.task_id) or {}
+    ok = t.get("status") in ("output_pending", "verified", "committed") and store.complete(a.task_id, int(t.get("fence") or 0), status="verified",
+                                    verification_ref=a.ref, actor="worker.py verify")
+    print(json.dumps({"ok": ok, "task_id": a.task_id, "status": (store.get_task(a.task_id) or {}).get("status")}))
+    return 0 if ok else 1
 
 
 def main() -> int:
@@ -779,6 +874,9 @@ def main() -> int:
     r.add_argument("--lockdown", choices=["off", "helper", "helper-ssh"], default="off",
                    help="V3 spec §6/§13 sandbox (11-02): 'helper' = NoNewPrivileges (no sudo/setuid), PrivateUsers, "
                         "secrets + ssh keys + Discord channel creds INACCESSIBLE; 'helper-ssh' = same but keeps ~/.ssh")
+    r.add_argument("--after", default="", help="comma-separated task ids that must be done+verified first")
+    r.add_argument("--key", default="", help="idempotency key for the auto-created task (re-run = same task)")
+    r.add_argument("--wait-deps", type=float, default=0.0, help="seconds to wait for --after parents (0 = check once)")
     r.add_argument("cmd", nargs=argparse.REMAINDER)
     ad = sub.add_parser("admit")
     ad.add_argument("--kind", required=True)
@@ -788,6 +886,18 @@ def main() -> int:
     ad.add_argument("--cancel-lower", action="store_true", help="show (never execute) the cancel plan")
     sub.add_parser("status")
     sub.add_parser("sweep")
+    dp = sub.add_parser("deps")
+    dp.add_argument("task_id")
+    tk = sub.add_parser("task")
+    tk.add_argument("action", choices=["new"])
+    tk.add_argument("--goal", required=True)
+    tk.add_argument("--kind", default="task")
+    tk.add_argument("--after", default="")
+    tk.add_argument("--key", default="")
+    tk.add_argument("--side-effects", choices=SIDE_EFFECTS, default="none")
+    vf = sub.add_parser("verify")
+    vf.add_argument("task_id")
+    vf.add_argument("--ref", required=True, help="act ledger verification id (evidence)")
     h = sub.add_parser("history")
     h.add_argument("--kind", default="")
     h.add_argument("-n", type=int, default=20)
@@ -823,6 +933,8 @@ def main() -> int:
     if a.op == "sweep":
         print(json.dumps(sweep(), indent=1))
         return 0
+    if a.op in ("deps", "task", "verify"):
+        return task_cli(a)
     if a.op == "history":
         q = "SELECT id,kind,name,outcome,peak_mem,mem_limit,cpu_usec,start_ts,end_ts,gpu_mib,priority FROM jobs"
         args: tuple = ()

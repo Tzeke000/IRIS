@@ -249,7 +249,7 @@ def probe_ears(ctx: dict) -> dict:
     det["last_utterance_age_s"] = round(now - max(ts), 1) if ts else None   # None = none in the log tails
     probe = "ears daemon :8770 {'cmd':'ping'} + last heard utterance age (body log)"
     try:
-        resp = ears_ping()
+        resp = ears_ping(int(ctx["ears_port"])) if ctx.get("ears_port") else ears_ping()
         if resp.get("ok") and (resp.get("result") or {}).get("pong"):
             return _r("ok", probe, **det)
         err = f"ping answered without pong: {str(resp)[:120]}"
@@ -257,7 +257,7 @@ def probe_ears(ctx: dict) -> dict:
         err = f"ping failed: {e!r}"[:200]
     if ctx["voice_off"]:
         return _r("off", probe, None, **det, why="voice_deliberately_off.json says off")
-    up = unit_active_seconds("iris-ears")
+    up = unit_active_seconds(ctx.get("ears_unit") or "iris-ears")
     det["unit_up_s"] = None if up is None else round(up)
     if up is not None and up < 300:
         return _r("warn", probe, err + " (unit warming)", **det)
@@ -538,9 +538,10 @@ def probe_perception(ctx: dict) -> dict:
 
 
 def probe_storage(ctx: dict) -> dict:
-    probe = "disk used % for / and /data (warn 85, red 95)"
+    mounts = tuple(ctx.get("disk_mounts") or ("/", "/data"))   # override = staging/fault injection only
+    probe = f"disk used % for {' and '.join(mounts)} (warn 85, red 95)"
     det, worst, errs = {}, "ok", []
-    for mnt in ("/", "/data"):
+    for mnt in mounts:
         try:
             u = shutil.disk_usage(mnt)
             pct = round(100.0 * u.used / u.total, 1)

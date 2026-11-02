@@ -21,6 +21,12 @@ hang under memory pressure can't stop the watchdog for good.
 3. (V3 Phase 1 step 1.5, 2026-10-30) HEALTH SNAPSHOT: every run - ~/LIVE or not - writes state/health/now.json
    via scripts/server/health_snapshot.py (per-subsystem {ok, status, last_success_ts, lag_s, last_error, probe}).
    Contained: a failing snapshot is logged and never stops the wedge/alert jobs above.
+
+4. (V3 Phase 4, 2026-11-02, OPT-IN) INCIDENT ON RED: when a subsystem in now.json is `red` (not warn, not
+   during boot grace, only with ~/LIVE), freeze an incident bundle (scripts/server/incident.py) in its OWN
+   transient unit (systemd-run --user, RuntimeMaxSec=120 - a oneshot's children die with it, and the
+   capture must not eat this unit's 90 s). At most ONE per subsystem per hour (here + incident.py's own
+   limit). Off unless state/incidents/capture_on_red exists or IRIS_INCIDENT_CAPTURE=1.
 """
 from __future__ import annotations
 
@@ -53,6 +59,8 @@ UNITS = ("iris-mouth", "iris-ears", "iris-postoffice", "iris-postoffice-monitor"
          "iris-wirepod", "iris-vector-brain", "iris-vector-nerves", "iris-backup")
 # Append-only logs that grow forever: keep the newest KEEP bytes once a file passes CAP bytes.
 HEALTH_OUT = ROOT / "state" / "health" / "now.json"
+INCIDENT_FLAG = ROOT / "state" / "incidents" / "capture_on_red"
+INCIDENT_RATE_S = 3600.0
 LOG_CAPS = {ROOT / "state" / "attention" / "ptz_audit.jsonl": (50 << 20, 20 << 20)}
 
 
@@ -223,6 +231,50 @@ def worker_sweep():
         log(f"worker sweep failed (non-fatal): {e!r}")
 
 
+def incidents_on() -> bool:
+    return os.environ.get("IRIS_INCIDENT_CAPTURE") == "1" or INCIDENT_FLAG.exists()
+
+
+def spawn_incident(subsystem: str, reason: str) -> bool:
+    """Start `incident.py capture` in its own transient user unit (outlives this oneshot)."""
+    unit = f"iris-incident-{''.join(ch if ch.isalnum() else '-' for ch in subsystem)[:30]}-{int(time.time())}"
+    cmd = ["systemd-run", "--user", "--quiet", "--collect", f"--unit={unit}", "-p", "RuntimeMaxSec=120",
+           "-p", "Nice=10", "-p", "MemoryMax=512M", f"--working-directory={ROOT}", "--",
+           sys.executable, str(Path(__file__).with_name("incident.py")), "capture", reason,
+           "--subsystem", subsystem]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        ok = r.returncode == 0
+        log(f"incident capture {'started' if ok else 'FAILED to start'} for {subsystem}: {unit}"
+            + ("" if ok else f" {r.stderr[-160:]}"))
+        return ok
+    except Exception as e:  # noqa: BLE001
+        log(f"incident capture FAILED to start for {subsystem}: {e!r}")
+        return False
+
+
+def capture_red_incidents(doc, st: dict, now: float, *, in_grace: bool = False, spawn=None) -> list[str]:
+    """One bundle per newly/still-red subsystem, rate-limited to INCIDENT_RATE_S per subsystem
+    (state in server_watchdog.json `incident_ts`). Contained: never raises."""
+    try:
+        if not doc or in_grace or not incidents_on():
+            return []
+        spawn = spawn or spawn_incident
+        last = st.setdefault("incident_ts", {})
+        started = []
+        for k, v in (doc.get("subsystems") or {}).items():
+            if (v or {}).get("status") != "red" or (k in last and now - float(last[k] or 0.0) < INCIDENT_RATE_S):
+                continue
+            why = f"{k} red: {(v.get('last_error') or 'no error text')}"[:200]
+            if spawn(k, why):
+                last[k] = now
+                started.append(k)
+        return started
+    except Exception as e:  # noqa: BLE001
+        log(f"incident capture check failed (non-fatal): {e!r}")
+        return []
+
+
 def dm(text: str) -> bool:
     try:
         uid = load(ROOT / "config" / "private.local.json", {}).get("zeke_discord_user_id")
@@ -333,7 +385,8 @@ def main() -> int:
             log(f"log cap failed for {path.name}: {e!r}")
 
     worker_sweep()
-    write_health(now, in_grace=in_grace)
+    doc = write_health(now, in_grace=in_grace)
+    capture_red_incidents(doc, st, now, in_grace=in_grace)
     send_alerts(st, problems, now)
     st.update({"checked_ts": now, "problems": problems,
                "hb_age_s": round(hb_age, 1), "runtime_alive": rt_alive, "supervisor_alive": sup_alive})

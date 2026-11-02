@@ -60,7 +60,7 @@ from typing import Any, Callable, Iterable, NamedTuple, Optional
 
 log = logging.getLogger("iris_events")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2   # v2 (2026-11-02): task_deps (Phase 3 task dependencies)
 
 LIFECYCLE = ("received", "admitted", "assigned", "running",
              "output_pending", "verified", "committed")
@@ -69,6 +69,10 @@ TERMINAL = frozenset({"committed", "cancelled"})
 OPEN_STATUSES = tuple(s for s in STATUSES if s not in TERMINAL)
 SIDE_EFFECTS = ("none", "reversible", "external")
 _DONE_STAGES = ("output_pending", "verified", "committed")
+# Phase 3 task dependencies: a parent counts as DONE only once verified/committed (output_pending
+# is "a result exists", not "it was checked"); a parent in DEP_FAILED fails its dependants.
+DEP_DONE = frozenset({"verified", "committed"})
+DEP_FAILED = frozenset({"failed", "cancelled"})
 
 INCIDENT_SOURCE = "store"
 
@@ -154,6 +158,11 @@ CREATE TABLE IF NOT EXISTS leases(
   until REAL NOT NULL, created_ts REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS leases_task ON leases(task_id);
 CREATE INDEX IF NOT EXISTS leases_until ON leases(until);
+
+CREATE TABLE IF NOT EXISTS task_deps(
+  task_id TEXT NOT NULL, after_task_id TEXT NOT NULL, created_ts REAL NOT NULL,
+  PRIMARY KEY(task_id, after_task_id));
+CREATE INDEX IF NOT EXISTS task_deps_after ON task_deps(after_task_id);
 """
 
 
@@ -683,10 +692,15 @@ class EventStore:
                     idempotency_key: Optional[str] = None, side_effects: str = "none",
                     task_id: Optional[str] = None, trace_id: Optional[str] = None,
                     checkpoint: Optional[dict] = None, note: Optional[str] = None,
-                    actor: Optional[str] = None) -> Optional[InsertResult]:
-        """New task in ``admitted`` (claimable). Idempotent on ``idempotency_key``."""
+                    actor: Optional[str] = None,
+                    after: Optional[Iterable[str]] = None) -> Optional[InsertResult]:
+        """New task in ``admitted`` (claimable). Idempotent on ``idempotency_key``.
+        ``after`` = task ids that must be DONE (verified/committed) before this one can be
+        claimed (Phase 3). Every id must already exist, so creation can never form a cycle;
+        an unknown id makes the whole create a no-op (None, ``last_error`` says which)."""
         if side_effects not in SIDE_EFFECTS:
             raise ValueError(f"side_effects must be one of {SIDE_EFFECTS}")
+        deps = sorted({str(x) for x in (after or ()) if x})
         now = self._clock()
         tid = task_id or "task_" + uuid.uuid4().hex
         with self._tx() as c:
@@ -701,6 +715,12 @@ class EventStore:
                               (parent_event_id,)).fetchone()
                 trace = p["trace_id"] if p and p["trace_id"] else parent_event_id
             trace = trace or tid
+            if tid in deps:
+                raise ValueError(f"task {tid} cannot depend on itself")
+            missing = [d for d in deps if c.execute("SELECT 1 FROM tasks WHERE task_id=?",
+                                                    (d,)).fetchone() is None]
+            if missing:
+                raise ValueError(f"unknown dependency task(s) {missing}")
             c.execute(
                 "INSERT INTO tasks(task_id, parent_event_id, trace_id, kind, goal, status, fence,"
                 " idempotency_key, checkpoint_json, side_effects, created_ts, updated_ts, note)"
@@ -709,6 +729,12 @@ class EventStore:
                  json.dumps(checkpoint, default=str) if checkpoint is not None else None,
                  side_effects, now, now, note))
             self._audit(c, "task", tid, None, "admitted", 0, now, actor, trace, note)
+            for d in deps:
+                c.execute("INSERT INTO task_deps(task_id, after_task_id, created_ts) VALUES(?,?,?)",
+                          (tid, d, now))
+            if deps:
+                self._audit(c, "task", tid, "admitted", "admitted", 0, now, actor, trace,
+                            "after " + ",".join(deps))
         return InsertResult(tid, True, "admitted")
 
     @_guard(None)
@@ -745,6 +771,8 @@ class EventStore:
                             (task_id,)).fetchone()
             if row is None or row["status"] != "admitted":
                 return None
+            if self._dep_state(c, task_id)["state"] != "ready":
+                return None   # Phase 3: parents not done-and-verified (no deps ⇒ always ready)
             fence = row["fence"] + 1
             cur = c.execute(
                 "UPDATE tasks SET status='running', owner=?, lease_until=?, lease_s=?,"
@@ -757,6 +785,122 @@ class EventStore:
             self._audit(c, "task", task_id, "admitted", "running", fence, now,
                         actor or owner, row["trace_id"], f"claimed by {owner}")
         return fence
+
+    # ── Phase 3: task dependencies ──
+    @staticmethod
+    def _parents(c: sqlite3.Connection, task_id: str) -> list[str]:
+        return [r[0] for r in c.execute("SELECT after_task_id FROM task_deps WHERE task_id=?"
+                                        " ORDER BY after_task_id", (task_id,)).fetchall()]
+
+    def _reaches(self, c: sqlite3.Connection, start: str, target: str) -> Optional[list[str]]:
+        """A path start → … → target along `after` edges, or None (iterative DFS)."""
+        stack, seen = [(start, [start])], {start}
+        while stack:
+            node, path = stack.pop()
+            if node == target:
+                return path
+            for p in self._parents(c, node):
+                if p not in seen:
+                    seen.add(p)
+                    stack.append((p, path + [p]))
+        return None
+
+    def _dep_state(self, c: sqlite3.Connection, task_id: str) -> dict:
+        """ready | waiting | blocked for one task, from its DIRECT parents (a parent that is itself
+        waiting is simply not done yet). ``blocked`` = a parent failed/cancelled/vanished or the
+        graph has a cycle through this task - it can never become ready on its own."""
+        parents = self._parents(c, task_id)
+        out: dict = {"state": "ready", "after": parents, "waiting_on": [], "failed": [],
+                     "reason": None}
+        if not parents:
+            return out
+        for p in parents:
+            if self._reaches(c, p, task_id):
+                out.update(state="blocked", reason=f"dependency cycle through {p}")
+                return out
+        for p in parents:
+            r = c.execute("SELECT status, note FROM tasks WHERE task_id=?", (p,)).fetchone()
+            if r is None:
+                out["failed"].append({"task_id": p, "status": "missing"})
+            elif r["status"] in DEP_FAILED:
+                out["failed"].append({"task_id": p, "status": r["status"], "note": r["note"]})
+            elif r["status"] not in DEP_DONE:
+                out["waiting_on"].append({"task_id": p, "status": r["status"]})
+        if out["failed"]:
+            f = out["failed"][0]
+            out.update(state="blocked", reason=f"dependency {f['task_id']} is {f['status']}"
+                       + (f" ({f.get('note')})" if f.get("note") else ""))
+        elif out["waiting_on"]:
+            out.update(state="waiting", reason="waiting on " + ", ".join(
+                f"{w['task_id']} ({w['status']})" for w in out["waiting_on"]))
+        return out
+
+    @_guard(None)
+    def dependency_state(self, task_id: str) -> Optional[dict]:
+        """{"state": ready|waiting|blocked, "after", "waiting_on", "failed", "reason"}; None if the
+        task doesn't exist (or the store is down)."""
+        if self._conn.execute("SELECT 1 FROM tasks WHERE task_id=?", (task_id,)).fetchone() is None:
+            return None
+        return self._dep_state(self._conn, task_id)
+
+    @_guard(False)
+    def add_dependencies(self, task_id: str, after: Iterable[str], *,
+                         actor: Optional[str] = None) -> bool:
+        """Add `after` edges to a not-yet-claimed (admitted) task. Refused (False, with
+        ``last_error``) for unknown ids, a self-edge, or an edge that would close a cycle."""
+        deps = sorted({str(x) for x in after if x})
+        now = self._clock()
+        with self._tx() as c:
+            row = c.execute("SELECT status, fence, trace_id FROM tasks WHERE task_id=?",
+                            (task_id,)).fetchone()
+            if row is None or row["status"] != "admitted":
+                self.last_error = f"add_dependencies: {task_id} is not an admitted task"
+                return False
+            for d in deps:
+                if d == task_id:
+                    self.last_error = f"add_dependencies: {task_id} cannot depend on itself"
+                    return False
+                if c.execute("SELECT 1 FROM tasks WHERE task_id=?", (d,)).fetchone() is None:
+                    self.last_error = f"add_dependencies: unknown task {d}"
+                    return False
+                cyc = self._reaches(c, d, task_id)
+                if cyc:
+                    self.last_error = ("add_dependencies: cycle " +
+                                       " -> ".join([task_id] + cyc))
+                    return False
+            for d in deps:
+                c.execute("INSERT OR IGNORE INTO task_deps(task_id, after_task_id, created_ts)"
+                          " VALUES(?,?,?)", (task_id, d, now))
+            self._audit(c, "task", task_id, "admitted", "admitted", row["fence"], now, actor,
+                        row["trace_id"], "after +" + ",".join(deps))
+        return True
+
+    @_guard(dict)
+    def settle_dependencies(self, *, actor: str = "deps") -> dict:
+        """One scheduler pass over every admitted task that has dependencies: a BLOCKED one
+        (parent failed/cancelled/missing, or a cycle) → ``failed`` with the reason in its note -
+        it would otherwise wait forever. Ready/waiting ones are listed, not touched. Idempotent;
+        safe to run from any process at any time (state lives only in the store)."""
+        now = self._clock()
+        out: dict = {"failed": [], "ready": [], "waiting": []}
+        with self._tx() as c:
+            rows = c.execute("SELECT DISTINCT t.task_id, t.fence, t.trace_id FROM tasks t"
+                             " JOIN task_deps d ON d.task_id=t.task_id"
+                             " WHERE t.status='admitted' ORDER BY t.created_ts").fetchall()
+            for r in rows:
+                st = self._dep_state(c, r["task_id"])
+                if st["state"] == "blocked":
+                    note = f"not started: {st['reason']}"
+                    cur = c.execute("UPDATE tasks SET status='failed', updated_ts=?, note=?"
+                                    " WHERE task_id=? AND status='admitted' AND fence=?",
+                                    (now, note, r["task_id"], r["fence"]))
+                    if cur.rowcount == 1:
+                        self._audit(c, "task", r["task_id"], "admitted", "failed", r["fence"],
+                                    now, actor, r["trace_id"], note)
+                        out["failed"].append({"task_id": r["task_id"], "reason": st["reason"]})
+                else:
+                    out[st["state"]].append(r["task_id"])
+        return out
 
     @_guard(False)
     def heartbeat(self, task_id: str, fence: int, lease_s: Optional[float] = None) -> bool:
