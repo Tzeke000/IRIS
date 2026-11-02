@@ -15,6 +15,7 @@ attributes but do NOT define the class. See contract in the build spec.
 """
 from __future__ import annotations
 
+import collections
 import importlib
 import os
 import queue
@@ -522,7 +523,8 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                        early_finalize_fn=None, ef_state: "dict | None" = None,
                        hold_open_fn=None, extend_max_s: float = 0.0,
                        extend_recheck_s: float = 0.4,
-                       backchannel: "_Backchannel | None" = None) -> "np.ndarray | None":
+                       backchannel: "_Backchannel | None" = None,
+                       timing: "dict | None" = None) -> "np.ndarray | None":
     """Block until speech onset (or timeout), then record until trailing silence or max
     length. Sets overlay state to listening when mic opens.
     Returns float32 audio, or None if nothing was said.
@@ -536,6 +538,10 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
     EARLY_FINALIZE_MIN_SILENCE_S of trailing silence has accrued, ask early_finalize_fn
     (smart-turn, high-confidence) whether the turn is done; if so, end capture before the
     full end_silence_s wait. Checked at most every EARLY_FINALIZE_CHECK_EVERY_S. Best-effort.
+
+    Latency stamps (V3 spec §4 / phase-1 step 1.4, 2026-11-01): if `timing` is a dict, it gets
+    timing["speech_end_ts"] = wall-clock time of the last voiced frame (i.e. BEFORE the trailing
+    end-silence wait) whenever speech started. Best-effort; never changes capture.
 
     Smart-extend: if `hold_open_fn` is given and extend_max_s > end_silence_s, then at the
     moment end_silence_s of trailing silence is reached, ask hold_open_fn (smart-turn,
@@ -723,6 +729,8 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                         break  # hard cap
     finally:
         stop_evt.set()
+        if timing is not None and started:
+            timing["speech_end_ts"] = last_voice_t
         if worker is not None:
             _tj = time.time()
             worker.join(timeout=2.0)
@@ -1129,7 +1137,13 @@ def cmd_speak(ctx, args: dict) -> str:
     # play — and a concurrent listen's drain-gate (`while ctx.speaking`) then opens the mic
     # onto my own voice (self-listen, real on speakers-no-AEC). put()-first means the worker
     # always sees the queued item, so it never spuriously clears the flag. (2026-06-29 race fix.)
-    ctx.play_queue.put({"text": text, "emotion": emotion, "intensity": intensity} if emotion else text)
+    # 2026-11-01 latency stamps: an optional caller tag ("stamp") rides with the item so play_one can
+    # record when THAT reply's first audio went out (cmd_play_stamps). No stamp = the old item shape.
+    stamp = args.get("stamp")
+    if stamp:
+        ctx.play_queue.put({"text": text, "emotion": emotion, "intensity": intensity, "stamp": str(stamp)[:120]})
+    else:
+        ctx.play_queue.put({"text": text, "emotion": emotion, "intensity": intensity} if emotion else text)
     ctx.speaking = True
     if args.get("wait"):
         try:
@@ -1260,8 +1274,12 @@ def play_one(ctx, item) -> None:
     the cursor so the returned marker can say exactly where Zeke cut me off."""
     text, _emotion, _intensity = _item_fields(item)   # str (legacy) or dict (round-2 fix 2.1)
     ctx.now_playing = text
+    stamp = item.get("stamp") if isinstance(item, dict) else None
     try:
-        _post_speak(ctx, text, _emotion, _intensity)
+        _t_post = time.time()
+        _reply = _post_speak(ctx, text, _emotion, _intensity)
+        if stamp:
+            _record_play_stamp(ctx, stamp, _t_post, time.time(), _reply)
         # Only count as fully heard if a barge didn't kill this chunk mid-play
         # (_on_barge sets bargein_fired BEFORE hitting /stop, so this is race-safe).
         if not getattr(ctx, "bargein_fired", False):
@@ -1273,6 +1291,49 @@ def play_one(ctx, item) -> None:
         print(f"[wren-voice-core] play_one error: {e!r}", file=sys.stderr)
     finally:
         ctx.now_playing = None
+
+
+# ── Latency stamps: first audio per stamped reply (V3 spec §4 / phase-1 step 1.4, 2026-11-01) ──
+# The mouth's reply line says "... in <total>s (first-audio <fa>s ...", both measured from when it
+# started synthesising. first_audio_ts = (reply received - total) + fa, i.e. the moment the first
+# sample left the mouth for the audio sink (the sink's own buffering is not included). Kept in a
+# small ring on ctx; the host reads it with cmd_play_stamps. Best-effort: unparseable -> None.
+PLAY_STAMPS_MAX = 64
+_RE_FIRST_AUDIO = re.compile(r"first-audio ([0-9.]+)s")
+_RE_TOTAL = re.compile(r" in ([0-9.]+)s")
+
+
+def _first_audio_ts(reply, t_post: float, t_done: float):
+    try:
+        m = _RE_FIRST_AUDIO.search(str(reply or ""))
+        if not m:
+            return None
+        fa = float(m.group(1))
+        mt = _RE_TOTAL.search(str(reply or ""))
+        start = (t_done - float(mt.group(1))) if mt else t_post
+        return max(t_post, start) + fa
+    except Exception:
+        return None
+
+
+def _record_play_stamp(ctx, stamp, t_post: float, t_done: float, reply) -> None:
+    try:
+        ring = getattr(ctx, "play_stamps", None)
+        if ring is None:
+            ring = collections.deque(maxlen=PLAY_STAMPS_MAX)
+            ctx.play_stamps = ring
+        ring.append({"stamp": str(stamp), "post_ts": t_post, "done_ts": t_done,
+                     "first_audio_ts": _first_audio_ts(reply, t_post, t_done)})
+    except Exception:
+        pass
+
+
+def cmd_play_stamps(ctx, args: dict):
+    """Recent stamped chunks [{stamp, post_ts, done_ts, first_audio_ts}], oldest first; args.stamp
+    filters to one reply. Read-only."""
+    want = (args or {}).get("stamp")
+    ring = list(getattr(ctx, "play_stamps", None) or [])
+    return [dict(r) for r in ring if not want or r.get("stamp") == str(want)]
 
 
 def on_drain(ctx) -> None:
@@ -1624,16 +1685,20 @@ def _smart_extend_cfg():
         return None   # fail-open: bad config must never change ear behavior
 
 
-def _with_speaker(text: str, verdict: dict, args: dict):
+def _with_speaker(text: str, verdict: dict, args: dict, timing: "dict | None" = None):
     """Opt-in structured return (10-29 security): a caller that sends
     {"structured": true} gets {"text", "speaker", "score", "status", "threshold",
     "closest", "reason"} for a REAL utterance; everyone else (MCP tools, old clients)
-    keeps the plain string. '[voice_listen]' / '[bargein_watch]' markers stay strings."""
+    keeps the plain string. '[voice_listen]' / '[bargein_watch]' markers stay strings.
+    2026-11-01: plus the latency stamps (speech_end_ts / stt_done_ts) when the listen took them."""
     if not (args or {}).get("structured"):
         return text
     out = {"text": text}
     for k in ("speaker", "score", "status", "threshold", "closest", "reason"):
         out[k] = (verdict or {}).get(k)
+    for k in ("speech_end_ts", "stt_done_ts"):
+        if (timing or {}).get(k):
+            out[k] = timing[k]
     return out
 
 
@@ -1718,6 +1783,7 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
     # to max_seconds. Off/absent → identical to before.
     ext_cfg = _smart_extend_cfg() if _HAVE_SMARTTURN else None
     bc = _new_backchannel(ctx) if in_call else None
+    timing: dict = {}   # 2026-11-01 latency stamps: speech_end_ts (capture) + stt_done_ts (below)
     try:
         with ctx.mic_lock:
             audio = _capture_utterance(
@@ -1731,6 +1797,7 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
                 extend_max_s=(ext_cfg["max_seconds"] if ext_cfg else 0.0),
                 extend_recheck_s=(ext_cfg["recheck_seconds"] if ext_cfg else 0.4),
                 backchannel=bc,
+                timing=timing,
             )
     except Exception as e:
         set_state("idle")
@@ -1779,6 +1846,7 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
         except Exception as e2:
             set_state("idle")
             return f"[voice_listen] transcription error: {e2!r}"
+    timing["stt_done_ts"] = time.time()
 
     # ── Step 3b: phantom gate — discard whisper silence-hallucinations ─────────
     if _is_phantom(text, audio):
@@ -1812,7 +1880,7 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
         set_state("listening", "still with you")
         try:
             with ctx.mic_lock:
-                more = _capture_utterance(ctx, grace_s, max_s, end_silence)
+                more = _capture_utterance(ctx, grace_s, max_s, end_silence, timing=timing)
         except Exception:
             more = None
         if more is None or not getattr(more, "size", 0):
@@ -1834,6 +1902,7 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
                     text = (text or "").strip()
                 else:
                     text = (wl._transcribe_array(audio) or "").strip()
+            timing["stt_done_ts"] = time.time()
         except Exception:
             final_ok = False
             break
@@ -1939,7 +2008,7 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
     # (no point bridging a turn where Zeke just asked to end the call).
     if in_call and not end_call_intent:
         _arm_stall_bridge(ctx)
-    return _with_speaker(result, verdict, args)
+    return _with_speaker(result, verdict, args, timing)
 
 
 def cmd_speak_interruptible(ctx, args: dict) -> str:

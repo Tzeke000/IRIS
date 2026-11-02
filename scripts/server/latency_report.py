@@ -10,6 +10,13 @@ prints p50/p90 per stage, per local day, per source:
     reply                 received -> committed (what the sender actually waited)
     tool_blocked          time an event waited in `admitted` while a tool call blocked the turn - only
                           where the host recorded it (events meta `tool_blocked_s`); otherwise "not recorded"
+    speech_end->stt_done  voice only: his last voiced frame -> final transcription done (mic -> recognition)
+    first_speak->first_audio  voice: my first sentence handed to the mouth -> its first sample out (decision
+                          -> playback)
+    speech_end->first_audio   voice end to end: he stopped talking -> he hears me
+                          (the three voice stages come from events meta speech_end_ts / stt_done_ts /
+                          first_speak_ts / first_audio_ts, written by the body host since 2026-11-01; shown
+                          only where recorded)
 
 plus, for worker tasks (worker.py), per kind: queue (admitted->running) and run (running->done/failed).
 
@@ -38,7 +45,14 @@ from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-STAGES = ("received->admitted", "admitted->assigned", "assigned->committed", "reply", "tool_blocked")
+VOICE_STAGES = {   # stage -> (start meta key, end meta key)
+    "speech_end->stt_done": ("speech_end_ts", "stt_done_ts"),
+    "first_speak->first_audio": ("first_speak_ts", "first_audio_ts"),
+    "speech_end->first_audio": ("speech_end_ts", "first_audio_ts"),
+}
+STAGES = ("received->admitted", "admitted->assigned", "assigned->committed", "reply", "tool_blocked",
+          *VOICE_STAGES)
+_OPTIONAL_STAGES = ("tool_blocked", *VOICE_STAGES)
 TASK_STAGES = ("queue", "run")
 _TASK_DONE = ("output_pending", "verified", "committed", "failed")
 INCIDENT_SOURCE = "store"
@@ -137,6 +151,11 @@ def build(c: sqlite3.Connection, days: int, now: float | None = None) -> dict:
         if isinstance(tb, (int, float)):
             tool_recorded = True
             st["tool_blocked"].append(float(tb))
+        if isinstance(meta, dict):
+            for stage, (a, b) in VOICE_STAGES.items():
+                ta, tb2 = meta.get(a), meta.get(b)
+                if isinstance(ta, (int, float)) and isinstance(tb2, (int, float)) and tb2 >= ta:
+                    st[stage].append(float(tb2) - float(ta))
 
     tfirst = _first_entries(c, "task", _TASK_SET, (since,))
     tsamples: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))  # day -> kind -> stage
@@ -159,7 +178,7 @@ def build(c: sqlite3.Connection, days: int, now: float | None = None) -> dict:
         for src in sorted(set(samples[day]) | set(counts[day])):
             ent = dict(counts[day][src])
             ent["stages"] = {s: summarize(samples[day][src].get(s, [])) for s in STAGES
-                             if s != "tool_blocked" or samples[day][src].get(s)}
+                             if s not in _OPTIONAL_STAGES or samples[day][src].get(s)}
             report["events"][day][src] = ent
     for day in sorted(tsamples):
         report["tasks"][day] = {k: {s: summarize(v.get(s, [])) for s in TASK_STAGES}
@@ -241,7 +260,7 @@ def render_text(rep: dict) -> str:
         for src, ent in srcs.items():
             out.append(f"  {src}  ({ent['events']} events, {ent['open']} open)")
             for stage, s in ent["stages"].items():
-                out.append(f"    {stage:22} n={s['n']:<5} p50={_fmt(s['p50']):>8}  p90={_fmt(s['p90']):>8}"
+                out.append(f"    {stage:24} n={s['n']:<5} p50={_fmt(s['p50']):>8}  p90={_fmt(s['p90']):>8}"
                            f"  max={_fmt(s['max']):>8}")
     if not rep["tool_blocked_recorded"]:
         out.append("\n  tool_blocked: not recorded (the host does not write meta.tool_blocked_s yet)")

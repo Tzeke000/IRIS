@@ -643,6 +643,28 @@ class EventStore:
                         actor, row["trace_id"], f"reply {ref}")
         return True
 
+    @_guard(False)
+    def merge_meta(self, event_id: str, updates: dict) -> bool:
+        """Shallow-merge ``updates`` into an event's meta (no status change, no audit row). For
+        facts measured AFTER the insert - e.g. the voice latency stamps first_audio_ts (2026-11-01,
+        phase-1 step 1.4). Keys already present are overwritten. False if the row is missing."""
+        if not isinstance(updates, dict) or not updates:
+            return False
+        with self._tx() as c:
+            row = c.execute("SELECT meta_json FROM events WHERE event_id=?", (event_id,)).fetchone()
+            if row is None:
+                return False
+            try:
+                meta = json.loads(row["meta_json"]) if row["meta_json"] else {}
+            except Exception:  # noqa: BLE001
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {"_unparsed": meta}
+            meta.update(updates)
+            c.execute("UPDATE events SET meta_json=? WHERE event_id=?",
+                      (json.dumps(meta, default=str), event_id))
+        return True
+
     @_guard(list)
     def history(self, entity_id: str) -> list[dict]:
         return [dict(r) for r in self._conn.execute(

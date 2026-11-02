@@ -45,6 +45,7 @@ import os
 import sys
 import re
 import socket
+import threading
 import time
 import collections
 import urllib.request
@@ -344,7 +345,15 @@ EV_LIVE_SOURCES = ("voice", "vr")
 EV_LIVE_REOFFER_S = float(os.environ.get("IRIS_V3_LIVE_REOFFER_S", "600"))      # 10 min
 EV_LETTER_REOFFER_S = float(os.environ.get("IRIS_V3_LETTER_REOFFER_S", str(48 * 3600)))
 EV_BUSY_TIMEOUT_S = float(os.environ.get("IRIS_V3_BUSY_TIMEOUT_S", "2"))   # never stall the loop long
-_EV = {"store": None, "turn_n": 0, "owner": None, "trace": None, "turn_evs": []}
+_EV = {"store": None, "turn_n": 0, "owner": None, "trace": None, "turn_evs": [], "first_speak_ts": None}
+# Voice latency stage stamps (V3 spec §4 / phase-1 step 1.4, 2026-11-01). A voice event's meta gets
+#   speech_end_ts  his last voiced frame            (daemon capture)
+#   stt_done_ts    final transcription finished     (daemon listen)
+#   first_speak_ts my first sentence of the turn handed to the mouth (= the decision to speak)
+#   first_audio_ts that turn's first sample left the mouth (daemon play_stamps, filled after the turn)
+# so scripts/server/latency_report.py can split mic->recognition and decision->playback.
+EV_VOICE_STAMPS = ("speech_end_ts", "stt_done_ts")
+EV_FIRST_AUDIO_WAIT_S = float(os.environ.get("IRIS_V3_FIRST_AUDIO_WAIT_S", "60"))
 _EV_IDS = {}   # queue seq -> [event_id, ...]  (a coalesced VR entry carries several)
 
 
@@ -416,11 +425,14 @@ def _ev_admit(item, prio, seq, event_id=None):
         if event_id is None:
             text, msg_id = item[1], item[2]
             sender = item[3] if len(item) > 3 else None
+            meta = {"item_sender": sender} if sender is not None else None
+            if source == "voice" and meta:
+                meta.update(_ev_voice_stamps(sender))
             r = _ev_store().insert(
                 source, text, idempotency_key=_ev_key(source, text, msg_id, time.time()),
                 status="admitted", channel_msg_id=(str(msg_id) if msg_id else None),
                 sender=_ev_sender_label(source, sender), trusted=_ev_trusted(source, sender),
-                priority=prio, meta=({"item_sender": sender} if sender is not None else None), actor="host")
+                priority=prio, meta=meta, actor="host")
             if r is None:
                 _ev_err("insert(" + source + ")", _ev_store().last_error)
                 return
@@ -428,6 +440,63 @@ def _ev_admit(item, prio, seq, event_id=None):
         _EV_IDS[seq] = [event_id]
     except Exception as e:  # noqa: BLE001
         _ev_err("admit", e)
+
+
+def _ev_voice_stamps(sender):
+    """The daemon's latency stamps riding in a voice item's speaker meta (JSON) -> {key: float}."""
+    try:
+        m = json.loads(sender) if isinstance(sender, str) else sender
+        if not isinstance(m, dict):
+            return {}
+        return {k: float(m[k]) for k in EV_VOICE_STAMPS if m.get(k)}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _ev_speak_stamp():
+    """Called as each sentence of a turn goes to the mouth: remembers the turn's first one and
+    returns the turn's owner tag for the daemon (None when the store is off or no turn is open)."""
+    try:
+        if not _ev_on() or not _EV["turn_evs"] or not _EV["owner"]:
+            return None
+        if _EV.get("first_speak_ts") is None:
+            _EV["first_speak_ts"] = time.time()
+        return _EV["owner"]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _ev_first_audio_fill(eids, owner, first_speak_ts, wait_s=None, poll_s=0.5):
+    """After a spoken turn: ask the daemon when that turn's first audio went out (it is known only
+    once the first chunk has finished playing) and merge first_speak_ts / first_audio_ts into the
+    turn's events. Blocking - run on a thread. An older daemon without play_stamps answers
+    ok=false at once -> only first_speak_ts is recorded. Never raises."""
+    fa = None
+    deadline = time.time() + (EV_FIRST_AUDIO_WAIT_S if wait_s is None else float(wait_s))
+    try:
+        while True:
+            try:
+                resp = json.loads(daemon_cmd("play_stamps", {"stamp": owner}, timeout=5.0))
+            except Exception:  # noqa: BLE001
+                resp = {"ok": False}
+            if not resp.get("ok"):
+                break
+            got = [r.get("first_audio_ts") for r in (resp.get("result") or [])
+                   if isinstance(r, dict) and r.get("first_audio_ts")]
+            if got:
+                fa = min(float(x) for x in got)
+                break
+            if time.time() >= deadline:
+                break
+            time.sleep(poll_s)
+        upd = {"first_speak_ts": first_speak_ts}
+        if fa is not None:
+            upd["first_audio_ts"] = fa
+        for eid in eids:
+            if not _ev_store().merge_meta(eid, upd):
+                _ev_err("merge_meta(" + str(eid) + ")", _ev_store().last_error or "row missing")
+    except Exception as e:  # noqa: BLE001
+        _ev_err("first-audio stamp", e)
 
 
 def _ev_take(entry):
@@ -461,6 +530,7 @@ def _ev_turn_begin(eids, source, msg_id, sender):
         _EV["turn_n"] += 1
         _EV["owner"] = "host-turn:" + str(_EV["turn_n"]) + "@" + str(os.getpid())
         _EV["turn_evs"] = []
+        _EV["first_speak_ts"] = None
         _EV["trace"] = eids[0] if eids else None
         _ev_set(eids, "assigned", None, _EV["owner"])
         for eid in eids:
@@ -494,10 +564,14 @@ def _ev_turn_end(handled):
             _ev_set(evs, "committed", "turn end", _EV["owner"])
         _blog("turn", "end", {"trace": _EV["trace"], "owner": _EV["owner"], "handled": bool(handled),
                               "events": evs})
+        if evs and _EV.get("first_speak_ts") is not None:
+            threading.Thread(target=_ev_first_audio_fill, args=(evs, _EV["owner"], _EV["first_speak_ts"]),
+                             name="ev-first-audio", daemon=True).start()
     except Exception as e:  # noqa: BLE001
         _ev_err("turn end", e)
     finally:
         _EV["turn_evs"] = []
+        _EV["first_speak_ts"] = None
         _EV["trace"] = None
 
 
@@ -889,9 +963,11 @@ def _asked_a_question_recently(window_s=QUESTION_ACK_WINDOW_S) -> bool:
     return any(now - ts <= window_s and t.rstrip().endswith("?") for ts, t in list(_RECENT_SPOKEN))
 
 
-def speak(text, emotion=None, intensity=None):
+def speak(text, emotion=None, intensity=None, stamp=None):
     """Enqueue one finished sentence on the daemon's play queue. Non-fatal.
-    emotion/intensity (round-2 fix 2.1) ride to the mouth; None = base prosody."""
+    emotion/intensity (round-2 fix 2.1) ride to the mouth; None = base prosody.
+    stamp (2026-11-01 latency stamps) = the turn owner tag, so the daemon can report when this
+    turn's first audio went out (cmd_play_stamps); an older daemon just ignores it."""
     text = (text or "").strip()
     if not text:
         return
@@ -901,6 +977,8 @@ def speak(text, emotion=None, intensity=None):
         if emotion:
             _args["emotion"] = str(emotion)
             _args["intensity"] = 0.5 if intensity is None else float(intensity)
+        if stamp:
+            _args["stamp"] = str(stamp)
         daemon_cmd("speak", _args)
     except Exception as e:
         print("\n[host] speak failed (non-fatal): " + repr(e), file=sys.stderr)
@@ -2258,6 +2336,9 @@ def _voice_split(result):
     speaker fields; a plain string (daemon not yet reloaded, or a marker) gets status 'missing'."""
     if isinstance(result, dict):
         meta = {k: result.get(k) for k in ("speaker", "score", "status", "threshold", "closest", "reason")}
+        for k in EV_VOICE_STAMPS:   # 2026-11-01 latency stamps, only when the daemon sent them
+            if result.get(k):
+                meta[k] = result.get(k)
         return result.get("text"), meta
     return result, {"status": "missing", "reason": "daemon returned no speaker fields"}
 
@@ -3430,7 +3511,7 @@ async def stream_consumer(client, turn, boundary):
         # 10-29 code review: speak() is a blocking daemon socket call (up to 5 s); run it in the
         # executor so a down mouth can't stall every poller + the hold sentinel. Awaited in order,
         # so sentence order is unchanged.
-        await _loop.run_in_executor(None, speak, text, emotion, intensity)
+        await _loop.run_in_executor(None, speak, text, emotion, intensity, _ev_speak_stamp())
 
     try:
         async for msg in client.receive_messages():
