@@ -1103,12 +1103,39 @@ def _bounded_disconnect(robot, timeout_s: float = 10.0) -> None:
             "reconnecting anyway")
 
 
+def _close_failed_channel(robot) -> None:
+    """Close the gRPC channel a FAILED connect left open (see run_once)."""
+    try:
+        conn = getattr(robot, "_conn", None) or getattr(robot, "conn", None)
+        ach = getattr(conn, "_channel", None)
+        inner = getattr(ach, "_channel", None)       # aiogrpc wraps grpc.Channel
+        if inner is not None:
+            inner.close()
+        th = getattr(conn, "_thread", None)
+        if th is not None:
+            th.join(timeout=2)
+            conn._thread = None
+    except Exception as e:  # noqa: BLE001 — cleanup is best-effort
+        log(f"failed-connect cleanup error (non-fatal): {e!r}")
+
+
 def run_once() -> None:
     import anki_vector
 
     robot = anki_vector.Robot(SERIAL, behavior_control_level=None,
                               cache_animation_lists=False)
-    robot.connect(robot.behavior_activation_timeout)   # == Robot.__enter__
+    try:
+        robot.connect(robot.behavior_activation_timeout)   # == Robot.__enter__
+    except BaseException:
+        # LEAK FIX (11-01): the SDK's failed-connect path (Connection._connect:
+        # VectorNotFoundException after channel_ready_future times out) closes
+        # its event loop and returns WITHOUT closing the gRPC channel it just
+        # opened, so every failed attempt left a channel (sockets + gRPC
+        # threads) behind. With the robot off for days that hit the 1024-fd
+        # limit (10-30) and 1394 threads at ~2.5 cores. The loop is already
+        # closed, so close the inner sync grpc.Channel directly.
+        _close_failed_channel(robot)
+        raise
     try:
         _run_connected(robot)
     finally:
