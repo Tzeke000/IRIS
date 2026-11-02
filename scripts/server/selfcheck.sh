@@ -70,5 +70,7 @@ for k, v in (d.get("subsystems") or {}).items():
         lag = "-" if v.get("lag_s") is None else "%ss" % v.get("lag_s")
         print("   %-6s %-13s lag=%s %s" % (v.get("status"), k, lag, err))
 EOF
+# INTEGRITY (Zeke 11-01): torn writes / NUL bytes / unparseable lines in memory + state (timer: boot+4 min, every restart+4 min, hourly)
+/home/iris/venvs/iris-v100/bin/python $R/scripts/server/state_integrity.py | head -6
 # PAINTING
 wk=$(date +%G-W%V); [ -d $R/scratch/practice/room_painting/$wk ] && ok "painting $wk exists" || { [ $(date +%u) -ge 4 ] && warn "painting $wk missing (Thu+ ⇒ paint it, after quiet hours / conversation)" || echo "  painting $wk not due yet"; }

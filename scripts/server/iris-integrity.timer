@@ -1,0 +1,9 @@
+[Unit]
+Description=Iris integrity check: 4 min after boot, 4 min after every session (re)start, then hourly
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target

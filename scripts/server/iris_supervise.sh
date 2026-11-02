@@ -104,6 +104,8 @@ while :; do
   # (interactive claude) and the host's console reader both need the real terminal.
   "$GATE" "$MODE" 0<&8 &
   GPID=$!
+  # integrity check ~4 min after every (re)start (Zeke 11-01) — finds torn writes in memory/state
+  ( sleep 240; systemctl --user start iris-integrity.service >/dev/null 2>&1 ) &
   TREE=""; STOP_TS=0
   while kill -0 "$GPID" 2>/dev/null; do
     if [ "$V3_RUN" = 1 ]; then
