@@ -671,6 +671,13 @@ def run(a) -> int:
     else:
         note = "untracked: event store unavailable"
 
+    lease_note = None
+    globs = [g.strip() for g in (getattr(a, "leases", "") or "").split(",") if g.strip()]
+    if claim and globs:
+        lr = claim.store.acquire_leases(claim.task_id, globs, fence=claim.fence, owner=f"worker:{unit}") or {}
+        if not lr.get("ok"):          # LOG-ONLY (11-03): say so, keep going
+            lease_note = f"lease conflict (log-only): {lr.get('reason')} {lr.get('conflicts')}"[:400]
+            print(json.dumps({"lease_warning": lease_note}), flush=True)
     act_id = ledger_open(a, unit, claim.task_id if claim else None) if a.ledger else None
     props = ["-p", f"MemoryMax={mem_limit}", "-p", f"MemorySwapMax={a.swap}", "-p", "OOMScoreAdjust=500",
              "-p", "KillMode=control-group", "-p", f"RuntimeMaxSec={a.timeout}", "-p", f"Nice={a.nice}",
@@ -679,6 +686,8 @@ def run(a) -> int:
     if claim:
         # the job can heartbeat/complete itself with these if it wants to (worker.py does it anyway)
         props += [f"--setenv=IRIS_TASK_ID={claim.task_id}", f"--setenv=IRIS_TASK_FENCE={claim.fence}"]
+        if globs:
+            props += [f"--setenv=IRIS_LEASES={','.join(globs)}"]
     if act_id:
         props += [f"--setenv=IRIS_ACT_ID={act_id}"]
     props += lockdown_props(a.lockdown)
@@ -786,6 +795,11 @@ def watch(jid: int, unit: str, proc: subprocess.Popen, poll: float = 1.0, claim:
                   "note=COALESCE(note,'') || ? WHERE id=?",
                   (time.time(), outcome, code, peak or None, cpu, gpu_peak, " | " + err[-400:], jid))
     task_result = None
+    if claim and globs:
+        try:
+            claim.store.release_leases(claim.task_id)
+        except Exception:  # noqa: BLE001
+            pass
     if claim and not cancelled:
         if outcome == "ok":
             accepted = claim.store.complete(claim.task_id, claim.fence, result_ref=f"job:{jid}",
@@ -886,6 +900,8 @@ def main() -> int:
                    help="V3 spec §6/§13 sandbox (11-02): 'helper' = NoNewPrivileges (no sudo/setuid), PrivateUsers, "
                         "secrets + ssh keys + Discord channel creds INACCESSIBLE; 'helper-ssh' = same but keeps ~/.ssh")
     r.add_argument("--after", default="", help="comma-separated task ids that must be done+verified first")
+    r.add_argument("--leases", default="", help="comma-separated path globs this job may write (file leases, "
+                   "LOG-ONLY: a conflict is reported, the job still runs); released when it ends")
     r.add_argument("--key", default="", help="idempotency key for the auto-created task (re-run = same task)")
     r.add_argument("--wait-deps", type=float, default=0.0, help="seconds to wait for --after parents (0 = check once)")
     r.add_argument("cmd", nargs=argparse.REMAINDER)
