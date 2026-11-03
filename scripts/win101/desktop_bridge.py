@@ -75,6 +75,11 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    # 10-29 code review: full mouse/keyboard control - bind to the address in IRIS_BRIDGE_BIND (e.g. the VM's
-    # tailscale/vmbr IP) when set; 0.0.0.0 stays the default so the server's existing path keeps working.
-    ThreadingHTTPServer((os.environ.get("IRIS_BRIDGE_BIND", "0.0.0.0"), 8790), H).serve_forever()
+    # 10-29 code review: full mouse/keyboard control - never listen on every interface if we can help it.
+    # Bind address: IRIS_BRIDGE_BIND env, else C:\iris_dev\bridge_bind.txt (the VM's own LAN IP, written by the
+    # server - 11-03), else 0.0.0.0 as a last resort so the server's path keeps working (token + firewall still apply).
+    bind = os.environ.get("IRIS_BRIDGE_BIND", "").strip()
+    if not bind:
+        try: bind = open(r"C:\iris_dev\bridge_bind.txt").read().strip()
+        except OSError: bind = ""
+    ThreadingHTTPServer((bind or "0.0.0.0", 8790), H).serve_forever()
