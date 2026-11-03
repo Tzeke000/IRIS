@@ -370,6 +370,13 @@ def main() -> int:
         if port and not port_listening(port):
             problems[f"func:{unit}"] = f"{unit} has been running {up_s/60:.0f} min but nothing listens on :{port}"
 
+    # 11-03 (VR full-stack audit #9): the TEMPLE SERVER (CT 110, vr-temple.service) had no liveness alert - it sat
+    # dark for hours after the 10-26 restart. Every 5 min: `systemctl is-active` over the temple key; alert only after
+    # TWO misses in a row (a deploy restarts it for seconds). Deliberate off: state/vr_temple/server_deliberately_off.json.
+    tp = check_temple(st, now)
+    if tp:
+        problems["temple"] = tp
+
     for path, (cap, keep) in LOG_CAPS.items():
         try:
             if path.stat().st_size > cap:
@@ -392,6 +399,45 @@ def main() -> int:
                "hb_age_s": round(hb_age, 1), "runtime_alive": rt_alive, "supervisor_alive": sup_alive})
     save_state(st)
     return 0
+
+
+TEMPLE_EVERY_S = 300.0
+
+
+def check_temple(st: dict, now: float) -> str | None:
+    """None = fine / not due / deliberately off; else the alert text (after 2 consecutive misses)."""
+    if (ROOT / "state" / "vr_temple" / "server_deliberately_off.json").exists():
+        st["temple_miss"] = 0
+        return None
+    if now - float(st.get("temple_checked_ts") or 0) < TEMPLE_EVERY_S:
+        return st.get("temple_problem")
+    st["temple_checked_ts"] = now
+    host = ""
+    try:
+        for ln in (HOME / ".iris_private.env").read_text().splitlines():
+            if ln.startswith("TEMPLE_HOST="):
+                host = ln.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    if not host:
+        st["temple_problem"] = None
+        return None
+    state = "?"
+    try:
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-i",
+                            str(HOME / ".ssh" / "id_ed25519_temple"), f"root@{host}", "systemctl is-active vr-temple"],
+                           capture_output=True, text=True, timeout=20)
+        state = (r.stdout.strip() or r.stderr.strip()[:80] or f"rc {r.returncode}")
+    except Exception as e:  # noqa: BLE001
+        state = f"ssh failed ({type(e).__name__})"
+    if state == "active":
+        st["temple_miss"] = 0
+        st["temple_problem"] = None
+        return None
+    st["temple_miss"] = int(st.get("temple_miss") or 0) + 1
+    st["temple_problem"] = (f"the VR temple server isn't running ({state}; {st['temple_miss']} checks in a row)"
+                            if st["temple_miss"] >= 2 else None)
+    return st["temple_problem"]
 
 
 if __name__ == "__main__":
