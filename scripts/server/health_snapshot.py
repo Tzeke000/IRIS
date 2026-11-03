@@ -761,6 +761,26 @@ def parity_soak_update(path: Path, now: float, mismatched: set) -> dict:
         return {"error": repr(e)[:200]}
 
 
+def probe_aging(ctx: dict) -> dict:
+    """11-03 (doc audit): fold the aging probe (scripts/server/aging_probe.py, 30-min timer) into health.
+    Planning info, never an outage: 'aging' (>= 20 %/week over >= 24 h of one lifetime) -> warn = plan a
+    quiet-hours restart under the pre-restart contract; a stale file -> warn (the timer stopped); else ok."""
+    p = ctx["root"] / "state" / "health" / "aging.json"
+    probe = "state/health/aging.json (iris-aging-probe timer): any target 'aging' -> warn; file > 2 h old -> warn"
+    d = _load(p, None)
+    if not isinstance(d, dict):
+        return _r("warn", probe, "no aging.json (iris-aging-probe timer not running?)")
+    age = ctx["now"] - float(d.get("ts") or 0)
+    verdicts = {k: (v or {}).get("verdict") for k, v in (d.get("targets") or {}).items()}
+    aging = sorted(k for k, v in verdicts.items() if v == "aging")
+    det = {"verdicts": verdicts}
+    if age > 2 * 3600:
+        return _r("warn", probe, f"aging.json is {age / 3600:.1f} h old", age=age, **det)
+    if aging:
+        return _r("warn", probe, "aging (plan a quiet-hours restart): " + ", ".join(aging), age=age, **det)
+    return _r("ok", probe, age=age, **det)
+
+
 PROBES = {
     "ears": probe_ears,
     "stream_asr": probe_stream_asr,
@@ -775,6 +795,7 @@ PROBES = {
     "backup": probe_backup,
     "gpu": probe_gpu,
     "events": probe_events,
+    "aging": probe_aging,
 }
 
 

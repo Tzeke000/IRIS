@@ -400,3 +400,19 @@ def test_ears_whisper_state_from_ping(monkeypatch):
     assert run({"pong": True, "whisper": {"loaded": True, "device": "cuda"}}) == "ok"
     assert run({"pong": True, "whisper": {"loaded": True, "device": "cpu", "error": "x"}}) == "warn"
     assert run({"pong": True, "whisper": {"loaded": False}}) == "red"
+
+
+def test_aging_probe_folds_into_health(tmp_path):
+    import json, time
+    h = _load("health_snapshot_a", "health_snapshot.py")
+    now = time.time()
+    ctx = {"root": tmp_path, "now": now}
+    assert h.probe_aging(ctx)["status"] == "warn"                        # no file
+    (tmp_path / "state" / "health").mkdir(parents=True)
+    f = tmp_path / "state" / "health" / "aging.json"
+    f.write_text(json.dumps({"ts": now, "targets": {"runtime": {"verdict": "watch"}}}))
+    assert h.probe_aging(ctx)["status"] == "ok"
+    f.write_text(json.dumps({"ts": now, "targets": {"runtime": {"verdict": "aging"}}}))
+    r = h.probe_aging(ctx); assert r["status"] == "warn" and "runtime" in r["error"]
+    f.write_text(json.dumps({"ts": now - 3 * 3600, "targets": {}}))
+    assert h.probe_aging(ctx)["status"] == "warn"                        # stale timer
