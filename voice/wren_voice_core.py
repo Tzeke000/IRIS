@@ -2846,6 +2846,17 @@ def _cmd_bargein_watch_tiered(ctx, args: dict, live=None):
     was_paused = actions.state == "paused"
     actions.settle(d)
     _log(f"{d.tier.name}: {d.reason} | {' > '.join(h[1] for h in clf.history)} | {heard[:60]!r}")
+    try:  # 11-02: WHY each provisional tier was held (barge only landing at final = diagnose here)
+        _runs, _prev = [], None
+        for _h in clf.history:
+            _k = (_h[1], _h[2].split(" (")[0][:40])
+            if _k != _prev:
+                _runs.append(f"{_k[0]}:{_k[1]}")
+                _prev = _k
+        _log(f"tier reasons: {' > '.join(_runs)[:600]} | level={clf.level_dbfs} residual={clf.residual_dbfs} "
+             f"loud_seen={clf.loud_seen} voiced_ms={int(clf.voiced_ms)}")
+    except Exception:
+        pass
     if heard:
         try:
             wl.append_transcript(heard)
