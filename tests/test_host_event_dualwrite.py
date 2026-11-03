@@ -406,3 +406,19 @@ def test_interrupt_stub_flag_off_is_a_noop(env, monkeypatch):
     h._INBOX.pop("interrupt_note", None)
     assert h._ev_interrupt_stub("x") is None
     assert h._ev_interrupt_note_prefix() == ""
+
+
+def test_handover_stamps_tool_blocked_s(env):
+    """11-03: an input that waited mid-turn for a tool call gets meta tool_blocked_s; a turn's own input doesn't."""
+    async def go():
+        q = asyncio.PriorityQueue()
+        await h._enqueue(q, ("discord", "first", "211"))
+        _turn_from_queue(q)
+        await h._enqueue(q, ("orb", "mid-turn", "orb-9"))
+        await h._inbox_post_tool_hook({"tool_name": "Bash"}, "t1", None)
+        rows = _rows(env.db)
+        m2 = json.loads(rows["orb:orb-9"]["meta_json"] or "{}")
+        assert isinstance(m2.get("tool_blocked_s"), float) and m2["tool_blocked_s"] >= 0
+        m1 = json.loads(rows["discord:211"]["meta_json"] or "{}")
+        assert "tool_blocked_s" not in m1
+    asyncio.run(go())

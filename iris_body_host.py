@@ -417,6 +417,11 @@ def _ev_sender_label(source, sender):
     return str(sender or "")[:200] or None
 
 
+# 11-03 (doc audit: "tool_blocked: not recorded"): admit time per event, so an inbox hand-over (an input that
+# arrived mid-turn and waited for a tool call to finish) can stamp meta tool_blocked_s = hand-over - admit.
+_EV_ADMIT_TS: dict = {}
+
+
 def _ev_admit(item, prio, seq, event_id=None):
     try:
         source = item[0]
@@ -438,6 +443,9 @@ def _ev_admit(item, prio, seq, event_id=None):
                 return
             event_id = r.id
         _EV_IDS[seq] = [event_id]
+        if len(_EV_ADMIT_TS) > 500:                       # bounded: only open events matter
+            _EV_ADMIT_TS.clear()
+        _EV_ADMIT_TS[event_id] = time.time()
     except Exception as e:  # noqa: BLE001
         _ev_err("admit", e)
 
@@ -535,6 +543,7 @@ def _ev_turn_begin(eids, source, msg_id, sender):
         _ev_set(eids, "assigned", None, _EV["owner"])
         for eid in eids:
             _EV["turn_evs"].append({"id": eid, "source": source, "msg_id": msg_id, "sender": sender})
+            _EV_ADMIT_TS.pop(eid, None)                   # started its own turn: not tool-blocked
         _blog("turn", "start", {"trace": _EV["trace"], "owner": _EV["owner"], "source": source,
                                 "events": list(eids)})
     except Exception as e:  # noqa: BLE001
@@ -547,8 +556,13 @@ def _ev_handover(eids, source, msg_id, sender):
         return
     try:
         _ev_set(eids, "assigned", "inbox checkpoint hand-over", _EV["owner"])
+        now = time.time()
         for eid in eids:
             _EV["turn_evs"].append({"id": eid, "source": source, "msg_id": msg_id, "sender": sender})
+            t0 = _EV_ADMIT_TS.pop(eid, None)
+            if t0 is not None and now >= t0:
+                if not _ev_store().merge_meta(eid, {"tool_blocked_s": round(now - t0, 3)}):
+                    _ev_err("merge_meta tool_blocked(" + str(eid) + ")", _ev_store().last_error or "row missing")
     except Exception as e:  # noqa: BLE001
         _ev_err("hand-over", e)
 
