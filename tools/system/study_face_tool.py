@@ -87,6 +87,19 @@ def _presence() -> dict[str, Any]:
 
 
 def _servo(g: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    # 11-03: a study must honour the servo's deliberate-off flag. During the room inspection the study turned the head
+    # to follow a visitor (pan -88) and its release re-STARTED the servo that Zeke's "still" had stopped. A park is only
+    # as good as its last flag reader. Fail closed: an unreadable flag counts as OFF.
+    if params.get("action") == "start":
+        flag = Path(__file__).resolve().parents[2] / "state" / "attention" / "servo_deliberately_off.json"
+        try:
+            off = bool(json.loads(flag.read_text(encoding="utf-8")).get("off", True))
+        except FileNotFoundError:
+            off = False
+        except Exception:  # noqa: BLE001
+            off = True
+        if off:
+            return {"ok": True, "started": False, "reason": "servo deliberately off (" + flag.name + ")"}
     try:
         from tools.tool_registry import _REGISTRY
         td = _REGISTRY.get("attention_smooth")
