@@ -25,8 +25,14 @@ Actions:
   look  at=[x,y,z] | (none)      look at a point / stop
   hand  side=L|R to=[x,y,z] | rest=true
   grab  side=L|R prop=<id>       (hand must be within 0.6 m)   release side=L|R [throw=[vx,vy,vz]]
-  speak text="…"                 SAY IT ALOUD in the world: my own mouth (:8769 /synth) renders it, my body streams it
-                                 positionally (everyone near me hears it from my eye; it glows while I talk)
+  speak text="…" [face=auto|<name>|none]
+                                 SAY IT ALOUD in the world: my own mouth (:8769 /synth) renders it, my body streams it
+                                 positionally (everyone near me hears it from my eye; it glows while I talk). My voice
+                                 is directional, so I first turn my eye to who I'm answering: auto = the last person
+                                 talking TO me (≤ 2 min, not via intercom); skipped while follow mode owns my gaze.
+  intercom to=[names] | "all" | "none"
+                                 whose voice still reaches MY ears out of earshot (heard lines say "via intercom").
+                                 Default ["zeke"] (our private channel). (No args = who's on it now.)
   hush [fade_ms=N]               stop mid-line (fade_ms: trail off over N ms; default from vr_hush_fade_ms, 0 = cut)
   color hex="#rrggbb" minutes=N  my glow (it follows my mood by itself; this overrides for N min)
   build op=spawn|edit|delete|copy|glue|split|unstroke|clear_strokes data={…}
@@ -37,7 +43,8 @@ Actions:
   action name=stage_on|stage_off|drop_test|reset_cans      kick name=<player>
   heard [n=20] [since=<epoch|ISO|"10m"|"90s">] [only_attending=true] [speaker=<name>]
                                  HEAR: what people said in the temple, one line per utterance, per speaker
-                                 ({t_start, t_end, speaker, text, dist_m, facing, addressed, attending}); my ears =
+                                 ({t_start, t_end, speaker, text, dist_m, facing, addressed, attending, where, dir,
+                                 bearing_deg (+ = my right, from my gaze), via air|intercom}); my ears =
                                  bot iris_hearing.gd → spool → scripts/vr/vr_hear.py (unit iris-vr-hear) → heard.jsonl.
                                  addressed = my name is in it; attending = that speaker said my name ≤ 90 s ago.
 Coordinates: metres, temple centre = (0,0,0), +Y up, spawn ≈ (0,0,9) facing −Z.
@@ -113,7 +120,40 @@ def _mouth_ready() -> Any:
     return "mouth unit is up but not answering yet (still binding) - try again shortly"
 
 
-def _speak(text: str) -> dict[str, Any]:
+_FACE_RECENT_S = 120.0
+
+
+def _face_target(face: Any) -> str:
+    """who to turn to before I talk (11-02; Zeke 10-28 'face me while you talk - you're muffled, you turned away'):
+    an explicit name, '' for none/off, or (auto) the speaker of my newest ATTENDING heard line within 2 min that
+    reached me through the air (an intercom talker is out of earshot - turning won't carry my voice to them)."""
+    import os
+    import time
+    f = str(face if face is not None else "auto").strip()
+    if f.lower() in ("", "none", "off", "false", "no", "0"):
+        return ""
+    if f.lower() != "auto":
+        return f[:64]
+    if not os.path.exists(_HEARD):
+        return ""
+    with open(_HEARD, "rb") as fh:
+        size = fh.seek(0, 2)
+        fh.seek(max(0, size - 40_000))
+        raw = fh.read().decode("utf-8", "replace").splitlines()
+    now = time.time()
+    for ln in reversed(raw[1:] if size > 40_000 else raw):
+        try:
+            d = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(d, dict) or now - float(d.get("ts", 0) or 0) > _FACE_RECENT_S:
+            continue
+        if d.get("attending") and d.get("via", "air") != "intercom" and d.get("speaker"):
+            return str(d["speaker"])[:64]
+    return ""
+
+
+def _speak(text: str, face: Any = "auto") -> dict[str, Any]:
     """SAY IT, SENTENCE BY SENTENCE (2026-10-29, Zeke: "speed up your mouth — when you can finally start saying your
     first words"): the mouth renders the FIRST sentence and my body starts playing it at once; the rest are rendered
     while it plays and queue behind it (Voice.speak_wav appends to the playing feed). Time-to-first-word = one
@@ -139,6 +179,11 @@ def _speak(text: str) -> dict[str, Any]:
     play_end = t0
     sents = _sentences(text)
     out: dict[str, Any] = {"ok": False}
+    try:
+        face_to = _face_target(face)
+    except Exception:  # noqa: BLE001  turning is a nicety; never cost me the line
+        face_to = ""
+    faced = None
 
     spans: list[list[float]] = []                        # [play start, play end] per sentence sent
     rec = {"t0": t0, "text": text, "sentences": sents, "spans": spans, "state": "speaking"}
@@ -167,9 +212,14 @@ def _speak(text: str) -> dict[str, Any]:
         path = os.path.join(_VOICE_DIR, f"line_{int(time.time() * 1000)}_{k}.wav")
         with open(path, "wb") as f:
             f.write(wav)
-        out = _send({"cmd": "voice", "path": path})
+        cmd = {"cmd": "voice", "path": path}
+        if k == 0 and face_to:
+            cmd["face"] = face_to                         # an older bot ignores the key
+        out = _send(cmd)
         if not out.get("ok"):
             return out
+        if k == 0 and face_to:
+            faced = out.get("faced")
         if first_s is None:
             first_s = round(time.time() - t0, 2)
         secs = float(out.get("seconds", 0.0))
@@ -192,6 +242,8 @@ def _speak(text: str) -> dict[str, Any]:
     out["wav_bytes"] = nbytes
     out["first_word_s"] = first_s
     out["sentences"] = len(sents)
+    if face_to:
+        out["faced"] = faced or ""
     return out
 
 
@@ -359,7 +411,9 @@ def _heard(p: dict[str, Any]) -> dict[str, Any]:
                 continue
             if float(d.get("ts", 0)) < since or (only and not d.get("attending")) or (who and str(d.get("speaker", "")).lower() != who):
                 continue
-            lines.append({k: d.get(k) for k in ("t_start", "t_end", "speaker", "text", "dist_m", "facing", "addressed", "attending")})
+            row = {k: d.get(k) for k in ("t_start", "t_end", "speaker", "text", "dist_m", "facing", "addressed", "attending")}
+            row.update({k: d[k] for k in ("where", "dir", "bearing_deg", "via") if k in d})     # (11-02) where they were
+            lines.append(row)
     out: dict[str, Any] = {"ok": True, "lines": lines[-n:], "count": len(lines[-n:])}
     try:
         with open(_ATTN, encoding="utf-8") as f:
@@ -403,12 +457,12 @@ def _vr_temple(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
                     out["socket_error"] = repr(e)
             return out
         if action == "speak":
-            return _speak(str(p.get("text", "")))
+            return _speak(str(p.get("text", "")), p.get("face", "auto"))
         if action == "hush" and "fade_ms" not in p and vr_cfg()["hush_fade_ms"] > 0:
             p["fade_ms"] = vr_cfg()["hush_fade_ms"]          # an old bot ignores the key (= the hard cut)
         if action == "heard":
             return _heard(p)
-        if action not in ("state", "events", "move", "look", "hand", "grab", "release", "say", "action", "kick", "omniscient", "hush", "color", "build", "draw", "chess", "laser", "arrow", "hearing", "gun", "power", "follow", "comm"):
+        if action not in ("state", "events", "move", "look", "hand", "grab", "release", "say", "action", "kick", "omniscient", "hush", "color", "build", "draw", "chess", "laser", "arrow", "hearing", "gun", "power", "follow", "comm", "intercom"):
             return {"ok": False, "error": f"unknown action {action!r}", "help": __doc__}
         req = {"cmd": action, **p}
         return _send(req)
@@ -435,8 +489,8 @@ register_tool(
     "on=false stops; no name = status) | comm to=[names]|all|none (who hears me in-ear when out of earshot; default all) | "
     "carry allow=[names]|all|none (who may pick me up; default Zeke) | pat name=<person> (head pat) | move speed=N (thruster ≤9 m/s; any height) | "
     "chess op=board|move from=e2 to=e4 (I really pick the piece up; events chess_done/chess_failed) | "
-    "rules → /data/projects/vr_iris/research/iris_body_physics_rules_2026-10-23.md | speak text (ALOUD, my voice, positional) | hush | say text (bubble only) | action name=stage_on|stage_off|drop_test|reset_cans|make_day|make_night | kick name | omniscient on=true|false (see everything vs field of view) | "
-    "heard [n] [since=10m|ISO|epoch] [only_attending=true] [speaker] (HEAR: who said what + when, per speaker; addressed = said my name, attending = said it ≤90 s ago) | hearing (my ears' counters).",
+    "rules → /data/projects/vr_iris/research/iris_body_physics_rules_2026-10-23.md | speak text [face=auto|name|none] (ALOUD, my voice, positional; I turn to who I answer first) | intercom to=[names]|all|none (whose voice reaches me out of earshot) | hush | say text (bubble only) | action name=stage_on|stage_off|drop_test|reset_cans|make_day|make_night | kick name | omniscient on=true|false (see everything vs field of view) | "
+    "heard [n] [since=10m|ISO|epoch] [only_attending=true] [speaker] (HEAR: who said what + when + where from my head, per speaker; addressed = said my name, attending = said it ≤90 s ago) | hearing (my ears' counters).",
     1,
     _vr_temple,
 )

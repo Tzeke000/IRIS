@@ -17,7 +17,11 @@ Pipeline
       faster-whisper on the GPU, drops empty / hallucination-only results, decides ADDRESSED (my name is in
       it) and ATTENDING (that speaker said my name within ATTEND_S; refreshed every time they speak), and
       appends one line per utterance to state/vr_temple/heard.jsonl:
-        {t_start, t_end, speaker, text, dist_m, facing, addressed, attending, ...}
+        {t_start, t_end, speaker, text, dist_m, facing, addressed, attending, where, dir, bearing_deg, via, ...}
+      WHERE (11-02, Zeke: "this person spoke and they were to the left … really close behind me … through the intercom
+      that me and you have — that way you know where to turn"): the bot's sidecar says where the talker is from MY
+      HEAD (bearing from my gaze, + = right; 8-way dir; dist_now_m) and how I heard them (via air | intercom = our
+      private channel past earshot); where_phrase() turns that into "close, to my front-left (2.8 m)".
       Processed spool files are deleted.
   delivery — `vr_temple action=heard` reads the file; iris_body_host.py's vr_heard_reader wakes me for
       attending lines ("[VR TEMPLE — Zeke said, 13:41:05] …").
@@ -522,6 +526,8 @@ class Ears:
             self.attn[who] = max(until, b + ATTEND_S)
         line = {"t_start": iso(a), "t_end": iso(b), "speaker": who, "text": text,
                 "dist_m": meta.get("dist_m"), "facing": bool(meta.get("facing")),
+                "where": where_phrase(meta), "dir": meta.get("dir"), "bearing_deg": meta.get("bearing_deg"),
+                "dist_now_m": meta.get("dist_now_m"), "via": meta.get("via", "air"),
                 "addressed": is_addr, "attending": attending,
                 "ts": round(a, 3), "ts_end": round(b, 3), "peer": meta.get("peer"),
                 "display_name": meta.get("display_name"), "level_db": round(float(lvl), 1), "eff_db": round(float(eff), 1),
@@ -608,7 +614,8 @@ class Ears:
             except Exception:
                 d = {}
             d[who] = {"t_start": t0, "t_end": t1, "seen": time.time(), "dist_m": meta.get("dist_m"),
-                      "facing": bool(meta.get("facing")), "eff_db": round(eff, 1)}
+                      "facing": bool(meta.get("facing")), "eff_db": round(eff, 1),
+                      "where": where_phrase(meta), "via": meta.get("via", "air")}
             tmp = p.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(d), encoding="utf-8")
             os.replace(tmp, p)
@@ -635,7 +642,8 @@ class Ears:
         self.live[who] = {"utterance_id": uid, "source": "vr", "speaker": who,
                           "display_name": b["meta"].get("display_name"), "text": text, "final": bool(final),
                           "ts": round(time.time(), 3), "started_ts": round(float(b["meta"].get("t_start", time.time())), 3),
-                          "seq": seq, "mouth_busy": None, "dropped": dropped, "dist_m": b["meta"].get("dist_m")}
+                          "seq": seq, "mouth_busy": None, "dropped": dropped, "dist_m": b["meta"].get("dist_m"),
+                          "where": where_phrase(b["meta"])}
         self._live_write()
 
     def live_partial(self, who: str) -> None:
@@ -685,7 +693,7 @@ class Ears:
                     pad = np.zeros(int(max(0.0, gap) * 16000), dtype=np.float32)
                     b["x"] = np.concatenate([b["x"], pad, x.astype(np.float32)])
                     b["t_end"] = t1; b["n"] += 1
-                    for k in ("dist_m", "facing", "atten_db"):
+                    for k in ("dist_m", "facing", "atten_db") + WHERE_KEYS:      # the newest clip = where they are now
                         if k in meta: b["meta"][k] = meta[k]
                 else:
                     n += self._flush(who)
@@ -710,6 +718,49 @@ class Ears:
                 return n
             if not items:
                 time.sleep(poll)
+
+
+# the bot's 8-way words (iris_hearing.gd dir_word) → how I say it. Anything else from the sidecar is ignored (the bot is
+# sandboxed but its files are still untrusted input: only these known words ever reach my prompt).
+_DIR_PHRASE = {"front": "in front of me", "behind": "behind me", "left": "to my left", "right": "to my right",
+               "front-left": "to my front-left", "front-right": "to my front-right",
+               "behind-left": "behind me to the left", "behind-right": "behind me to the right"}
+
+
+def where_phrase(meta: dict) -> str:
+    """'close, to my front-left (2.8 m)' / 'very close, behind me (1.2 m)' / 'via intercom - far, behind me (23 m)'.
+    Distance = where they are as the line ends (dist_now_m), else the loudest point (dist_m). '' if nothing known."""
+    d = meta.get("dist_now_m", meta.get("dist_m"))
+    try:
+        d = float(d) if d is not None else None
+    except (TypeError, ValueError):
+        d = None
+    if d is not None and not (0.0 <= d < 1e5):
+        d = None
+    raw = str(meta.get("dir") or "")
+    up = ""
+    for pre, word in (("above, ", "above"), ("below, ", "below")):
+        if raw.startswith(pre):
+            raw, up = raw[len(pre):], word
+    dirp = _DIR_PHRASE.get(raw, "")
+    if dirp and up:
+        dirp = up + " and " + dirp
+    if d is None and not dirp:
+        return ""
+    parts = []
+    if d is not None:
+        parts.append("very close" if d < 1.5 else "close" if d < 4.0 else "nearby" if d < 10.0 else "far")
+    if dirp:
+        parts.append(dirp)
+    out = ", ".join(parts)
+    if d is not None:
+        out += " (%s m)" % (("%.1f" % d) if d < 10.0 else ("%.0f" % d))
+    if meta.get("via") == "intercom":
+        out = "via intercom - " + out
+    return out
+
+
+WHERE_KEYS = ("dir", "bearing_deg", "elev_deg", "dist_now_m", "at", "via", "me")
 
 
 def _spool_is_safe(path: str) -> bool:
