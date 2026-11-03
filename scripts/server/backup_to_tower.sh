@@ -100,6 +100,23 @@ copy() {   # rsync -aR keeps the $HOME-relative path; rc 24 = a file vanished wh
 }
 copy "${EXCLUDES[@]}" "${LIST[@]}"
 [ ${#EXTRA[@]} -eq 0 ] || copy "${EXTRA[@]}"
+# 11-03 (full-stack audit #2): the VR temple's one-of-a-kind secrets live OUTSIDE $HOME, on two CTs - the TLS key
+# (pinned in every client), server.cfg (every invite), the invites dir; wg-gate's WireGuard keys, peer scripts,
+# nftables. ENCRYPTED BACKUPS ONLY; best-effort (a CT being down is a warning, never a failed backup).
+if [ "$ENC" = 1 ]; then
+  mkdir -p "$STAGE/remote"
+  TH=$(grep -s '^TEMPLE_HOST=' "$HOME/.iris_private.env" | cut -d= -f2)
+  if [ -n "$TH" ] && timeout 60 ssh -o BatchMode=yes -o ConnectTimeout=8 -i "$HOME/.ssh/id_ed25519_temple" "root@$TH" \
+       'cd "/srv/vrtemple/home/.local/share/godot/app_userdata/VR Iris" && tar -cf - server.cfg temple_server.key invites' \
+       > "$STAGE/remote/temple_secrets.tar" 2>/dev/null && [ -s "$STAGE/remote/temple_secrets.tar" ]; then
+    say "temple secrets staged ($(stat -c %s "$STAGE/remote/temple_secrets.tar") B)"
+  else rm -f "$STAGE/remote/temple_secrets.tar"; say "WARNING: temple secrets NOT staged (CT unreachable?)"; fi
+  if timeout 60 ssh -o BatchMode=yes -o ConnectTimeout=8 wg-gate \
+       'tar -cf - /etc/wireguard /etc/nftables.conf /root/public_endpoint /root/peers /root/wg_add_peer.sh /root/wg_add_pubkey.sh /root/wg_revoke_peer.sh 2>/dev/null' \
+       > "$STAGE/remote/wggate_secrets.tar" 2>/dev/null && [ -s "$STAGE/remote/wggate_secrets.tar" ]; then
+    say "wg-gate secrets staged ($(stat -c %s "$STAGE/remote/wggate_secrets.tar") B)"
+  else rm -f "$STAGE/remote/wggate_secrets.tar"; say "WARNING: wg-gate secrets NOT staged (CT unreachable?)"; fi
+fi
 # Chroma's HNSW segment files are written without a lock we can take: re-copy each Chroma dir until a
 # checksum pass finds nothing changed (3 tries). Chroma is DERIVED (rebuilt from state/iris_memory.jsonl
 # by iris_semantic_memory.reconcile_from_jsonl), so a still-moving copy is a warning, not a failure.
