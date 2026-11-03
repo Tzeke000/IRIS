@@ -227,7 +227,10 @@ def _dispatch(cmd: str, args: dict, ctx: Ctx):
     """Resolve and call the right handler.  Returns a JSON-serialisable value."""
     # ── Built-in commands ─────────────────────────────────────────────────
     if cmd == "ping":
-        return {"pong": True}
+        # 11-03: say whether whisper actually loaded and where, so health can tell deaf/slow ears from fine ones.
+        st = dict(getattr(wl, "WHISPER_STATE", {}) or {})
+        return {"pong": True, "whisper": {"loaded": getattr(wl, "_WHISPER", None) is not None,
+                                          "device": st.get("device"), "error": st.get("error")}}
 
     if cmd == "reload":
         # Hot-swap the logic layer: reload core, then ask it to reload its own

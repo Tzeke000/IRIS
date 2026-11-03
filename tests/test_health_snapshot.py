@@ -384,3 +384,19 @@ def test_sdk_stream_held_kind_severity(hs, monkeypatch):
             assert hs.probe_sdk_stream(ctx(hs, now=now))["status"] == want, flag
     finally:
         held.unlink(missing_ok=True)
+
+
+def test_ears_whisper_state_from_ping(monkeypatch):
+    """11-03: the ears ping says whether whisper loaded + where; health turns that into ok/warn/red."""
+    import time
+    from pathlib import Path
+    h = _load("health_snapshot_w", "health_snapshot.py")
+    ctx = {"root": Path("/nonexistent"), "now": time.time(), "voice_off": False, "quiet": False}
+    monkeypatch.setattr(h, "unit_active_seconds", lambda unit: 3600)
+    def run(res):
+        monkeypatch.setattr(h, "ears_ping", lambda *a, **k: {"ok": True, "result": res})
+        return h.probe_ears(ctx)["status"]
+    assert run({"pong": True}) == "ok"                                   # older daemon: no field
+    assert run({"pong": True, "whisper": {"loaded": True, "device": "cuda"}}) == "ok"
+    assert run({"pong": True, "whisper": {"loaded": True, "device": "cpu", "error": "x"}}) == "warn"
+    assert run({"pong": True, "whisper": {"loaded": False}}) == "red"

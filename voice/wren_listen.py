@@ -89,6 +89,10 @@ WHISPER_SIZE = "small"  # Zeke 2026-06-07: base mis-heard fast words ("to see if
 #                         spot; bigger (medium/large) is overkill + costly here.
 
 
+# 11-03 (doc audit "health blind to a failed whisper load"): what the load actually did, for the daemon's ping.
+WHISPER_STATE: dict = {"device": None, "error": None}
+
+
 def get_whisper():
     """Load faster-whisper once. Prefer GPU (Zeke has VRAM headroom: 8GB, voice
     model ~1.8GB), but CTranslate2's CUDA path needs cuDNN — separate from the
@@ -108,10 +112,12 @@ def get_whisper():
         # prove the GPU path actually runs (load can succeed but infer fail w/o cuDNN)
         _WHISPER.transcribe(np.zeros(16000, dtype=np.float32), beam_size=1)
         print(f"[whisper] loaded '{WHISPER_SIZE}' on CUDA float16")
+        WHISPER_STATE.update(device="cuda", error=None)
     except Exception as e:
         print(f"[whisper] GPU path unavailable ({e!r}); using CPU int8")
         _WHISPER = WhisperModel(WHISPER_SIZE, device="cpu", compute_type="int8")
         print(f"[whisper] loaded '{WHISPER_SIZE}' on CPU int8")
+        WHISPER_STATE.update(device="cpu", error=repr(e)[:200])
     return _WHISPER
 
 

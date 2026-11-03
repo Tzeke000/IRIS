@@ -250,7 +250,18 @@ def probe_ears(ctx: dict) -> dict:
     probe = "ears daemon :8770 {'cmd':'ping'} + last heard utterance age (body log)"
     try:
         resp = ears_ping(int(ctx["ears_port"])) if ctx.get("ears_port") else ears_ping()
-        if resp.get("ok") and (resp.get("result") or {}).get("pong"):
+        res = resp.get("result") or {}
+        if resp.get("ok") and res.get("pong"):
+            w = res.get("whisper")              # present once the ears run the 11-03 daemon (older = no field)
+            if isinstance(w, dict):
+                det["whisper"] = w
+                if not w.get("loaded"):
+                    up = unit_active_seconds(ctx.get("ears_unit") or "iris-ears")
+                    if up is None or up >= 300:
+                        return _r("red", probe, "ears answer but whisper never loaded (deaf)", **det)
+                    return _r("warn", probe, "whisper still loading (unit warming)", **det)
+                if w.get("device") == "cpu":
+                    return _r("warn", probe, f"whisper fell back to CPU (slow ears): {w.get('error')}", **det)
             return _r("ok", probe, **det)
         err = f"ping answered without pong: {str(resp)[:120]}"
     except Exception as e:  # noqa: BLE001
