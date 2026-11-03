@@ -38,7 +38,7 @@ def main() -> int:
     try:
         sys.path.insert(1, str(ROOT))
         from brain import iris_events
-        res = iris_events.EventStore(busy_timeout_s=2.0).check_write(tid, path) or {}
+        res = iris_events.EventStore(busy_timeout_s=2.0, lease_root=ROOT).check_write(tid, path) or {}
     except Exception:
         return 0
     if res.get("allowed", True) or res.get("degraded"):

@@ -478,6 +478,7 @@ class Claim:
         self.store, self.task_id, self.fence = store, task_id, fence
         self.lease_s, self.side_effects = lease_s, side_effects
         self.lost = False
+        self.leased = False            # 11-03: file leases taken for this job (released when it ends)
 
     def still_mine(self) -> bool | None:
         """True/False from a real read; None if the store can't answer (fail open)."""
@@ -678,6 +679,8 @@ def run(a) -> int:
         if not lr.get("ok"):          # LOG-ONLY (11-03): say so, keep going
             lease_note = f"lease conflict (log-only): {lr.get('reason')} {lr.get('conflicts')}"[:400]
             print(json.dumps({"lease_warning": lease_note}), flush=True)
+        else:
+            claim.leased = True
     act_id = ledger_open(a, unit, claim.task_id if claim else None) if a.ledger else None
     props = ["-p", f"MemoryMax={mem_limit}", "-p", f"MemorySwapMax={a.swap}", "-p", "OOMScoreAdjust=500",
              "-p", "KillMode=control-group", "-p", f"RuntimeMaxSec={a.timeout}", "-p", f"Nice={a.nice}",
@@ -795,7 +798,7 @@ def watch(jid: int, unit: str, proc: subprocess.Popen, poll: float = 1.0, claim:
                   "note=COALESCE(note,'') || ? WHERE id=?",
                   (time.time(), outcome, code, peak or None, cpu, gpu_peak, " | " + err[-400:], jid))
     task_result = None
-    if claim and globs:
+    if claim and getattr(claim, "leased", False):
         try:
             claim.store.release_leases(claim.task_id)
         except Exception:  # noqa: BLE001

@@ -20,7 +20,7 @@ def _run(env, payload):
 
 def test_logs_conflict_never_denies(tmp_path, monkeypatch):
     db = tmp_path / "ev.sqlite"
-    s = ev.EventStore(db)
+    s = ev.EventStore(db, lease_root=ROOT)          # explicit: an earlier test may have patched iris_paths
     a = s.create_task("A", kind="worker:helper").id
     b = s.create_task("B", kind="worker:helper").id
     fa = s.claim(a, "worker:a", 600)
@@ -31,7 +31,7 @@ def test_logs_conflict_never_denies(tmp_path, monkeypatch):
     pay = {"tool_name": "Edit", "tool_input": {"file_path": target}}
     base = {"IRIS_EVENTS_DB": str(db), "IRIS_LEASE_LOG": str(tmp_path / "conf.jsonl")}
     r = _run({**base, "IRIS_TASK_ID": b}, pay)                     # B writes into A's lease
-    assert r.returncode == 0 and r.stdout == "" and "LOG-ONLY" in r.stderr
+    assert r.returncode == 0 and r.stdout == "" and "LOG-ONLY" in r.stderr, (r.stderr, r.stdout)
     r = _run({**base, "IRIS_TASK_ID": a, "IRIS_LEASES": "x"}, pay)  # A inside its own lease
     assert r.returncode == 0 and r.stderr == ""
     r = _run({**base, "IRIS_TASK_ID": b}, {"tool_name": "Read", "tool_input": {"file_path": target}})
