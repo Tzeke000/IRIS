@@ -416,3 +416,21 @@ def test_aging_probe_folds_into_health(tmp_path):
     r = h.probe_aging(ctx); assert r["status"] == "warn" and "runtime" in r["error"]
     f.write_text(json.dumps({"ts": now - 3 * 3600, "targets": {}}))
     assert h.probe_aging(ctx)["status"] == "warn"                        # stale timer
+
+
+def test_llm_bridge_probe(tmp_path):
+    import json, time
+    h = _load("health_snapshot_l", "health_snapshot.py")
+    now = time.time()
+    d = tmp_path / "state" / "iris_llm"; d.mkdir(parents=True)
+    ctx = {"root": tmp_path, "now": now}
+    assert h.probe_llm_bridge(ctx)["status"] == "ok"
+    (d / "a.json").write_text(json.dumps({"status": "answered", "ts": now - 9999}))
+    (d / "b.json").write_text(json.dumps({"status": "pending", "ts": now - 60, "kind": "reflect"}))
+    assert h.probe_llm_bridge(ctx)["status"] == "ok"
+    (d / "c.json").write_text(json.dumps({"status": "pending", "ts": now - 900, "kind": "helper_done"}))
+    assert h.probe_llm_bridge(ctx)["status"] == "warn"
+    (d / "e.json").write_text(json.dumps({"status": "pending", "ts": now - 100, "deadline_ts": now - 1}))
+    assert h.probe_llm_bridge(ctx)["status"] == "red"
+    (d / "bad.json").write_text("{not json")
+    assert h.probe_llm_bridge(ctx)["detail"]["unreadable"] == 1

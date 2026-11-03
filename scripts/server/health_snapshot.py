@@ -781,6 +781,46 @@ def probe_aging(ctx: dict) -> dict:
     return _r("ok", probe, age=age, **det)
 
 
+def probe_llm_bridge(ctx: dict) -> dict:
+    """11-03 (architecture write-up: "the LLM bridge has no health probe"): brain/* requests wait in
+    state/iris_llm/<id>.json (status pending) until a turn ends and the Stop hook / idle poller delivers them.
+    Oldest still-pending request: > 10 min -> warn (delivery is lagging - IDLE = DEAF), > 60 min -> red.
+    Past its own deadline_ts counts as red too (the requester gave up waiting for me)."""
+    d = ctx["root"] / "state" / "iris_llm"
+    probe = "state/iris_llm/*.json status=pending: oldest age (warn 600 s, red 3600 s or past deadline_ts)"
+    now = ctx["now"]
+    pend, overdue, bad = [], 0, 0
+    try:
+        files = list(d.glob("*.json"))
+    except OSError as e:
+        return _r("red", probe, f"can't list {d}: {e!r}")
+    for f in files:
+        try:
+            r = json.loads(f.read_text())
+        except Exception:  # noqa: BLE001 - mid-write or corrupt: count, don't die
+            bad += 1
+            continue
+        if r.get("status") != "pending":
+            continue
+        age = now - float(r.get("ts") or now)
+        pend.append((age, r.get("kind"), r.get("requester")))
+        if r.get("deadline_ts") and now > float(r["deadline_ts"]):
+            overdue += 1
+    pend.sort(reverse=True)
+    det = {"pending": len(pend), "overdue": overdue, "unreadable": bad,
+           "oldest": [{"age_s": round(a), "kind": k, "requester": q} for a, k, q in pend[:3]]}
+    if not pend:
+        return _r("ok", probe, **det)
+    oldest = pend[0][0]
+    if overdue or oldest > 3600:
+        return _r("red", probe, f"{len(pend)} pending, oldest {oldest / 60:.0f} min ({pend[0][1]}), {overdue} past deadline",
+                  age=oldest, **det)
+    if oldest > 600:
+        return _r("warn", probe, f"{len(pend)} pending, oldest {oldest / 60:.0f} min ({pend[0][1]}) - not delivered yet",
+                  age=oldest, **det)
+    return _r("ok", probe, age=oldest, **det)
+
+
 PROBES = {
     "ears": probe_ears,
     "stream_asr": probe_stream_asr,
@@ -796,6 +836,7 @@ PROBES = {
     "gpu": probe_gpu,
     "events": probe_events,
     "aging": probe_aging,
+    "llm_bridge": probe_llm_bridge,
 }
 
 
