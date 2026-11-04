@@ -16,6 +16,7 @@ StartLimitBurst=5
 Type=simple
 WorkingDirectory=%h/IRIS
 EnvironmentFile=%h/.config/iris/voice.env
+# V3 3.8 (11-04): the GPU admission gate lives IN mouth_launch.sh (engine-aware: fish 9300 MiB, styletts 2048).
 ExecStart=%h/IRIS/scripts/server/mouth_launch.sh
 TimeoutStopSec=30
 Restart=always

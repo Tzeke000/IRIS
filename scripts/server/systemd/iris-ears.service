@@ -16,7 +16,12 @@ WorkingDirectory=%h/IRIS
 EnvironmentFile=%h/.config/iris/voice.env
 Environment=WREN_VOICE_PORT=8769
 Environment=HF_HOME=%h/IRIS/.cache/huggingface
-ExecStart=%h/venvs/iris-v100/bin/python %h/IRIS/voice/wren_voice_daemon.py
+# V3 3.8 (11-04): GPU admission first, then exec the daemon (same PID). Sized from the MEASURED peak: the daemon held
+# 936 MiB steady on 11-04 -> 1100 + 1 GiB reserve. Core unit: a refusal logs who holds the V100 and retries (5 s
+# doubling to 60 s); after 20 min it starts anyway ("forced"); no nvidia-smi -> warn + start. The wait happens in
+# the main process, so `systemctl start` never blocks and the watchdog's 5-min :8770 probe still sees a stuck start.
+# Decisions: state/health/gpu_admission.jsonl. Skip with IRIS_GPU_ADMIT=0 in voice.env.
+ExecStart=/usr/bin/python3 %h/IRIS/scripts/server/gpu_admit.py 1100 --core --who ears --exec -- %h/venvs/iris-v100/bin/python %h/IRIS/voice/wren_voice_daemon.py
 Restart=always
 RestartSec=10
 # 2026-10-29: protect my voice's memory from workers/renders under pressure (memory_recursiveprot is on)

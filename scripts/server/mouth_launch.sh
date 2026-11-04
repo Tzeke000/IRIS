@@ -12,6 +12,15 @@ ENGINE_FILE="$HOME/.config/iris/mouth_engine"
 FAILS="$ROOT/state/mouth_fish_fails"
 LOG="$ROOT/state/mouth_engine.log"
 log() { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
+# V3 3.8 (11-04): GPU admission BEFORE the engine loads, sized from MEASURED peaks (fish python held 8968-9018 MiB
+# steady, 10-30 + 11-04; StyleTTS2 ~1.7 GB). Core unit ⇒ --core: a refusal logs who holds the V100, backs off
+# 5 s→60 s and retries; after 20 min it starts ANYWAY ("forced"). Missing nvidia-smi ⇒ warn + start (fail-open).
+# Never exits non-zero, so it can't count as a fish failure. Decisions: state/health/gpu_admission.jsonl + journal.
+# Escape hatch: IRIS_GPU_ADMIT=0 in ~/.config/iris/voice.env skips the check.
+gpu_gate() {  # gpu_gate <need_mib> <who>
+  log "gpu admission: $2 needs $1 MiB (+1 GiB reserve)"
+  /usr/bin/python3 "$ROOT/scripts/server/gpu_admit.py" "$1" --core --who "$2" || log "gpu admission errored rc=$? - starting anyway"
+}
 ENGINE="$(tr -d '[:space:]' < "$ENGINE_FILE" 2>/dev/null || true)"
 [ -n "$ENGINE" ] || ENGINE=styletts
 export WREN_VOICE_PORT=8769
@@ -23,6 +32,7 @@ if [ "$ENGINE" = "fish" ]; then
     log "fish failed $recent times in 10 min — FALLING BACK to styletts for this run"
     ENGINE=styletts
   else
+    gpu_gate "${IRIS_MOUTH_FISH_NEED_MIB:-9300}" mouth_fish
     log "starting fish on :8769"
     export FISH_MAXSEQ=4096 FISH_COMPILE=reduce-overhead FISH_INT8=1
     # Zeke 10-09: 3-word pieces sounded choppy (each piece is voiced on its own) ⇒ start with 8 words, then grow.
@@ -50,8 +60,10 @@ if [ "$ENGINE" = "fish" ]; then
   fi
 fi
 if [ "$ENGINE" = "styletts" ]; then
+  gpu_gate "${IRIS_MOUTH_STYLETTS_NEED_MIB:-2048}" mouth_styletts
   log "starting styletts on :8769"
   exec "$HOME/venvs/iris-style/bin/python" "$ROOT/voice/wren_styletts_server.py"
 fi
 log "unknown engine '$ENGINE' — starting styletts"
+gpu_gate "${IRIS_MOUTH_STYLETTS_NEED_MIB:-2048}" mouth_styletts
 exec "$HOME/venvs/iris-style/bin/python" "$ROOT/voice/wren_styletts_server.py"
