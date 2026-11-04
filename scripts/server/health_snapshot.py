@@ -19,7 +19,8 @@ One entry per subsystem: {ok, status, last_success_ts, lag_s, last_error, last_e
 Rule (V3 spec §13): running != healthy. Every entry is a functional probe or an age - a live pid is only ever a
 precondition, never the verdict. Each probe runs in its own daemon thread with a timeout; one probe that raises
 or hangs turns ITS entry red and every other entry is still written. The file is written atomically
-(tmp + fsync + replace + dir fsync), so a reader never sees half a file.
+(tmp + fsync + replace + dir fsync), so a reader never sees half a file. Each snapshot also appends one compact
+line (ts, red, warn, red errors) to state/health/history.jsonl beside it (11-04, for regress_gate.py's 24 h check).
 
 stdlib only (sqlite3, json, socket, urllib) - no chromadb/torch imports, nothing that touches the GPU.
 """
@@ -979,11 +980,47 @@ def build_snapshot(root: Path | None = None, now: float | None = None, probes: d
     }
 
 
+HISTORY_NAME = "history.jsonl"       # beside now.json: one compact line per snapshot (regress_gate.py: no red in 24 h)
+HISTORY_CAP, HISTORY_KEEP = 4 << 20, 3 << 20   # ~1,440 lines/day at ~250 B -> the newest ~8 days survive a trim
+
+
+def append_history(path: Path, doc: dict) -> None:
+    """One line per snapshot: ts + which subsystems were red / warn (+ the red errors, short), so "no red for
+    24 h" is answerable from a record instead of from now.json (which only knows the CURRENT status and the
+    last error of any severity). Single O_APPEND write; trimmed to the newest HISTORY_KEEP bytes past
+    HISTORY_CAP. Never raises - history is evidence for the gate, never a reason for the snapshot to fail."""
+    try:
+        subs = doc.get("subsystems") or {}
+        red = sorted(k for k, v in subs.items() if v.get("status") == "red")
+        line = {"ts": doc.get("ts"), "red": red,
+                "warn": sorted(k for k, v in subs.items() if v.get("status") == "warn"),
+                "grace": bool((doc.get("context") or {}).get("in_grace"))}
+        if red:
+            line["err"] = {k: str(subs[k].get("last_error") or "")[:120] for k in red}
+        data = (json.dumps(line, separators=(",", ":")) + "\n").encode("utf-8")
+        fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o664)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        if path.stat().st_size > HISTORY_CAP:
+            with open(path, "rb") as f:
+                f.seek(-HISTORY_KEEP, 2)
+                tail = f.read()
+            tail = tail[tail.find(b"\n") + 1:]                 # start on a whole line
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.trim")
+            tmp.write_bytes(tail)
+            os.replace(tmp, path)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def write_snapshot(out: Path | None = None, root: Path | None = None, **kw) -> dict:
     root = Path(root or ROOT)
     out = Path(out or root / "state" / "health" / "now.json")
     doc = build_snapshot(root, prev=_load(out, {}), **kw)
     write_atomic(out, doc)
+    append_history(out.with_name(HISTORY_NAME), doc)
     return doc
 
 

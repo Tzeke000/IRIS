@@ -19,6 +19,7 @@ prints p50/p90 per stage, per local day, per source:
                           only where recorded)
 
 plus, for worker tasks (worker.py), per kind: queue (admitted->running) and run (running->done/failed).
+--json also carries `overall`: each stage over the whole window per source and "*" (all sources pooled).
 
     latency_report.py [--days 7] [--json] [--db PATH]
     latency_report.py --transcript [PATH] [--split-ts EPOCH] [--days 7] [--json]
@@ -122,6 +123,7 @@ def build(c: sqlite3.Connection, days: int, now: float | None = None) -> dict:
     since = now - days * 86400
     firsts = _first_entries(c, "event", _EV_SET, (since, INCIDENT_SOURCE))
     samples: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))  # day -> source -> stage
+    pooled: dict = defaultdict(lambda: defaultdict(list))  # source (and "*" = every source) -> stage, whole window
     counts: dict = defaultdict(lambda: defaultdict(lambda: {"events": 0, "open": 0}))
     tool_recorded = False
     rows = c.execute("SELECT event_id, source, received_ts, status, meta_json FROM events "
@@ -157,6 +159,12 @@ def build(c: sqlite3.Connection, days: int, now: float | None = None) -> dict:
                 if isinstance(ta, (int, float)) and isinstance(tb2, (int, float)) and tb2 >= ta:
                     st[stage].append(float(tb2) - float(ta))
 
+    for day in samples:
+        for src, stages in samples[day].items():
+            for stage, xs in stages.items():
+                pooled[src][stage].extend(xs)
+                pooled["*"][stage].extend(xs)
+
     tfirst = _first_entries(c, "task", _TASK_SET, (since,))
     tsamples: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))  # day -> kind -> stage
     for r in c.execute("SELECT task_id, kind, created_ts FROM tasks WHERE created_ts>=?", (since,)):
@@ -183,6 +191,9 @@ def build(c: sqlite3.Connection, days: int, now: float | None = None) -> dict:
     for day in sorted(tsamples):
         report["tasks"][day] = {k: {s: summarize(v.get(s, [])) for s in TASK_STAGES}
                                 for k, v in sorted(tsamples[day].items())}
+    # the whole window per source, plus "*" = all sources pooled (regress_gate.py compares these: a per-day
+    # p90 over a handful of samples is noise; the pooled window is the number a baseline can hold)
+    report["overall"] = {src: {s: summarize(v) for s, v in stages.items() if v} for src, stages in sorted(pooled.items())}
     report["no_data"] = not report["events"] and not report["tasks"]
     return report
 
