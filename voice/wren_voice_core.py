@@ -1878,7 +1878,8 @@ def _voice_id_verdict(audio) -> dict:
 
     {"speaker": enrolled name | "unknown" | None, "score": float | None,
      "closest": nearest enrolled name | None, "threshold": float | None,
-     "status": "matched" | "unknown" | "skipped" | "cold", "reason": str}
+     "status": "matched" | "unknown" | "skipped" | "cold", "reason": str,
+     "dur_s": utterance length in seconds (11-04: the host's short-clip continuity rule)}
       matched - closest enrolled print scored >= the voice_id.json threshold
       unknown - prints are enrolled, none scored >= threshold
       skipped - no verdict possible: feature off (no scratch/voice_id.json), module
@@ -1887,6 +1888,10 @@ def _voice_id_verdict(audio) -> dict:
     """
     v = {"speaker": None, "score": None, "closest": None, "threshold": None,
          "status": "skipped", "reason": ""}
+    try:   # 11-04 every-yes: the host's short-clip policy needs the length (1 s clips can't verify)
+        v["dur_s"] = round(float(getattr(audio, "size", 0)) / SAMPLE_RATE, 2)
+    except Exception:
+        pass
     cfg = _voice_id_cfg()
     if cfg is None:
         v["reason"] = "voice-id off (scratch/voice_id.json absent/disabled/invalid)"
@@ -2023,7 +2028,7 @@ def _with_speaker(text: str, verdict: dict, args: dict, timing: "dict | None" = 
     if not (args or {}).get("structured"):
         return text
     out = {"text": text}
-    for k in ("speaker", "score", "status", "threshold", "closest", "reason"):
+    for k in ("speaker", "score", "status", "threshold", "closest", "reason", "dur_s"):
         out[k] = (verdict or {}).get(k)
     for k in ("speech_end_ts", "stt_done_ts"):
         if (timing or {}).get(k):

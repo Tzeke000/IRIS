@@ -2,7 +2,8 @@
 
 - off: bargein_watch is asked exactly as before ({"structured": true}) and only '[barge-in]' counts
 - on: the host asks for tiers, a '[barge-defer]' becomes a voice turn that does NOT interrupt mine,
-  an '[bargein_watch] ack: ...' is logged and never becomes a turn
+  an '[bargein_watch] ack: ...' never becomes a turn from the watch itself - since 11-04 it is buffered
+  and delivered after my utterance (tests/test_every_yes_1104.py)
 """
 from __future__ import annotations
 
@@ -60,8 +61,12 @@ def test_on_asks_for_tiers_and_returns_defer(monkeypatch):
 
 
 def test_ack_is_never_a_turn(monkeypatch):
+    h._PENDING_ACKS.clear()
+    h._RECENT_SPOKEN.clear()
     r, _ = _watch(monkeypatch, "[bargein_watch] ack: Mm-hmm.", True)
     assert r is None
+    assert [a[1] for a in h._PENDING_ACKS] == ["Mm-hmm."]    # buffered for after my utterance (11-04)
+    h._PENDING_ACKS.clear()
 
 
 class _Turn:
@@ -81,6 +86,7 @@ def _run_reader_once(monkeypatch, barge_text):
     """Drive voice_reader through ONE barge window and report (queued items, interrupts)."""
     q: asyncio.Queue = asyncio.Queue()
     client = _Client()
+    h._PENDING_ACKS.clear()
     monkeypatch.setattr(h, "DUPLEX_TIERS", True)
     monkeypatch.setattr(h, "BARGEIN_ON", True)
     monkeypatch.setattr(h, "BARGEIN_STOPS_TURN", True)
