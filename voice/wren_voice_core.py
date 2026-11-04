@@ -81,6 +81,14 @@ except Exception:  # noqa: BLE001
     print("[wren-voice-core] iris_live_words not importable — live partials disabled",
           file=sys.stderr)
 
+# Semantic end-of-turn judge (11-04, Zeke 11-02): voice/iris_eot.py, env flag IRIS_SEMANTIC_EOT=1.
+try:
+    import iris_eot as _eot
+    _HAVE_EOT = True
+except Exception:  # noqa: BLE001
+    _HAVE_EOT = False
+    print("[wren-voice-core] iris_eot not importable — semantic end-of-turn stays off", file=sys.stderr)
+
 # Streaming ASR sidecar (11-02, Nemotron): voice/iris_stream_asr.py client, hot flag stream_asr.
 try:
     import iris_stream_asr as _sasr
@@ -612,6 +620,100 @@ def _align_stream_words(text: str, wwords: list, min_match: float = 0.5) -> list
             out.append(_AlignedWord(" " + toks[k], s_, s_ + max(step, 0.05), 0.0))
         i = j
     return out
+
+
+# ── Semantic end-of-turn (11-04) ─────────────────────────────────────────────────────────────
+# OFF unless IRIS_SEMANTIC_EOT=1 (~/.config/iris/voice.env). When on, the transcript gets a vote on
+# whether his SENTENCE is finished (voice/iris_eot.py: lexical rules + the optional Namo model on
+# IRIS_SEMANTIC_EOT_MODEL), combined with smart-turn's acoustic verdict in Step 4 of cmd_listen:
+#   unfinished ("is it", "and uh", "do you currently...") -> grace window + up to
+#       semantic_eot_max_extend_s (hot, default 1.5 s)
+#   clearly finished ("?" close, "yes", "okay") -> end now; on a smart-turn HOLD only a short
+#       semantic_eot_finished_grace_s (hot, default 0.3 s)
+#   unsure -> exactly the legacy acoustic behaviour
+# and early-finalize is VETOED while the live partial dangles. Every decision -> EOT_LOG (+ stderr).
+EOT_LOG = _IRIS_REPO / "state" / "health" / "eot_decisions.jsonl"
+
+
+def _eot_on() -> bool:
+    return _HAVE_EOT and _eot.env_enabled()
+
+
+def _eot_log(**rec) -> None:
+    """One line per end-of-turn decision -> state/health/eot_decisions.jsonl. Never raises."""
+    try:
+        import json as _json
+        rec["ts"] = round(time.time(), 3)
+        EOT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(EOT_LOG, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(rec) + "\n")
+    except Exception:
+        pass
+
+
+def _smartturn_prob(audio) -> "float | None":
+    try:
+        return float(_smartturn.predict_endpoint(audio)["prob"]) if _HAVE_SMARTTURN else None
+    except Exception:
+        return None
+
+
+def _eot_decide(audio, text: str, base_grace_s: float, stage: str) -> "tuple[bool, float]":
+    """Step-4 completeness with the semantic judge on -> (complete, grace_s). Logs the decision.
+    Acoustic = smart-turn's hold-open bar (prob < 0.6 -> HOLD), the same as _endpoint_incomplete; an
+    absent/erroring smart-turn counts as 'ok' (as before). Any judge error -> the legacy answer."""
+    prob = _smartturn_prob(audio)
+    hold = prob is not None and prob < 0.6
+    try:
+        ctl = {}
+        try:
+            from wren_voice_status import read_control
+            ctl = read_control() or {}
+        except Exception:
+            pass
+        k = _eot.knobs(ctl)
+        v = _eot.judge(text, _eot.model_from_env())
+        plan = _eot.plan_grace(hold, v, base_grace_s, k["max_extend_s"], k["finished_grace_s"])
+    except Exception as e:  # noqa: BLE001
+        complete = (not hold) and (not _looks_incomplete(text))
+        print(f"[eot] judge failed ({e!r}) - legacy completeness", file=sys.stderr)
+        _eot_log(stage=stage, text=text[-120:], error=repr(e), complete=complete,
+                 grace_s=base_grace_s)
+        return complete, base_grace_s
+    legacy = (not hold) and (not _looks_incomplete(text))
+    print(f"[eot] {stage}: acoustic={'HOLD' if hold else 'ok'}"
+          f"{'' if prob is None else f' ({prob:.3f})'} semantic={v.label} p={v.p_finished:.2f} "
+          f"[{v.source}:{v.reason}{'' if v.model_p is None else f' model={v.model_p:.3f}'}] "
+          f"{v.ms:.1f}ms -> {'END' if plan.complete else f'grace {plan.grace_s:.2f}s'} "
+          f"({plan.why}; legacy {'END' if legacy else f'grace {base_grace_s:.2f}s'}) "
+          f"{text[-40:]!r}", file=sys.stderr)
+    _eot_log(stage=stage, text=text[-120:], acoustic="hold" if hold else "ok",
+             smartturn_prob=None if prob is None else round(prob, 4),
+             semantic=v.label, p_finished=v.p_finished, reason=v.reason, source=v.source,
+             model_p=v.model_p, judge_ms=v.ms, complete=plan.complete, grace_s=plan.grace_s,
+             why=plan.why, base_grace_s=base_grace_s, legacy_complete=legacy)
+    return plan.complete, plan.grace_s
+
+
+def _eot_veto_early_finalize(text_src) -> bool:
+    """True if the freshest live partial dangles (lexically unfinished) -> skip early-finalize this
+    check; capture then ends on the normal end-silence instead. Lexical only (no model in the capture
+    loop). Never raises; no partial -> no veto."""
+    try:
+        lt = text_src.latest() if text_src is not None else None
+        txt = (lt[0] if lt else "") or ""
+        if not txt.strip():
+            return False
+        v = _eot.lexical_verdict(txt)
+        if v.label == "unfinished":
+            print(f"[eot] early-finalize vetoed: partial dangles [{v.reason}] {txt[-40:]!r}",
+                  file=sys.stderr)
+            _eot_log(stage="early-finalize-veto", text=txt[-120:], semantic=v.label,
+                     p_finished=v.p_finished, reason=v.reason)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _stream_log(**rec) -> None:
@@ -2129,6 +2231,13 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
     # to max_seconds. Off/absent → identical to before.
     ext_cfg = _smart_extend_cfg() if _HAVE_SMARTTURN else None
     bc = _new_backchannel(ctx) if in_call else None
+    eot_on = _eot_on()
+    ef_fn = _endpoint_complete_confident if in_call else None
+    if ef_fn is not None and eot_on:
+        _ef_text = stream_text if stream_text is not None else partials
+
+        def ef_fn(a, _src=_ef_text):   # semantic veto first: a dangling partial never early-finalizes
+            return (not _eot_veto_early_finalize(_src)) and _endpoint_complete_confident(a)
     timing: dict = {}   # 2026-11-01 latency stamps: speech_end_ts (capture) + stt_done_ts (below)
     try:
         with ctx.mic_lock:
@@ -2137,7 +2246,7 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
                 partials=partials,
                 transcribe_fn=(_prosody.transcribe if in_call else None),
                 mouth_busy_fn=(lambda: getattr(ctx, "speaking", False)),
-                early_finalize_fn=(_endpoint_complete_confident if in_call else None),
+                early_finalize_fn=ef_fn,
                 ef_state=ef_state,
                 hold_open_fn=(_endpoint_incomplete if ext_cfg else None),
                 extend_max_s=(ext_cfg["max_seconds"] if ext_cfg else 0.0),
@@ -2222,19 +2331,26 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
     # both (breaker finding 2) stops the filler from playing over a trailing clause the
     # grace loop is about to re-capture. Because the grace loop runs only while NOT
     # complete, the filler and the grace re-open never fire on the same turn.
-    def _complete() -> bool:
-        return (not _endpoint_incomplete(audio)) and (not _looks_incomplete(text))
+    # Semantic EOT on (11-04): _eot_decide also picks the grace window (extended when the words
+    # dangle, short when they're clearly finished). Off: exactly the legacy pair of checks, once.
+    base_grace = _grace_resume_s()
+
+    def _evaluate(stage: str) -> "tuple[bool, float]":
+        if eot_on and text:
+            return _eot_decide(audio, text, base_grace, stage)
+        return (not _endpoint_incomplete(audio)) and (not _looks_incomplete(text)), base_grace
+
+    complete, grace_s = _evaluate("turn-end") if text else (True, base_grace)
 
     # Post-transcribe fallback filler: a complete turn that scored below the early-fire bar
     # (so Step 3a didn't fire) still gets exactly one backchannel here. `not filler_fired`
     # guarantees we never double-fire when filler-earlier already played one this turn.
-    if in_call and text and not filler_fired and _complete():
+    if in_call and text and not filler_fired and complete:
         _fire_filler(ctx)
         filler_fired = True
 
     rounds = 0
-    grace_s = _grace_resume_s()
-    while text and not _complete() and rounds < MAX_GRACE_ROUNDS:
+    while text and not complete and rounds < MAX_GRACE_ROUNDS:
         rounds += 1
         set_state("listening", "still with you")
         try:
@@ -2249,9 +2365,15 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
             # lands before my reply was heard (iris_body_host CONTINUATION_MERGE_S).
             print(f"[grace] round {rounds}: no resume within {grace_s:.1f}s — turn closes "
                   f"mid-thought ({text[-40:]!r})", file=sys.stderr)
+            if eot_on:
+                _eot_log(stage=f"grace-{rounds}", outcome="no-resume", grace_s=grace_s,
+                         text=text[-120:])
             break  # the cue was a false alarm — he really did stop
         print(f"[grace] round {rounds}: he resumed ({more.size / SAMPLE_RATE:.1f}s more)",
               file=sys.stderr)
+        if eot_on:
+            _eot_log(stage=f"grace-{rounds}", outcome="resumed", grace_s=grace_s,
+                     more_s=round(more.size / SAMPLE_RATE, 2), text=text[-120:])
         audio = np.concatenate([audio, more])
         set_state("thinking", "heard you")
         try:
@@ -2266,7 +2388,8 @@ def _cmd_listen_impl(ctx, args: dict, live=None):
             final_ok = False
             break
         # he resumed and has now closed a complete clause → fire the filler once
-        if in_call and text and not filler_fired and _complete():
+        complete, grace_s = _evaluate(f"after-grace-{rounds}") if text else (True, base_grace)
+        if in_call and text and not filler_fired and complete:
             _fire_filler(ctx)
             filler_fired = True
 
