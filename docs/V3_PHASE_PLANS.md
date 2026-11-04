@@ -119,7 +119,7 @@ health snapshot + aging + whisper-load probes, and GPU load-time admission for t
 | 3.5 | Enable `state/incidents/capture_on_red` once the first manual bundle has been reviewed for redaction. | `state/incidents/` exists; one reviewed bundle | no |
 | 3.6 | GPU-hog drill (V3_PHASE3_4.md §3.1), with the mouth speaking. | mouth fluent; `admit` defers; VRAM recovered | **yes** — window |
 | 3.7 | CPU delegation: install `user@.service.d/iris-delegate.conf` (sudo) and apply it at the 3.3 reboot. Afterwards `cpu` appears in the user cgroup's `subtree_control`. | P2-R4b flips to PASS | **yes** (same reboot) |
-| 3.8 | GPU admission for the mouth and ears too (`gpu_admit.py` ExecStartPre, sized from measured peaks). These are core units, so on refusal they wait rather than fail. | units carry the gate; test that a refused admission logs and retries | restart of each unit |
+| 3.8 | GPU admission for the mouth and ears too (`gpu_admit.py` ExecStartPre, sized from measured peaks). These are core units, so on refusal they wait rather than fail. **Built 11-04 on branch `gpuadmit-1104`** (`--core` mode; mouth gate in `mouth_launch.sh`, ears in the unit's ExecStart; `install_gpu_admit.sh`); lands at Iris's planned restart. | units carry the gate; test that a refused admission logs and retries | restart of each unit |
 
 ### B. Dormant Ollama diagnostic helper (§8)
 

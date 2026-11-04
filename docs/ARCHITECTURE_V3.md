@@ -207,13 +207,17 @@ reserve, else it refuses. Decisions go to `state/health/gpu_admission.jsonl`. It
 `nvidia-smi` is missing.
 
 **Where it applies:**
-- **Today only the stream-ASR sidecar** has the gate (ExecStartPre, 3000 MiB, waits 120 s).
+- The stream-ASR sidecar (optional): ExecStartPre, 3000 MiB, waits 120 s, then refuses the start.
+- **The mouth and ears (core, V3 3.8, branch `gpuadmit-1104`)** use `--core`: the mouth's gate is in
+  `mouth_launch.sh` (engine-aware: Fish 9300 MiB, StyleTTS2 2048), the ears' unit runs
+  `gpu_admit.py 1100 --core --exec -- <daemon>`. Sizes come from measured steady VRAM (Fish 8968–9018 MiB,
+  ears 936 MiB, 10-30 + 11-04). A refusal logs who holds the GPU and retries (5 s doubling, cap 60 s); after
+  20 min the unit starts anyway, logged `forced`. Never refuses for good. Installed by `install_gpu_admit.sh`.
 - `worker.py --gpu-mib` has its own check, keeping a 6 GiB voice reserve.
-- The mouth and ears load without a gate.
 - Ollama runs with a limits drop-in (MAX_LOADED_MODELS=1, KEEP_ALIVE=5m).
 
-**Fails by:** the start is refused loudly (the unit retries); there is no enforcement after load
-(cgroups can't cap VRAM).
+**Fails by:** an optional unit's start is refused loudly (the unit retries); a core unit waits, then
+starts anyway. There is no enforcement after load (cgroups can't cap VRAM).
 
 **Checked by:**
 - `probe_gpu`: `warn` above 95 % (VRAM was 31.8/32.8 GB at the time of writing)
@@ -284,7 +288,7 @@ optional); orphaned past-deadline requests are expired by the host (328e779).
 | §5 | Reconcile external state after restart | **partial** | reply_ref replay (b034453); `external` tasks → needs_review; no real-reboot test |
 | §6 | Isolated workers + budgets | **built (CPU inert)** | cd6a059, 239bd70; P2-R4b |
 | §6 | Worker sandbox / no credentials | **built** | b0ba697, 0377171 |
-| §6 | GPU-aware scheduling | **partial** | `--gpu-mib` (cd6a059), `gpu_admit.py` for stream-ASR only (8ecdb41) |
+| §6 | GPU-aware scheduling | **partial** | `--gpu-mib` (cd6a059), `gpu_admit.py` for stream-ASR (8ecdb41) + mouth/ears `--core` (3.8, branch `gpuadmit-1104`) |
 | §6 | File ownership between workers | **partial** | leases log-only; hook doesn't see out-of-process helpers |
 | §7 | Health tools outside Claude | **built** | 1aec733, c62cb84, 44e612a |
 | §7 | Incident bundles | **built, not enabled** | 17f7484; `state/incidents/` absent |
