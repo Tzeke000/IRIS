@@ -3,7 +3,7 @@
 
 Every disposable job (render chunk, build, test run, indexing, model download) runs as its
 OWN transient systemd user unit inside iris-workers.slice (the shared cap: MemoryHigh 16G /
-MemoryMax 20G / swap 2G for ALL workers together). Per job: MemoryMax, RuntimeMaxSec,
+MemoryMax 35G (was 20G until 11-04) / swap 2G for ALL workers together). Per job: MemoryMax, RuntimeMaxSec,
 OOMScoreAdjust=500, KillMode=control-group (children die with it). The core services
 (host, runtime, mouth, ears) are never in that slice, so killing a worker group never
 touches me.
