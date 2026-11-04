@@ -4,6 +4,8 @@
   downloads    GitHub release asset download_count for every VRIris-Setup.exe (token ~/.config/iris/secrets/github_friends_token)
   whitelisted  invites on the temple (server.cfg [invites] names) + approved tunnel peers on wg-gate (wg show peers)
   online       players the temple welcomed and hasn't seen leave since its last start (journal '[net] welcome' / 'left')
+  perf         (11-04) pull the opt-in performance reports (perf_reports.jsonl [+ .1]) off the temple into
+               state/vr_temple/perf/ and print harness/tools/perf_table.py's "how it runs on what" table
 Read-only everywhere. Prints JSON (--json) or a short human summary. Never prints keys, IPs or invite codes.
 """
 from __future__ import annotations
@@ -82,8 +84,40 @@ def online(th: str) -> dict:
     return {"count": len(humans), "players": humans, "bots": sorted(n for n, k in here.items() if k == "bot")}
 
 
+TEMPLE_USERDATA = "/srv/vrtemple/home/.local/share/godot/app_userdata/VR Iris"
+PERF_TABLE = Path("/data/projects/vr_iris/harness/tools/perf_table.py")
+
+
+def perf(th: str, out_dir: Path | None = None) -> dict:
+    """Copy the temple's perf_reports*.jsonl here (read-only on the temple) and render the table."""
+    out_dir = out_dir or Path(__file__).resolve().parents[2] / "state" / "vr_temple" / "perf"
+    if not th:
+        return {"error": "no TEMPLE_HOST"}
+    out_dir.mkdir(parents=True, exist_ok=True)
+    got = []
+    for name in ("perf_reports.jsonl", "perf_reports.1.jsonl"):
+        body = _ssh(["-i", str(HOME / ".ssh/id_ed25519_temple"), f"root@{th}"],
+                    f'cat "{TEMPLE_USERDATA}/{name}" 2>/dev/null', timeout=30)
+        if body.strip():
+            (out_dir / name).write_text(body)
+            got.append(str(out_dir / name))
+    if not got:
+        return {"files": [], "reports": 0, "table": "(no reports on the temple yet — nobody opted in, or perf-1104 isn't deployed)"}
+    n = sum(1 for f in got for line in open(f) if line.strip())
+    table = ""
+    if PERF_TABLE.is_file():
+        r = subprocess.run([sys.executable, "-I", str(PERF_TABLE), *got], capture_output=True, text=True, timeout=60)
+        table = r.stdout.strip() or r.stderr.strip()[:300]
+    return {"files": got, "reports": n, "table": table}
+
+
 def main(argv: list[str]) -> int:
     th = temple_host()
+    if argv[:1] == ["perf"]:
+        d = perf(th)
+        print(json.dumps(d, indent=1) if "--json" in argv else
+              f"perf reports: {d.get('reports', '?')} ({', '.join(d.get('files', [])) or d.get('error', 'none')})\n{d.get('table', '')}")
+        return 0
     d = {"downloads": downloads(), "whitelisted": whitelisted(th), "online": online(th)}
     if "--json" in argv:
         print(json.dumps(d, indent=1))
