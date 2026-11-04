@@ -818,6 +818,8 @@ def watch(jid: int, unit: str, proc: subprocess.Popen, poll: float = 1.0, claim:
             _append_note(jid, f"task result REJECTED: fence {claim.fence} is stale (task now "
                               f"{cur.get('status')} fence {cur.get('fence')})")
     ledger_exit(act_id, outcome, code, f"job {jid}")   # noted only: the action stays open until verified
+    if outcome not in ("ok", "cancelled"):
+        _wake_on_bad_end(unit, outcome, code, peak)
     print(json.dumps({"job": jid, "unit": unit, "outcome": outcome, "exit_code": code,
                       "peak_mem": human(peak or None), "cpu_s": round((cpu or 0) / 1e6, 1),
                       "gpu_mib": gpu_peak, "task_id": claim.task_id if claim else None,
@@ -826,6 +828,28 @@ def watch(jid: int, unit: str, proc: subprocess.Popen, poll: float = 1.0, claim:
         return EX_REJECTED
     return 0 if outcome == "ok" else 1
 
+
+
+def _wake_on_bad_end(unit: str, outcome: str, code, peak) -> None:
+    """11-04: an OOM/timeout/killed helper used to end SILENTLY - its run.sh dies before submitting helper_done
+    (firemvp_1104 timeout, coop5_1104 OOM at 12 G: I only found out by polling). The worker survives its job, so
+    it tells me. Helpers only (unit iris-worker-helper-NAME-<ts>); never raises."""
+    try:
+        m = re.match(r"iris-worker-helper-(.+)-\d+(?:\.service)?$", unit or "")
+        if not m:
+            return
+        name = m.group(1)
+        root = Path(__file__).resolve().parents[2]
+        sys.path.insert(1, str(root))
+        from brain import iris_llm
+        iris_llm.submit(
+            f"[HELPER ENDED BADLY - automated, not Zeke] helper '{name}' ended with outcome={outcome} "
+            f"(exit {code}, peak mem {human(peak or None)}). Its report may be missing or partial: "
+            f"state/helpers/{name}.report.md / {name}.full.md / {name}.log. Check what it committed, decide "
+            "relaunch / finish myself / drop, close its ledger action, then reply here with one line via llm_reply.",
+            kind="helper_done", requester="worker:" + name, deadline_s=24 * 3600, priority=2)
+    except Exception as e:  # noqa: BLE001
+        print(f"[worker] wake-on-bad-end failed (non-fatal): {e!r}", file=sys.stderr)
 
 # ── sweep (P2-T4d) ─────────────────────────────────────────────────────────────
 def sweep() -> dict:
