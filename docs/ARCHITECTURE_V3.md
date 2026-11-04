@@ -294,7 +294,7 @@ optional); orphaned past-deadline requests are expired by the host (328e779).
 | §7 | Incident bundles | **built, not enabled** | 17f7484; `state/incidents/` absent |
 | §7 | Sandbox fault injection | **built** | 17f7484 |
 | §7 | Synthetic voice self-tests | **partial** | latency/live-words benches (8589551); no end-to-end synthetic voice test (unverified) |
-| §8 | Dormant Ollama diagnostic helper | **not built** | — |
+| §8 | Dormant Ollama diagnostic helper | **partial** | 4.1 `diag_corpus.py` (BM25 evidence index) + 4.2 `diag_helper.py wake` (gate) built 11-04; no model (4.3 is Zeke's) — V3_PHASE3_4.md §4 |
 | §9 | Backup/restore + checksum before storage change | **built** | backup script, 10-30 drill |
 | §9 | Task ledger separate from transcripts | **built** | `tasks.checkpoint_json`, `task_checkpoint` tool, act ledger (6490642) |
 | §10 | PersonaPlex sandbox measurement | **partial** | measured 10-30 (19.5 GB, 88 % frame duty); no A/B |

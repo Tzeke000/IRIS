@@ -101,3 +101,43 @@ Each scenario asserts three things: the system **degrades**, nothing **crashes**
 3. **Full ears daemon on a staging port** (`WREN_VOICE_DAEMON_PORT=18770`, `IRIS_EARS_ON_BOOT=0`). Not
    automated, because the daemon's status and live-words files are written relative to the repo, and from
    `~/IRIS` that's the live orb state. Do it on VM 104 or a scratch clone only.
+
+## 4. Diagnostic helper — evidence index + wake gate (Phase 4 §B, steps 4.1–4.2, 2026-11-04)
+
+No model is chosen or loaded yet (4.3 is Zeke's decision). What exists is the part that needs no LLM.
+
+**4.1 `scripts/server/diag_corpus.py`** — a CPU-only BM25 index (stdlib) at `state/diag/corpus.json`.
+- Sources, all read-only: incident bundles (`state/incidents/`, plus `--bundle-dir` / `--sandbox-glob` for
+  `fault_inject.py run all --keep` staging dirs), `docs/**/*.md` by heading section, `tests/test_*.py` (docstring,
+  test names, last results from `state/diag/last_junit.xml` / pytest `lastfailed` / the regress-gate baseline),
+  and selfcheck history (the self-cron spec's `##` sections in the memory folder + a probe summary of
+  `state/health/history.jsonl`).
+- A bundle is two chunks under one path: a short summary (reason, subsystem, `primary_failed`, health red/warn)
+  and the evidence (file tails; `procs.txt` / `git.txt` skipped). Without the split the reason line drowns in
+  the machine snapshot that every bundle shares.
+- Hits are collapsed to the best chunk per path, so a top-5 is five different things to read.
+- `--embed` (off by default) fuses in `nomic-embed-text` from the local Ollama by reciprocal-rank fusion,
+  only if that model is already pulled AND `gpu_admit` admits 700 MiB. It never pulls, refuses any other
+  model name, and asks Ollama to unload right away (`keep_alive 0`).
+- `diag_corpus.py query "..."`, `eval` (10 hand-written fault questions in
+  `scripts/server/diag_eval_questions.json`), `stats`, `build`.
+- Exit check, first run 11-04 (BM25 only): **hit@5 9/10, hit@1 5/10, MRR 0.65.** The miss is a vocabulary
+  gap ("transcription is dead" vs the bundle's "whisper load failed"). That's the case embeddings exist for,
+  and it hasn't been measured.
+
+**4.2 `scripts/server/diag_helper.py wake`** — loads nothing; answers `gpu` (exit 0) / `cpu_only` (3) /
+`defer` (4) and appends every decision to `state/health/diag_wake.jsonl`.
+
+| check | a "no" | source |
+|---|---|---|
+| park | cpu_only | `state/little_brain/pilot_deliberately_off.json` — parsed `off`; unreadable = parked |
+| quiet hours | defer 30 min | `state/voice_quiet_hours.json` window, or `state/voice_deliberately_off.json` with `off` ≠ false |
+| speaking | defer 30 s | `scratch/voice_status.json` `speaking` < 120 s old, or `scratch/voice_amplitude.json` amp > 0 < 3 s old |
+| RAM | defer 5 min | MemAvailable ≥ need + 4 GiB |
+| GPU | cpu_only | `gpu_admit.admit(model + KV)` — fail-CLOSED here (no nvidia-smi ⇒ cpu_only) |
+
+Every check runs each time; any defer beats cpu_only. The defaults are the plan's PROPOSED budget
+(4096 MiB model + 1024 MiB KV) until 4.3. `tests/test_diag_helper.py` has a test for each refusal reason.
+On 11-04 the live answer is `cpu_only`, **because the little brain is parked**. While that flag is on, the
+helper can never get the GPU; see the 4.3 questions.
+

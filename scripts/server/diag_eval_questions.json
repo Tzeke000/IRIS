@@ -1,0 +1,25 @@
+{
+ "about": "V3 4.1 exit check: 10 hand-written fault questions, phrased the way I'd ask them mid-incident (not copied from the docs). A question HITS when any of its `expect` substrings occurs in one of the top-5 hits' path, id or title (Q9 was tightened from any 'selfcheck:' hit to the baseline/run-note sections after the first run showed a re-mint addendum at #1). Written 2026-11-04 BEFORE the ranking was tuned. Q1-Q4 expect the fault_inject sandbox bundles (they only exist after `diag_corpus.py build --sandbox-glob ...` has seen a `fault_inject.py run all --keep`).",
+ "questions": [
+  {"q": "the ears came up but transcription is dead, whisper never warmed and smart-turn says degraded",
+   "expect": ["whisper-load-failed"]},
+  {"q": "a GPU job got deferred and the gpu probe is yellow, VRAM is almost full",
+   "expect": ["gpu-pressure"]},
+  {"q": "events stopped being recorded and writes under state fail with no space left on device",
+   "expect": ["storage-red"]},
+  {"q": "voice_listen returns ok false immediately, the network mic connection is refused",
+   "expect": ["ears-red-ping-failed"]},
+  {"q": "the server's disk died, how do I bring iris back from the tower backup",
+   "expect": ["docs/RESTORE_RUNBOOK.md"]},
+  {"q": "ears went red twice in ten minutes but only one incident bundle was written, why no second one",
+   "expect": ["docs/V3_PHASE3_4.md", "scripts/server/incident.py", "tests/test_v3_incidents.py"]},
+  {"q": "which test proves a model load is refused when free VRAM is under the need plus reserve",
+   "expect": ["tests/test_gpu_admit.py"]},
+  {"q": "a worker task ran even though the task it depends on had failed",
+   "expect": ["docs/V3_PHASE3_4.md", "tests/test_v3_task_deps.py", "tests/test_worker_v3_tasks.py"]},
+  {"q": "what were the runtime liveness numbers last self-check, is the process count normal",
+   "expect": ["Liveness baseline", "Run note"]},
+  {"q": "someone on a call is using a cloned copy of my voice, what's the defense",
+   "expect": ["docs/voice_impersonation_defense_design.md"]}
+ ]
+}
