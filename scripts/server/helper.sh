@@ -54,6 +54,9 @@ INNER="$OUT/$NAME.run.sh"
 cat > "$INNER" <<EOF
 #!/usr/bin/env bash
 cd "$CWD"
+# 11-04: a TIMED-OUT helper (RuntimeMaxSec -> SIGTERM to the cgroup) used to die here before the wake-me submit below,
+# so I never heard (firemvp_1104). With a TERM trap, bash waits for claude to exit (it gets TERM too), then continues.
+trap 'echo "[helper] SIGTERM (timeout/stop) - still sending helper_done" >&2' TERM
 t0=\$(date +%s)
 # ISOLATED: no hooks (the inbox-checkpoint hook would steal Zeke's messages into the helper), no MCP
 # (.mcp.json would spawn a SECOND iris runtime; plugins a second Discord bot), no user settings.
