@@ -135,8 +135,6 @@ Spine split weights, pole heuristic weights, step thresholds (0.18 × leg, 0.25�
 
 ## vrgame-audio-voice
 
-**[opinion]** practitioner or my own judgement · **[anecdote]** a single report · **[secondary]** a summary of a primary
-source I could not read directly.
 
 ### Godot
 - **[doc][default]** Godot class ref, AudioStreamPlayer3D: https://docs.godotengine.org/en/stable/classes/class_audiostreamplayer3d.html
