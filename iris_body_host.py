@@ -924,14 +924,27 @@ async def _lease_pre_tool_hook(input_data, tool_use_id, context):
 
 
 def _is_speak_tool(block):
-    """True if this tool-use is a deliberate voice_speak (direct or via iris_tool_call)."""
+    """True if this tool-use is a deliberate voice_speak (direct or via iris_tool_call) — or me speaking ALOUD in the VR
+    temple (vr_temple action=speak). (11-05, docket I5: a VR turn that spoke in the temple and used >= 4 tools still
+    "never spoke on purpose", so the heads-down cue played "Hey Zeke - I've finished…" in the ROOM after it — 28 of 28
+    room lines on 11-04 evening — and held the mouth's lock while my next VR line waited behind it: first words 3-7 s.)"""
     name = getattr(block, "name", "") or ""
     if name.endswith("voice_speak") or name.endswith("voice_speak_interruptible"):
         return True
     if name.endswith("iris_tool_call"):
         inp = getattr(block, "input", {}) or {}
-        return str(inp.get("name", "")).endswith("voice_speak")
+        if str(inp.get("name", "")).endswith("voice_speak"):
+            return True
+        prm = inp.get("params") if isinstance(inp.get("params"), dict) else {}
+        return str(inp.get("name", "")) == "vr_temple" and str(prm.get("action") or "").lower() == "speak"
     return False
+
+
+def _heads_down_cue_due(source, speak_out, spoke_on_purpose, tool_calls, voice_off) -> bool:
+    """The heads-down completion cue (a silent turn did real work and I never spoke): never on a VR turn — he's in the
+    headset, the room is empty, and the cue would hold the mouth my next temple line needs (11-05, docket I5)."""
+    return (not speak_out) and (not spoke_on_purpose) and tool_calls >= HEADS_DOWN_MIN_TOOLS \
+        and not voice_off and (source or "") != "vr"
 
 
 def _discord_reply_text(block):
@@ -3946,9 +3959,8 @@ async def stream_consumer(client, turn, boundary):
                 if turn.active:
                     # Heads-down completion cue: silent turn + real work + I never
                     # spoke on purpose => ping Zeke aloud so he knows I surfaced.
-                    if (not turn.speak_out) and (not spoke_on_purpose) \
-                            and tool_calls >= HEADS_DOWN_MIN_TOOLS \
-                            and not (turn.voice_flag is not None and turn.voice_flag.off()):
+                    if _heads_down_cue_due(turn.source, turn.speak_out, spoke_on_purpose, tool_calls,
+                                           turn.voice_flag is not None and turn.voice_flag.off()):
                         try:
                             await _speak(HEADS_DOWN_CUE)
                         except Exception as e:
