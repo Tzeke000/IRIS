@@ -1,5 +1,11 @@
 # Full-body physics avatar (BONELAB-style) for VR Iris / LUMEN — research + design (2026-11-04)
 
+## Zeke's decisions (2026-11-04 20:3x)
+- **The physics body is the ONLY way to play in VR** — not a comfort setting. (Desktop question still open.)
+- **Players can shove each other ANYWHERE**, not just in arenas.
+- Later, maybe: a mode where you can **pick another player up**.
+
+
 **Summary (5 lines)**
 1. BONELAB's body is three layers: tracked input → a "remap" solver → a **physics rig** of rigid bodies (pelvis, chest, head, arms, hands, a knee, and a **rolling ball as the feet**), with hands pulled toward the controllers by a **force-capped spring**. The reaction force goes back into the body, and that is why climbing and heavy objects feel real.
 2. **Nobody has published a finished open-source version of this for Godot 4.** The XR Tools team says they "haven't cracked" Boneworks. The best things to learn from are godot-xr-kit (MIT, Godot 4.2, physics hands + a physical body), BIMOS (MIT, Unity, Boneworks-inspired) and BONELAB Fusion's PD controller (MIT). HexaBody is paid and closed, so it's out.
