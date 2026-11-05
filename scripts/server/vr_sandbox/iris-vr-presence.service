@@ -27,6 +27,7 @@ Environment=HOME=/var/lib/irisvr
 Environment=IRIS_VR_HEAR_DIR=/data/irisvr/hear
 Environment=IRIS_HEARD_PATH=/data/irisvr/gestures/gestures.jsonl
 Environment=IRIS_MOOD_FILE=/data/irisvr/in/iris_mood.json
+Environment=IRIS_BOT_STRENGTH=iris
 LoadCredential=invite:/etc/irisvr/invite
 # ${TEMPLE_HOST} comes from the drop-in; ${CREDENTIALS_DIRECTORY} = this unit's credentials (systemd 249 has no %d)
 ExecStart=/data/projects/vr_iris/bot/VRIrisServer.x86_64 --headless -- --bot --join=${TEMPLE_HOST}:7777 --code-file=${CREDENTIALS_DIRECTORY}/invite
