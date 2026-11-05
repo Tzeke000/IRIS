@@ -416,6 +416,45 @@ def test_aging_probe_folds_into_health(tmp_path):
     r = h.probe_aging(ctx); assert r["status"] == "warn" and "runtime" in r["error"]
     f.write_text(json.dumps({"ts": now - 3 * 3600, "targets": {}}))
     assert h.probe_aging(ctx)["status"] == "warn"                        # stale timer
+    f.write_text(json.dumps({"ts": now - 1.5 * 3600, "targets": {}}))
+    r = h.probe_aging(ctx); assert r["status"] == "warn" and "STALE" in r["detail"]["line"]   # > 1 h
+
+
+def test_aging_line_flat_growing_gone_and_aging_is_the_only_warn(tmp_path):
+    import json, time
+    h = _load("health_snapshot_a2", "health_snapshot.py")
+    now = time.time()
+    ctx = {"root": tmp_path, "now": now}
+    (tmp_path / "state" / "health").mkdir(parents=True)
+    f = tmp_path / "state" / "health" / "aging.json"
+    grow = {"verdict": "watch", "span_h": 3.0, "last_ts": now,
+            "metrics": {"rss_kb": {"per_h": 2048.0, "pct_per_week": 40.0, "verdict": "watch"},
+                        "threads": {"per_h": 0.0, "pct_per_week": 0.0, "verdict": "ok"}}}
+    flat = {"verdict": "ok", "span_h": 30.0, "last_ts": now,
+            "metrics": {"rss_kb": {"per_h": -5.0, "pct_per_week": -0.1, "verdict": "ok"}}}
+    gone = dict(flat, last_ts=now - 5 * 3600)
+    f.write_text(json.dumps({"ts": now, "targets": {"runtime": grow, "mouth": flat, "old": gone}}))
+    r = h.probe_aging(ctx)
+    line = r["detail"]["line"]
+    assert r["status"] == "ok"                       # unconfirmed growth is shown, never a warn
+    assert "runtime=growing(rss +2MB/h +40.0%/wk; 3.0h unconfirmed)" in line
+    assert "mouth=flat" in line and "old=gone(5h)" in line and "thr" not in line
+    aging = dict(grow, verdict="aging", span_h=30.0,
+                 metrics={"fds": {"per_h": 1.5, "pct_per_week": 60.0, "verdict": "aging"}})
+    f.write_text(json.dumps({"ts": now, "targets": {"runtime": aging}}))
+    r = h.probe_aging(ctx)
+    assert r["status"] == "warn" and "runtime" in r["error"]
+    assert r["detail"]["line"] == "runtime=growing(fds +1.5/h +60.0%/wk; 30.0h AGING)"
+
+
+def test_aging_probe_analyse_reports_last_sample_ts(tmp_path):
+    ap = _load("aging_probe_t", "aging_probe.py")
+    t0 = 1_000_000.0
+    rows = [{"ts": t0 + i * 1800, "name": "runtime", "pid": 7, "start": t0 - 60,
+             "rss_kb": 1000 + 100 * i, "threads": 10, "fds": 5} for i in range(4)]
+    out = ap.analyse(rows, t0 + 4 * 1800)["runtime"]
+    assert out["last_ts"] == t0 + 3 * 1800
+    assert out["metrics"]["rss_kb"]["verdict"] == "watch" and out["metrics"]["threads"]["verdict"] == "ok"
 
 
 def test_llm_bridge_probe(tmp_path):

@@ -762,20 +762,50 @@ def parity_soak_update(path: Path, now: float, mismatched: set) -> dict:
         return {"error": repr(e)[:200]}
 
 
+AGING_STALE_S = 3600.0          # the timer fires every 30 min; > 1 h old = at least one run missed
+AGING_GONE_S = 3600.0           # a target whose last sample is this much older than the file = not running
+_AGING_UNIT = {"rss_kb": (1024.0, "MB/h", "rss"), "threads": (1.0, "/h", "thr"), "fds": (1.0, "/h", "fds")}
+
+
+def _aging_target(name: str, v: dict, file_ts: float) -> str:
+    """One target as a short phrase: 'flat', 'growing rss +1.2MB/h (+40%/wk, 3h, unconfirmed)', or 'gone'."""
+    last = v.get("last_ts")
+    if last is not None and file_ts - float(last) > AGING_GONE_S:
+        return f"{name}=gone({(file_ts - float(last)) / 3600:.0f}h)"
+    grow = []
+    for m, x in (v.get("metrics") or {}).items():
+        if (x or {}).get("verdict") in ("watch", "aging") and m in _AGING_UNIT:
+            div, unit, short = _AGING_UNIT[m]
+            grow.append(f"{short} +{float(x.get('per_h') or 0) / div:.3g}{unit} +{x.get('pct_per_week')}%/wk")
+    if not grow:
+        return f"{name}=flat"
+    tag = "AGING" if v.get("verdict") == "aging" else "unconfirmed"
+    return f"{name}=growing({', '.join(grow)}; {v.get('span_h')}h {tag})"
+
+
 def probe_aging(ctx: dict) -> dict:
     """11-03 (doc audit): fold the aging probe (scripts/server/aging_probe.py, 30-min timer) into health.
-    Planning info, never an outage: 'aging' (>= 20 %/week over >= 24 h of one lifetime) -> warn = plan a
-    quiet-hours restart under the pre-restart contract; a stale file -> warn (the timer stopped); else ok."""
+    Planning info, never an outage, never a restart: 'aging' (>= 20 %/week over >= 24 h of one lifetime)
+    -> warn = plan a quiet-hours restart under the pre-restart contract; a stale file -> warn (the timer
+    stopped). 'watch' (growing, but too short / too slow to call) stays ok and is only shown.
+    11-04: detail.line = one human line, per target flat / growing + rate (selfcheck.sh prints it)."""
     p = ctx["root"] / "state" / "health" / "aging.json"
-    probe = "state/health/aging.json (iris-aging-probe timer): any target 'aging' -> warn; file > 2 h old -> warn"
+    probe = ("state/health/aging.json (iris-aging-probe timer): any target 'aging' -> warn; "
+             f"file > {AGING_STALE_S / 3600:.0f} h old -> warn")
     d = _load(p, None)
     if not isinstance(d, dict):
-        return _r("warn", probe, "no aging.json (iris-aging-probe timer not running?)")
-    age = ctx["now"] - float(d.get("ts") or 0)
-    verdicts = {k: (v or {}).get("verdict") for k, v in (d.get("targets") or {}).items()}
+        return _r("warn", probe, "no aging.json (iris-aging-probe timer not running?)",
+                  line="no aging.json (iris-aging-probe timer not running?)")
+    file_ts = float(d.get("ts") or 0)
+    age = ctx["now"] - file_ts
+    targets = {k: (v or {}) for k, v in (d.get("targets") or {}).items()}
+    verdicts = {k: v.get("verdict") for k, v in targets.items()}
     aging = sorted(k for k, v in verdicts.items() if v == "aging")
-    det = {"verdicts": verdicts}
-    if age > 2 * 3600:
+    line = " ".join(_aging_target(k, v, file_ts) for k, v in targets.items()) or "no targets sampled"
+    if age > AGING_STALE_S:
+        line = f"STALE aging.json ({age / 3600:.1f} h old - timer stopped?) " + line
+    det = {"verdicts": verdicts, "line": line}
+    if age > AGING_STALE_S:
         return _r("warn", probe, f"aging.json is {age / 3600:.1f} h old", age=age, **det)
     if aging:
         return _r("warn", probe, "aging (plan a quiet-hours restart): " + ", ".join(aging), age=age, **det)

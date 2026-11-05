@@ -110,7 +110,7 @@ def analyse(rows: list[dict], now: float) -> dict:
         last = mine[-1]
         life = [r for r in mine if r["pid"] == last["pid"] and r["start"] == last["start"]]
         span_h = (life[-1]["ts"] - life[0]["ts"]) / 3600.0
-        res = {"pid": last["pid"], "uptime_h": round((now - last["start"]) / 3600.0, 1),
+        res = {"pid": last["pid"], "last_ts": last["ts"], "uptime_h": round((now - last["start"]) / 3600.0, 1),
                "samples": len(life), "span_h": round(span_h, 1), "now": {m: last.get(m) for m in METRICS},
                "metrics": {}, "verdict": "ok"}
         for m in METRICS:

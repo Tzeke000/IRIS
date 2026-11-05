@@ -69,6 +69,9 @@ for k, v in (d.get("subsystems") or {}).items():
         err = (why or "")[:110]
         lag = "-" if v.get("lag_s") is None else "%ss" % v.get("lag_s")
         print("   %-6s %-13s lag=%s %s" % (v.get("status"), k, lag, err))
+ag = (d.get("subsystems") or {}).get("aging") or {}
+if (ag.get("detail") or {}).get("line"):   # one line, ok or not: per process flat / growing + rate (never a restart)
+    print(("✓" if ag.get("status") == "ok" else "⚠"), "aging:", ag["detail"]["line"])
 EOF
 # INTEGRITY (Zeke 11-01): torn writes / NUL bytes / unparseable lines in memory + state (timer: boot+4 min, every restart+4 min, hourly)
 /home/iris/venvs/iris-v100/bin/python $R/scripts/server/state_integrity.py | head -6

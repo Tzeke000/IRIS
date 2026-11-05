@@ -1,0 +1,9 @@
+[Unit]
+Description=Iris aging probe - RSS/threads/fds trend of long-running processes (read-only)
+
+[Service]
+Type=oneshot
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=/home/iris/IRIS
+ExecStart=/home/iris/venvs/iris-v100/bin/python /home/iris/IRIS/scripts/server/aging_probe.py
+Nice=15
