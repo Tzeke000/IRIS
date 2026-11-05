@@ -11,13 +11,18 @@ Actions:
   events                         FEEL: touches on my eye / hands since the last call
   move  to=[x,y,z]               glide there (I float)
   follow name=<player> [dist=3] [height=0] [look=true]
-                                 FOLLOW MODE (Zeke 10-29): I keep `dist` m behind them ALONG their path, tracking them
-                                 from the network (out of my sight is fine), predicting from their velocity, flying my
-                                 thruster up to 24 m/s to keep up with web-swinging; I round corners the way they went
-                                 (never through a building) and never fly past them. follow on=false stops; follow (no
-                                 name) = status {mode direct|trail|hold|stuck|lost|gone, gap_m, his_speed_mps, ...}.
-                                 events: follow_lost / follow_found / follow_teleport. An explicit move ends it; an
-                                 explicit look takes my gaze back.
+                                 FOLLOW MODE (Zeke 10-29; reworked 11-05 to his 11-04 spec): I keep `dist` m from them,
+                                 tracking them from the network (out of my sight is fine), predicting from their
+                                 velocity, thruster up to 24 m/s. I go the SHORTEST way to where they are NOW (straight
+                                 if clear, else an A* path round or over what's between us — never their trail); I
+                                 look ahead my own stopping distance and steer before walls. Stuck (no progress, no path,
+                                 or inside a building) ⇒ up-and-over, then I teleport beside them; THEY teleport ⇒ I
+                                 teleport with them. follow on=false stops; follow (no name) = status {mode
+                                 direct|path|plan|over|teleport|hold|lost|gone, gap_m, inside, stats{teleports_with,
+                                 teleports_unstuck, plans, avoid_steers, blocked_ticks…}}. events: follow_lost /
+                                 follow_found / follow_his_teleport / follow_teleport{why with|stuck|far|inside…} /
+                                 follow_stuck / follow_no_path / follow_inside. An explicit move ends it; an explicit
+                                 look takes my gaze back.
   comm  to=[names] | "all" | "none"
                                  who hears me IN-EAR when they're out of earshot (quiet, non-spatial; near me it's my
                                  normal voice). Default all; each player can also turn it off / set its volume in
@@ -577,8 +582,8 @@ register_tool(
     "overheats on the 18th shot ⇒ locked 10 s venting; ≤2.5 shots/s never overheats; every reply carries heat{heat_pct, overheated, "
     "shots_before_overheat|vent_s_left, ready_in_s} — pace yourself; everyone sees the gauge + steam) | "
     "power [pick=web|''] (superpowers: mine + who has what) | "
-    "follow name=<player> [dist=3] (FOLLOW MODE: stay dist m behind them along their path, out of sight too, thruster ≤24 m/s; "
-    "on=false stops; no name = status) | comm to=[names]|all|none (who hears me in-ear when out of earshot; default all) | "
+    "follow name=<player> [dist=3] [height] [look] (FOLLOW MODE: shortest way to them, out of sight too, thruster ≤24 m/s, steers "
+    "round walls; stuck ⇒ teleports beside them; teleports WITH them; on=false stops; no name = status) | comm to=[names]|all|none (who hears me in-ear when out of earshot; default all) | "
     "carry allow=[names]|all|none (who may pick me up; default Zeke) | pat name=<person> (head pat) | move speed=N (thruster ≤9 m/s; any height) | "
     "chess op=board|move from=e2 to=e4 (I really pick the piece up; events chess_done/chess_failed) | "
     "rules → /data/projects/vr_iris/research/iris_body_physics_rules_2026-10-23.md | speak text [face=auto|name|none] (ALOUD, my voice, positional; I turn to who I answer first) | intercom to=[names]|all|none (whose voice reaches me out of earshot) | hush | say text (bubble only) | action name=stage_on|stage_off|drop_test|reset_cans|make_day|make_night | kick name | omniscient on=true|false (see everything vs field of view) | "
