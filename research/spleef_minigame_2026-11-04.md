@@ -1,5 +1,25 @@
 # SPLEEF minigame for VR Iris / LUMEN — research + design (2026-11-04)
 
+## ★ ZEKE'S DECISIONS (2026-11-04 21:2x, his doc "Iris and Lumen Design Decisions") — these OVERRIDE the recommendations below
+- **Q7 Tools and launch modes:**
+  Provide separate shovel and snowball modes. Shovel mode requires getting close enough to strike the intended tile. Snowball mode requires actually throwing and aiming snowballs at tiles. Hands, fire, and web variants were not decided in this answer.
+- **Q8 Hitting and knockback:**
+  Provide separate modes with hitting and knockback allowed and modes with no hitting. This is Zeke’s corrected answer, replacing his initial unrestricted yes.
+- **Q9 Floor material:**
+  Offer a choice of floor material per round.
+- **Q10 Arena location:**
+  Use a Lumen rooftop.
+- **Q11 Player count and arena size:**
+  Two to eight players per round. The arena should grow as more players join; the exact resizing schedule was not specified.
+- **Q12 Powers:**
+  Off by default, with special modes that enable a power.
+- **Q13 Iris role:**
+  Iris acts as referee or announcer rather than competing as a player.
+- **Q14 Scores:**
+  Keep persistent wins or a leaderboard. The exact scoring and leaderboard format was not specified.
+- **Q15 Fall experience:**
+  Use a real fall into a visible pit, rather than the proposed short drop and comfort fade.
+
 **Summary (5 lines)**
 1. Spleef, as in classic Minecraft: everyone stands on a breakable floor and breaks it out from under the others. Fall through and you're out; **last one standing wins**. Classic rules: no placing blocks, no hitting players (knockback is a variant).
 2. The floor should be a **grid of tiles whose state the server owns** (whole / cracked / gone). *How* a tile breaks is real physics: the impulse of a shovel strike, a hand slam, a thrown snowball, **fire melting ice** (built on `fire.gd`), or a **web yank**. The falling debris is real rigid fragments simulated on each client (`shards.gd` already does this).

@@ -1,5 +1,21 @@
 # Movement game (tag in an obstacle course) + physics gravity gun — research + design (2026-11-04)
 
+## ★ ZEKE'S DECISIONS (2026-11-04 21:2x, his doc "Iris and Lumen Design Decisions") — these OVERRIDE the recommendations below
+- **Q16 First tag mode:**
+  Start with infection.
+- **Q17 Obstacle course:**
+  Build a dedicated course together using the build tools.
+- **Q18 Tag powers:**
+  Webs and other powers belong in special modes.
+- **Q19 Tag locomotion:**
+  Use normal walking on legs and the normal movement system. Do not use Gorilla Tag style hand push locomotion for this tag mode.
+- **Q20 Gravity gun on players:**
+  Allowed. This answers the proposed capped player interaction option; it does not separately authorize holding players suspended in the gun.
+- **Q21 Gravity gun strength:**
+  Use a purely force capped model, with no arbitrary hard mass ceiling. Heavy objects respond according to the available force and their physical constraints.
+- **Q22 Gravity gun location:**
+  Make it a pickup at the shooting range, and potentially include it in one or two minigames.
+
 **Summary (5 lines)**
 1. **Tag:** the game already has most of what tag needs: real hand contact between players (remote hand bodies, touch grades), climbing + mantle, arm-swing running, webs, server-decided teleports, and a build system that saves. A tag round is a server-side "who is it" plus a tag check.
 2. **Course:** start with what exists (the City's Skyline ring course, or the temple), then a **course built with the build system** that friends can edit together. A Gorilla-Tag-style "push off with your hands" mode is possible (MIT Unity reference), but desktop players can't do it.

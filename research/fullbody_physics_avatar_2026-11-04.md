@@ -1,21 +1,19 @@
 # Full-body physics avatar (BONELAB-style) for VR Iris / LUMEN — research + design (2026-11-04)
 
-## Zeke's decisions (2026-11-04 20:3x)
-- **The physics body is the ONLY way to play in VR** — not a comfort setting. (Desktop question still open.)
-- **Players can shove each other ANYWHERE**, not just in arenas.
-- Later, maybe: a mode where you can **pick another player up**.
+## ★ ZEKE'S DECISIONS (2026-11-04 21:2x, his doc "Iris and Lumen Design Decisions") — these OVERRIDE the recommendations below
+- **Q1 Physics body availability:**
+  Use the physics body for everyone.
+- **Q2 Start with physics hands:**
+  Yes. Begin with stage 1 physics hands before changing locomotion.
+- **Q3 Player shoving:**
+  Players should be able to physically push each other everywhere, including outside minigames.
+- **Q4 Ragdoll and the view:**
+  Yes to ragdoll on big hits or falls. Yes to allowing the ragdoll to take control of the view. This explicitly changes the source plan’s recommendation to keep the view independent of ragdoll.
+- **Q5 Desktop physics body:**
+  Yes. Desktop players should use the same physics body.
+- **Q6 Iris body physics:**
+  Give Iris’s floating eye and cable arms the same physics treatment. This answer does not request a humanoid body or legs.
 
-
-**Summary (5 lines)**
-1. BONELAB's body is three layers: tracked input → a "remap" solver → a **physics rig** of rigid bodies (pelvis, chest, head, arms, hands, a knee, and a **rolling ball as the feet**), with hands pulled toward the controllers by a **force-capped spring**. The reaction force goes back into the body, and that is why climbing and heavy objects feel real.
-2. **Nobody has published a finished open-source version of this for Godot 4.** The XR Tools team says they "haven't cracked" Boneworks. The best things to learn from are godot-xr-kit (MIT, Godot 4.2, physics hands + a physical body), BIMOS (MIT, Unity, Boneworks-inspired) and BONELAB Fusion's PD controller (MIT). HexaBody is paid and closed, so it's out.
-3. Our game already has half the pieces: hands that are blocked by the world, a force-based hold, a "solid to yourself" body, climbing + mantle, webs, and a strength stat. The pieces that are not physical are the **locomotion body** (XR Tools' kinematic capsule) and the **hands** (kinematic `move_and_slide`).
-4. Multiplayer stays the way it is: **each player simulates their own body** (BONELAB Fusion works this way too). The server only sees and checks the poses, which grow from 3 transforms to about 10, roughly 6 KB/s per player. The real netcode cost is **player-vs-player shoving**, because two owners can't both simulate the same contact.
-5. Smallest first step: **dynamic physics hands behind a setting** (Stable-PD drive, strength cap, ghost hand), with everything else left alone. The full rolling-ball body is stage 3 and needs Zeke's decisions below first.
-
-Background already on disk (not repeated here): `research/bs_mods_rumble_bonelab_2026-10-26.md` §5 (rig layout, Fusion Stable-PD numbers, HurricaneVR, XR Tools collision hand), `research/bonelab_avatars_2026-10-22.md` §4 (Marrow SDK body measurements + mass/stats), `research/bonelab_bs_physics_review_2026-11-02.md` (items 4 and 9, hold-law risk H2). Those paths are in the game's research folder `/data/projects/vr_iris/research/`.
-
----
 
 ## 1. How BONELAB / Boneworks bodies work
 
