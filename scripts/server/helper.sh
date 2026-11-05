@@ -49,6 +49,10 @@ console windows flashing (hidden spawns only).
 YOUR REPORT (11-05: twice a late "nothing new" note REPLACED a helper's whole report): keep the FULL report in
 state/helpers/<your NAME>.full.md as you go, and make your FINAL message the COMPLETE report again — never a short
 follow-up note. If something finishes after your report, append it to the .full.md and repeat the full report.
+YOUR CLOCK (11-05: 4 of 6 helpers hit the hard timeout with their best work UNCOMMITTED): you are killed without
+warning at the --timeout (default 2 h). COMMIT every working step as soon as its test passes (small commits, never a
+pile of uncommitted edits), check the elapsed time (`date`) between steps, and STOP BUILDING at ~75 % of your time:
+spend the rest on the suites + the final report. An uncommitted fix is a lost fix.
 RULES
 CLAUDE="$(command -v claude || echo "$HOME/.local/bin/claude")"
 
