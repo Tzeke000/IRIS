@@ -699,12 +699,26 @@ async def _iris_lifespan(app):
 
     task = asyncio.get_running_loop().create_task(_beat(), name="loop-heartbeat")
     try:
+        from brain import mcp_call_ledger as _ledger
+        _ledger.note_loop(asyncio.get_running_loop())     # (11-05 I6) the slow-call dump probes this loop's lag
+    except Exception:
+        pass
+    try:
         yield {}
     finally:
         task.cancel()
 
 
 mcp = FastMCP("iris", lifespan=_iris_lifespan)
+
+# MCP CALL LEDGER (2026-11-05, docket I6: five 180 s hangs on 11-04, each followed by an instant call): one row per
+# tool call start/end in state/mcp_calls.jsonl + every thread's stack and the loop's lag in state/mcp_slow_calls.log
+# when a call passes 60 s — so the next hang says whether it never reached a handler, blocked in one, or blocked the loop.
+try:
+    from brain import mcp_call_ledger as _mcp_ledger
+    _mcp_ledger.install(mcp._tool_manager, ROOT / "state")
+except Exception as _e:  # noqa: BLE001
+    print(f"[iris_runtime] mcp call ledger not installed: {_e!r}", file=sys.stderr, flush=True)
 
 # Imported up here (not next to _record_session_safe) because several @mcp.tool
 # decorators below use `_IrisContext` in their type annotations, and FastMCP
@@ -2944,6 +2958,20 @@ def iris_tool_list(tier_max: int = 3) -> dict:
 # run inline it held the WHOLE runtime event loop, so later calls queued behind it and hit the 180 s MCP timeout
 # (7 "voice freezes" in one VR night while a direct /synth answered in 0.34 s)
 _THREADED_TOOL_PREFIXES = ("body_", "vector_", "vr_temple")
+# (2026-11-05, docket I6) a threaded handler gets a DEADLINE under the CLI's 180 s MCP timeout: past it the call returns
+# a clear error (the thread finishes on its own, abandoned) instead of a silent 180 s hang that also leaves me unsure
+# whether the action happened. Own limiter: a pile of stuck handlers can't take the default anyio thread pool, which
+# FastMCP's stdio reader/writer share (40 tokens) — a full pool would stall every request and response with them.
+_THREADED_DEADLINE_S = 150.0
+_TOOL_LIMITER = None
+
+
+def _tool_limiter():
+    global _TOOL_LIMITER
+    if _TOOL_LIMITER is None:
+        import anyio
+        _TOOL_LIMITER = anyio.CapacityLimiter(24)
+    return _TOOL_LIMITER
 
 
 @mcp.tool()
@@ -2972,9 +3000,20 @@ async def iris_tool_call(name: str, params: dict | None = None) -> dict:
             if str(name).startswith(_THREADED_TOOL_PREFIXES):
                 import functools
 
+                import anyio
                 import anyio.to_thread
-                result = await anyio.to_thread.run_sync(
-                    functools.partial(td.handler, dict(params or {}), _g))
+                t0 = time.time()
+                try:
+                    with anyio.fail_after(_THREADED_DEADLINE_S):
+                        result = await anyio.to_thread.run_sync(
+                            functools.partial(td.handler, dict(params or {}), _g),
+                            abandon_on_cancel=True, limiter=_tool_limiter())
+                except TimeoutError:
+                    act = (params or {}).get("action") if isinstance(params, dict) else None
+                    return {"ok": False, "tool": name, "timed_out": True,
+                            "error": f"{name}{'.' + str(act) if act else ''} did not finish in {_THREADED_DEADLINE_S:.0f} s "
+                                     f"(waited {time.time() - t0:.0f} s) — it may still complete in the background; "
+                                     f"check its state before retrying (state/mcp_slow_calls.log has its stack)"}
             else:
                 result = td.handler(dict(params or {}), _g)
             if isinstance(result, dict):

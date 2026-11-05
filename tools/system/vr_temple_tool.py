@@ -91,6 +91,43 @@ def _sentences(text: str) -> list[str]:
     return out or [text]
 
 
+# FIRST WORDS FAST (11-05, docket I5: first_word_s 0.45–6.74 s over 164 speaks on 11-04). The mouth's /synth renders a
+# piece whole (measured idle: ~0.13 s + 0.36 s per second of audio — 5 words 0.7 s, 15 words 1.5 s, 30 words 2.6 s, and
+# up to ~2× that while the V100 is busy), so time-to-first-word is the FIRST PIECE's length. _sentences folded a short
+# opener ("Okay!", "Yes.") INTO the next sentence and never split a long one, so a 22-word first sentence was 4 s.
+# Now the first piece is the opener alone, or the first clause of a long sentence (≤ FIRST_MAX_WORDS, cut at , ; : — or
+# before a joining word); the rest follow sentence by sentence, rendered while the first one plays.
+FIRST_MAX_WORDS = 8
+_JOINERS = {"and", "but", "so", "because", "which", "that", "when", "while", "where", "if", "then", "or", "though",
+            "although", "since", "until", "unless", "with", "to", "for"}
+
+
+def _pieces(text: str) -> list[str]:
+    import re
+    sents = [p.strip() for p in re.split(r"(?<=[.!?])\s+", text.strip()) if p.strip()]
+    if not sents:
+        return [text]
+    first, rest = sents[0], sents[1:]
+    words = first.split()
+    head = None
+    if len(words) > FIRST_MAX_WORDS:
+        for i in range(min(len(words), FIRST_MAX_WORDS + 2) - 1, 2, -1):     # a clause end after ≥ 3 words, latest first
+            if re.search(r"[,;:\u2014\u2013]$|\s-$", words[i - 1]) and i <= FIRST_MAX_WORDS + 2 and len(words) - i >= 3:
+                head = i
+                break
+        if head is None:
+            for i in range(FIRST_MAX_WORDS, 3, -1):                           # before a joining word
+                if words[i].lower().strip(",.") in _JOINERS and len(words) - i >= 3:
+                    head = i
+                    break
+        if head is None and len(words) - FIRST_MAX_WORDS >= 4:
+            head = FIRST_MAX_WORDS - 1
+    out = [" ".join(words[:head]), " ".join(words[head:])] if head else [first]
+    for sp in _sentences(" ".join(rest)) if rest else []:
+        out.append(sp)
+    return [x for x in out if x]
+
+
 def _mouth_ready() -> Any:
     """NEVER WAIT ON A COLD MOUTH (Zeke 10-29: "ignore the warm-up and keep working"). True when Fish answers
     /health=ok; otherwise a short reason string, returned in ~2 s instead of a 30 s synth timeout. If the mouth
@@ -177,8 +214,9 @@ def _speak(text: str, face: Any = "auto") -> dict[str, Any]:
     total = 0.0
     nbytes = 0
     play_end = t0
-    sents = _sentences(text)
+    sents = _pieces(text)
     out: dict[str, Any] = {"ok": False}
+    timing: list[dict[str, Any]] = []                    # (11-05 I5) where each piece's time went
     try:
         face_to = _face_target(face)
     except Exception:  # noqa: BLE001  turning is a nicety; never cost me the line
@@ -207,8 +245,10 @@ def _speak(text: str, face: Any = "auto") -> dict[str, Any]:
             return _stop(b, k)
         req = urllib.request.Request("http://localhost:8769/synth", data=json.dumps({"text": sent, "rate": 48000}).encode(),
                                      headers={"Content-Type": "application/json"})
+        ts0 = time.time()
         with urllib.request.urlopen(req, timeout=30) as r:
             wav = r.read()
+        ts1 = time.time()
         path = os.path.join(_VOICE_DIR, f"line_{int(time.time() * 1000)}_{k}.wav")
         with open(path, "wb") as f:
             f.write(wav)
@@ -216,6 +256,8 @@ def _speak(text: str, face: Any = "auto") -> dict[str, Any]:
         if k == 0 and face_to:
             cmd["face"] = face_to                         # an older bot ignores the key
         out = _send(cmd)
+        timing.append({"words": len(sent.split()), "synth_s": round(ts1 - ts0, 3), "send_s": round(time.time() - ts1, 3),
+                       "audio_s": round(max(0, len(wav) - 44) / 96000.0, 2), "at_s": round(ts0 - t0, 3)})
         if not out.get("ok"):
             return out
         if k == 0 and face_to:
@@ -226,6 +268,7 @@ def _speak(text: str, face: Any = "auto") -> dict[str, Any]:
         _start = max(play_end, time.time())
         play_end = _start + secs
         spans.append([round(_start, 3), round(play_end, 3)])
+        rec["timing"] = timing
         _speech_record(rec)
         total += secs
         nbytes += len(wav)
@@ -242,6 +285,7 @@ def _speak(text: str, face: Any = "auto") -> dict[str, Any]:
     out["wav_bytes"] = nbytes
     out["first_word_s"] = first_s
     out["sentences"] = len(sents)
+    out["timing"] = timing
     if face_to:
         out["faced"] = faced or ""
     return out
@@ -440,9 +484,59 @@ def _unit(cmd: str) -> str:
     return (r.stdout or r.stderr).strip()
 
 
+# EVERY ACTION'S PARAMS (11-05, docket I9): `look yaw=…` returned ok:true and did NOTHING (look takes at=[x,y,z]) — my
+# "360" was fake. A key an action doesn't read is now REFUSED with the accepted list, never silently dropped. The bot's
+# keys mirror rig_iris.gd _handle (tests/test_vr_temple_params_1105.py cross-checks this table against the game source).
+ACTION_PARAMS: dict[str, tuple[str, ...]] = {
+    "status": (), "join": (), "leave": (),
+    "speak": ("text", "face"), "heard": ("n", "since", "only_attending", "speaker"),
+    "state": (), "events": (), "hearing": (),
+    "move": ("to", "speed", "close", "push"),
+    "look": ("at",),
+    "hand": ("side", "to", "rest", "push"),
+    "grab": ("side", "prop", "ranged"), "release": ("side", "throw"),
+    "say": ("text",), "action": ("name",), "kick": ("name", "at", "prop", "j"),
+    "omniscient": ("on",), "hush": ("fade_ms",), "color": ("hex", "minutes"),
+    "build": ("op", "data"), "draw": ("points", "color", "width"), "chess": ("op", "from", "to"),
+    "laser": ("at",), "arrow": ("at", "speed"),
+    "gun": ("op", "target", "at", "compensate", "adjust"), "power": ("pick",),
+    "follow": ("name", "dist", "height", "look", "on"), "comm": ("to",), "intercom": ("to",),
+    "carry": ("allow",), "pat": ("name",),
+}
+# a wrong key that has an obvious right one
+_PARAM_HINTS = {("look", "yaw"): "look takes at=[x,y,z] (a point to look at), not an angle",
+                ("look", "pitch"): "look takes at=[x,y,z] (a point to look at), not an angle",
+                ("look", "dir"): "look takes at=[x,y,z] (a point to look at)",
+                ("move", "at"): "move takes to=[x,y,z]", ("hand", "at"): "hand takes to=[x,y,z]",
+                ("follow", "who"): "follow takes name=<player>", ("follow", "player"): "follow takes name=<player>",
+                ("speak", "say"): "speak takes text=\"…\"", ("color", "color"): "color takes hex=\"#rrggbb\""}
+
+
+def check_params(action: str, p: dict[str, Any]) -> "dict[str, Any] | None":
+    """None if every key in p is one this action reads, else the refusal (names the bad key(s) + the accepted ones)."""
+    if action not in ACTION_PARAMS:
+        return {"ok": False, "error": f"unknown action {action!r}", "actions": sorted(ACTION_PARAMS)}
+    ok = ACTION_PARAMS[action]
+    bad = sorted(k for k in p if k not in ok)
+    if not bad:
+        return None
+    out: dict[str, Any] = {"ok": False, "error": f"unknown param{'s' if len(bad) > 1 else ''} {', '.join(repr(k) for k in bad)} "
+                           f"for action {action!r} — accepted: {', '.join(ok) if ok else '(none)'}",
+                           "unknown_params": bad, "accepted": list(ok)}
+    hints = [_PARAM_HINTS[(action, k)] for k in bad if (action, k) in _PARAM_HINTS]
+    if hints:
+        out["hint"] = "; ".join(hints)
+    return out
+
+
 def _vr_temple(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     p = dict(params or {})
     action = str(p.pop("action", "status")).strip().lower()
+    bad = check_params(action, p)
+    if bad:
+        if bad["error"].startswith("unknown action"):
+            bad["help"] = __doc__
+        return bad
     try:
         if action in ("join", "leave"):
             _unit("start" if action == "join" else "stop")
@@ -462,8 +556,6 @@ def _vr_temple(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
             p["fade_ms"] = vr_cfg()["hush_fade_ms"]          # an old bot ignores the key (= the hard cut)
         if action == "heard":
             return _heard(p)
-        if action not in ("state", "events", "move", "look", "hand", "grab", "release", "say", "action", "kick", "omniscient", "hush", "color", "build", "draw", "chess", "laser", "arrow", "hearing", "gun", "power", "follow", "comm", "intercom"):
-            return {"ok": False, "error": f"unknown action {action!r}", "help": __doc__}
         req = {"cmd": action, **p}
         return _send(req)
     except OSError as e:
