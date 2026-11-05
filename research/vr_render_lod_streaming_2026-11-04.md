@@ -309,3 +309,9 @@ the same check in `city2_test`. My coverage check is an approximation (point-in-
 - Impostors: [wojtekpil/Godot-Octahedral-Impostors](https://github.com/wojtekpil/Godot-Octahedral-Impostors) (MIT, Godot 3) ·
   [Octahedral Impostor LOD (Godot 4, custom licence)](https://godotengine.org/asset-library/asset/edit/24616)
 - Our data: `research/cities4_1101/perf/cities4_vr.txt`, `research/lumen_1101/perf/ab_table.md`, `research/city2_report_2026-10-31.md`
+
+## ★ Zeke's design decision (2026-11-04, after reading the summary) — this OVERRIDES the plan above where they differ
+- The "circle" he saw in New York was NOT the comfort vignette: the periphery had no lights and simplified textures while the centre was normal ⇒ a rendering-quality falloff (foveation-like). His eyewitness outranks the code-reading guess.
+- **Inside the headset's REAL field of view: full quality at the player's own graphics settings — never turned down there.** Use each headset's actual per-eye FOV.
+- A margin **10–15 % wider than the FOV: lower quality**; a further **~5 %: lower still**; **outside that: placeholders**, switched **seamlessly** to full detail as they come into view; **behind the player: essentially nothing but a super-simple stand-in.**
+- **Multiplayer:** every client renders only what ITS player sees; the server keeps full detail/simulation only where players are (everyone in New York ⇒ the temple is placeholders; players split across the temple / New York / Dubai ⇒ each of those areas is live).
