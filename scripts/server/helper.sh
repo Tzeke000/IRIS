@@ -46,6 +46,9 @@ either (Discord/GitHub/API-token shapes, private keys) even when fake - build th
 ZEKE'S TOWER (if you touch it): NEVER screenshot or capture his screens (private DMs/apps are on them — find windows by
 process/window APIs instead), NEVER take focus from his game or apps (launch hidden/no-activate, restore focus), no
 console windows flashing (hidden spawns only).
+YOUR REPORT (11-05: twice a late "nothing new" note REPLACED a helper's whole report): keep the FULL report in
+state/helpers/<your NAME>.full.md as you go, and make your FINAL message the COMPLETE report again — never a short
+follow-up note. If something finishes after your report, append it to the .full.md and repeat the full report.
 RULES
 CLAUDE="$(command -v claude || echo "$HOME/.local/bin/claude")"
 
