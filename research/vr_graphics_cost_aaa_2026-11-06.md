@@ -332,6 +332,28 @@ frame setup. Draws = headset view colour + shadow. Tooling: harness `xr/tower/` 
 
 | vantage | foveation | build | still: GPU mean (5 headings) | worst heading: GPU mean / p95 · draws | shake: GPU mean / p95 / max | shake: CPU render p95 | shake: draws | frames over 13.9 ms | repeat spread |
 |---|---|---|---|---|---|---|---|---|---|
+| temple spawn | off | main | 5.77 | 6.20 / 6.88 · 864 | 5.80 / 6.60 / 7.2 | 2.69 | 635 | 0.0 % | 0.09 |
+| temple spawn | off | vrperf-1106 | 5.42 | 6.17 / 7.14 · 823 | 5.48 / 6.65 / 7.2 | 2.57 | 624 | 0.0 % | 0.08 |
+| temple spawn | medium | main | 1.90 | 2.06 / 2.60 · 759 | 1.91 / 2.62 / 3.5 | 2.63 | 634 | 0.0 % | 0.17 |
+| temple spawn | medium | vrperf-1106 | 1.81 | 1.98 / 2.50 · 823 | 1.83 / 2.37 / 3.3 | 2.57 | 623 | 0.0 % | 0.09 |
+| table | off | main | 5.80 | 5.93 / 6.76 · 801 | 5.87 / 6.64 / 7.9 | 2.58 | 645 | 0.0 % | 0.11 |
+| table | off | vrperf-1106 | 5.40 | 5.72 / 6.42 · 643 | 5.55 / 6.54 / 7.2 | 2.43 | 624 | 0.0 % | 0.12 |
+| table | medium | main | 1.91 | 1.99 / 2.49 · 730 | 1.93 / 2.47 / 3.5 | 2.54 | 644 | 0.0 % | 0.48 |
+| table | medium | vrperf-1106 | 1.84 | 1.89 / 2.36 · 568 | 1.84 / 2.27 / 3.0 | 2.43 | 623 | 0.0 % | 0.13 |
+
+
+**Vulkan, 90 Hz null headset, Quest 3 2016×2112 per eye** (GPU ms = Godot's measured stereo render time; median over 3 repeats; p95 = median of the repeats' p95)
+
+| vantage | foveation | build | still: GPU mean (5 headings) | worst heading: GPU mean / p95 · draws | shake: GPU mean / p95 / max | shake: CPU render p95 | shake: draws | frames over 11.1 ms | repeat spread |
+|---|---|---|---|---|---|---|---|---|---|
+| temple spawn | off | main | 6.71 | 7.29 / 7.69 · 864 | 6.73 / 7.51 / 7.7 | 2.57 | 637 | 0.0 % | 0.14 |
+| temple spawn | off | vrperf-1106 | 6.13 | 7.18 / 7.91 · 824 | 6.27 / 7.40 / 8.1 | 2.57 | 627 | 0.0 % | 0.32 |
+| temple spawn | medium | main | 2.05 | 2.54 / 3.55 · 864 | 1.96 / 3.09 / 7.4 | 2.66 | 637 | 0.0 % | 0.66 |
+| temple spawn | medium | vrperf-1106 | 2.18 | 2.37 / 3.21 · 824 | 1.94 / 3.20 / 6.3 | 2.59 | 626 | 0.0 % | 0.43 |
+| table | off | main | 6.79 | 6.93 / 7.62 · 800 | 6.83 / 7.55 / 7.8 | 2.60 | 648 | 0.0 % | 0.07 |
+| table | off | vrperf-1106 | 6.28 | 6.51 / 7.46 · 645 | 6.36 / 7.53 / 8.0 | 2.46 | 627 | 0.0 % | 0.09 |
+| table | medium | main | 2.20 | 2.55 / 3.76 · 730 | 2.09 / 3.46 / 7.7 | 2.48 | 648 | 0.0 % | 0.71 |
+| table | medium | vrperf-1106 | 2.23 | 2.39 / 3.41 · 568 | 1.95 / 3.05 / 6.2 | 2.38 | 626 | 0.0 % | 0.77 |
 
 
 **D3D12, 72 Hz null headset, Quest 3 2016×2112 per eye** (GPU ms = Godot's measured stereo render time; median over 3 repeats; p95 = median of the repeats' p95)
@@ -388,9 +410,12 @@ frame setup. Draws = headset view colour + shadow. Tooling: harness `xr/tower/` 
    - **But foveation does nothing on D3D12:** MEDIUM = off, ±0.1 ms. The game's VRS_XR path needs Vulkan's
      shading-rate attachment.
    - So Vulkan + foveation (~2 ms) beats D3D12 (~5.4 ms) by ~3.4 ms. Zeke's Vulkan choice is the right one.
-5. **Pipeline compiles during the measured shakes: 0** at the temple vantages. There were 9 at Lumen on its first
+5. **Resolution: Quest 2's 1832×1920 per eye (−17 % pixels) vs Quest 3's 2016×2112** saves only 0.4–0.9 ms with
+   foveation off (main spawn 6.59 → 5.77, table 6.66 → 5.80) and ~0 with MEDIUM (1.87 → 1.90 at spawn). Lowering
+   render scale is a much weaker lever than foveation.
+6. **Pipeline compiles during the measured shakes: 0** at the temple vantages. There were 9 at Lumen on its first
    shake, from the city loading in after the teleport.
-6. **A real hang found (not a perf issue):** a Godot 4.7.2 Forward Mobile **worker-pool deadlock** a few seconds after
+7. **A real hang found (not a perf issue):** a Godot 4.7.2 Forward Mobile **worker-pool deadlock** a few seconds after
    the loading cover lifts.
    - The main thread is in `render_camera`, waiting on a group task. One worker is doing a threaded resource load (mesh
      `_set_surfaces` → pipeline compile → waiting on a group task). All 7 other workers are blocked on the scene-shader
@@ -408,14 +433,31 @@ frame setup. Draws = headset view colour + shadow. Tooling: harness `xr/tower/` 
 | renderer | **Vulkan** (keep) | foveation only works there; with it, ~3.4 ms cheaper than D3D12 |
 | foveation | **MEDIUM by default** (LOW if the "circle" bothers him; LOW wasn't measured) | ~4.5 ms per frame, the biggest lever by far; his eyes judge the periphery |
 | render scale | **1.0** (don't lower it) | the game's render has ≥ 2× headroom at 72 Hz even at the GPU's idle clocks; lowering resolution saves little that foveation doesn't |
-| refresh | **72 Hz now**; 90 Hz is open (§8.2) | at 90 Hz (11.1 ms) main's worst p95 with foveation off (12.7 ms at idle clocks) is marginal; with foveation MEDIUM everything is < 4 ms |
-| merge vrperf-1106 | yes, after his look check (§6 list) and a hang check | −0.2…−1.7 ms on the temple, 0 at Lumen. It froze 2 of 3 launches here vs main 0 of 2. That is the engine deadlock (item 6), which main has had too (11-02); the counts are too few to say vrperf makes it likelier, but a 10-launch smoke on each should come first |
+| refresh | **72 Hz now; 90 Hz with foveation MEDIUM is fine on the GPU side** | 90 Hz costs the same per frame (spawn/table 6.7–6.8 ms vs 6.6–6.7 at 72); its 11.1 ms budget fits every spawn/table p95 (≤ 7.9). With foveation off, only main's temple-centre-S worst heading (p95 12.7 at idle clocks) is over it, and vrperf-1106 has it at 10.2. With MEDIUM everything is < 4 ms. The Quest streaming/compositor share (item 2) is unmeasured, so try 90 Hz on the headset and watch the frame timing |
+| merge vrperf-1106 | yes, after his look check (§6 list) and a hang check | −0.2…−1.7 ms on the temple, 0 at Lumen. It froze 2 of 3 launches here vs main 0 of 2. That is the engine deadlock (item 7), which main has had too (11-02); the counts are too few to say vrperf makes it likelier, but a 10-launch smoke on each should come first |
 
 **Tower restored:**
 - `steamvr.vrsettings` and the null driver's `default.vrsettings` were restored byte-identical after every job (SHA-256
   checked in the run log).
 - His game `settings.cfg` / `renderer_override.cfg` were never written (hash-checked).
 - No SteamVR or VRIris process is left, and the scheduled task was deleted (§8.5).
+
+### 8.5 Tower state after the run
+- **SteamVR files:** both were restored byte-identical after every one of the 6 jobs (SHA-256 checked in the run log),
+  and again at the end: `steamvr.vrsettings` 1E432EE2…, null `default.vrsettings` B1910818….
+- **Game files:** his game `settings.cfg` and `renderer_override.cfg` are unchanged from their pre-run copies. The game
+  ran with its own APPDATA under `D:\IrisDeliver\VR\perf_1106`.
+- **Nothing left running:** the scheduled task `IrisTowerPerf1106` is deleted. No SteamVR or VRIris process is left. The
+  server watcher and hang catcher have stopped.
+- **One thing found, not caused, by this run:** the 4 add-ons (VirtualDesktop, gamepad, SlimeVR, VMT) no longer carry
+  `blocked_by_safe_mode: true` in `steamvr.vrsettings`.
+  - The file was rewritten at 23:22:58. That's after vrperf_1105's last restore at 23:13 and before this run's first
+    snapshot at 23:23:54.
+  - SteamVR wasn't running then (no SteamVR log lines from 23:14 to 23:23:56), and this run hadn't written anything yet.
+  - It's left as found. The 21:06 copy, flags included, is in `D:\IrisDeliver\VR\perf_1106\bak_steamvr.vrsettings.34`
+    if they should go back.
+- **Left on D: (inert, ~1 GB, safe to delete):** `D:\IrisDeliver\VR\perf_1106`, holding the two builds, logs, probe
+  output and backups.
 
 ## Sources
 
