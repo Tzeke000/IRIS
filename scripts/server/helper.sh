@@ -12,6 +12,8 @@
 # it stays OPEN (pending verification) until I check the work and close it with evidence.
 #
 # usage: helper.sh NAME PROMPT_FILE [--mem 8G] [--timeout 7200] [--cwd DIR] [--model M]
+#        helper.sh tell NAME "message"   -> appends a timestamped line to state/helpers/NAME.inbox (11-06);
+#          every helper is told to `cat` its inbox between steps, act on new lines, and say what it did in its report
 #   LOCKED DOWN by default (11-02, V3 spec §6/§13): no sudo, no secrets, no ssh keys; --trusted-ssh keeps ~/.ssh only.
 #   report  -> state/helpers/NAME.report.md   (the helper's final answer)
 #   log     -> state/helpers/NAME.log         (stderr)
@@ -19,7 +21,20 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PY="${IRIS_PYTHON:-$HOME/venvs/iris-v100/bin/python}"
-[ $# -ge 2 ] || { sed -n 2,18p "$0"; exit 2; }
+[ $# -ge 2 ] || { sed -n 2,20p "$0"; exit 2; }
+# 11-06: Iris could not tell a RUNNING helper anything new (notes went into a tower log; one helper was restarted
+# just to add a correction). The inbox is a plain append-only file the helper reads between steps.
+if [ "$1" = tell ]; then
+  [ $# -ge 3 ] || { echo 'usage: helper.sh tell NAME "message"' >&2; exit 2; }
+  TN=$2; shift 2
+  [[ "$TN" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "bad NAME (letters, digits, _ . - only)" >&2; exit 2; }
+  mkdir -p "$ROOT/state/helpers"
+  [ -f "$ROOT/state/helpers/$TN.prompt.md" ] || echo "warning: no helper '$TN' has been launched (no $TN.prompt.md) - writing anyway" >&2
+  MSG="$*"; MSG="${MSG//$'\n'/ }"; MSG="${MSG//$'\r'/}"   # one message = one line
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$MSG" >> "$ROOT/state/helpers/$TN.inbox"
+  echo "told $TN: $(tail -n1 "$ROOT/state/helpers/$TN.inbox")"
+  exit 0
+fi
 NAME=$1; PROMPT_FILE=$2; shift 2
 MEM=8G; TIMEOUT=7200; CWD="$ROOT"; MODEL="${IRIS_HELPER_MODEL:-claude-opus-5-5}"; LOCK=helper; LEASES=""
 while [ $# -gt 0 ]; do
@@ -58,6 +73,14 @@ process you start - setsid, nohup, `vr.sh bg`, `--bg` - is in YOUR worker cgroup
 hand Iris a "still running, detached" job: either wait for it inside your time, or don't start it and give her the
 exact command to run from her own session.
 RULES
+# 11-06: the inbox rule needs NAME, so it is a separate UNquoted heredoc (the block above stays literal).
+: >> "$OUT/$NAME.inbox"   # exists from the start, so `cat` never errors; old lines from a previous run stay as history
+cat >> "$OUT/$NAME.prompt.md" <<INBOX
+YOUR INBOX (11-06: Iris could not reach a running helper): Iris may send you corrections/new info while you work, via
+\`helper.sh tell $NAME "..."\` -> appended to $OUT/$NAME.inbox (one timestamped line each). CHECK IT between steps
+(\`cat $OUT/$NAME.inbox\`; lines timestamped before your start ($(date '+%Y-%m-%d %H:%M:%S %Z')) are from an older run - ignore
+those), ACT on every new line (it outranks this prompt where they conflict), and say in your report what you did with each.
+INBOX
 CLAUDE="$(command -v claude || echo "$HOME/.local/bin/claude")"
 
 # the unit runs this inner script: claude, then the wake-me request (even on failure)
