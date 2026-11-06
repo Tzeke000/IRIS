@@ -96,3 +96,45 @@ Fixed on armik-1105 with VRChat-style auto-calibration plus a knee-lock zone (`a
 
 Standing-straight knee p90: 34–35° → 16°. The rest of a real head dip should go into the neck and spine first, which the
 crouch solver doesn't do yet. That's the next step.
+
+## 6. armik2-1106 follow-up (2026-11-06): bee_warrior, the wrist instrument, spine-first legs
+
+**bee_warrior.** Its rig rests in the *anatomical position* (arms down, palms FORWARD, a 31° carrying-angle flare at
+the elbow), every other rig in a palm-down T-pose. Three effects followed, two of them measurement:
+- The anatomical hinge (upper arm × forward) sits 24° off perpendicular to the Bee's bent rest forearm. Swing–twist about
+  the rest forearm then reads a pure hinge bend as roll: 2·atan(0.41·tan(θ/2)), i.e. 82° at 130° of flexion. That was the
+  "elbow-skin twist 96–117°". The roll is now measured against the virtually straightened rest forearm, the same
+  reference arm_ik bends from.
+- Fingerless hands assumed "palm = skeleton DOWN, fingers = the hand bone's +Y". All 11 fingered rigs follow the humanoid
+  hand convention (fingers ≈ +Y, palm normal = +Z, radial = ±X, within ~10°). On the Bee the old assumption was 90° off
+  about the fingers (flexion read as deviation) and 27° off along them.
+- The twist cost's anatomical range is centred on the T-pose's palm-down. The Bee's zero is 94° supinated, so its rest
+  rotation is now added to the cost.
+
+**The wrist instrument (all rigs).** Two corrections:
+- The palm frame must be orthonormal to the rest fingers. The old thumb axis (across the knuckles) leaned along them and
+  read ~6° too radial.
+- Flexion/deviation are read on the RADIUS. The wrist's axes ride on the radius, which carries all the pronation; the
+  forearm bone carries only FOREARM_SHARE of it. On the half-rolled bone a pronated hand's flexion still leaked into
+  deviation (the same mechanism armik-1105 fixed, at half strength).
+
+PALM_TILT was re-measured on the corrected reading: 24° (was 30°).
+
+**Legs: spine first.** A real body takes a small head drop in the neck and the trunk (flexion), and the knees only for
+a real crouch. Limits used:
+- **Cervical flexion 45°** (AAOS, *Joint Motion: Method of Measuring and Recording*, 1965). Youdas JW et al.,
+  "Normal range of motion of the cervical spine", *Phys Ther* 1992;72:770–780, measured 50–60° active flexion in
+  20–40-year-olds.
+- **Thoracolumbar flexion 80°** (AAOS).
+
+The posture lean (pivot = the Spine bone):
+- takes only the drop the neck's own pitch doesn't produce;
+- is capped at **35°**, under half the trunk's range;
+- reaches that cap once the head pitches 45° down (the neck's range): a level-head drop is a crouch, a looking-down drop
+  is posture.
+
+Two measured causes of bent "standing" knees were not posture at all:
+- Looking UP swings the avatar's eyes up about its low Neck pivot, and the eyes-on-headset pull dropped the hips.
+- The standing-height reference was pinned 7 cm high by a jump, which switched the stand fix off for the session.
+
+A hip 2 mm low is already ~15° of knee (two-bone geometry), which is why millimetres matter here.
