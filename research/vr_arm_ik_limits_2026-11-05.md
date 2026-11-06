@@ -81,3 +81,18 @@ the "rag being wrung" elbow that Zeke saw. The standard answer, below, is to spl
 - Final IK TwistRelaxer (stacking relaxers): https://discussions.unity.com/t/final-ik-full-body-ik-aim-look-at-fabrik-ccd-ik-1-0-released/525769?page=219
 - Earlier research that drove avatarfix-1104: research/vr_avatar_ik_2026-11-04.md (wrist ellipse from Physiotutors /
   PMC3016043). The *limits* in it were right; applying them as a hard clamp to an uncalibrated palm pose was the bug.
+
+## 5. Legs ("standing straight, my knees are bent; straight only on tiptoe")
+
+The geometry is brutal: a hip 2 cm under the leg's full length on a 0.9 m leg is already ~24° of knee bend. Two causes
+were measured on the take:
+- the typed height put the avatar's standing eye 2.4 cm above Zeke's real one;
+- every small head dip went 1:1 into the knees.
+
+Fixed on armik-1105 with VRChat-style auto-calibration plus a knee-lock zone (`avatar_body.stand_fix`):
+- The body tracks the player's observed standing eye (rises over ~2 s, settles over ~10 s, only near standing) and lifts
+  its head reference by the shortfall (≤ 8 cm).
+- The first 3 cm of head drop below standing is absorbed, blending back to 1:1 by 6 cm.
+
+Standing-straight knee p90: 34–35° → 16°. The rest of a real head dip should go into the neck and spine first, which the
+crouch solver doesn't do yet. That's the next step.
