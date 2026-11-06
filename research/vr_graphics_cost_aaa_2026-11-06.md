@@ -9,7 +9,7 @@ city HLOD, visibility-range fades, occlusion culling. Numbers in brackets like [
 
 ## 0. Most important findings
 
-> **Correction (vrperf-1106, read from the project + the tower's log):** on the tower this game runs Godot's **Mobile** renderer (on D3D12)
+> **Correction (vrperf-1106, read from the project + the tower's log):** on the tower this game runs Godot's **Mobile** renderer (on **Vulkan**; the D3D12 reading was a failed launch's fallback, see §8)
 > (`project.godot`: `renderer/rendering_method="mobile"`, MSAA 3D = 2×; Settings ▸ Renderer only picks the Windows driver,
 > Vulkan or D3D12). So finding 1 below is already done; TAA/FSR2/SSAO/SSR don't exist on it. The `features` tag in
 > project.godot still says "Forward Plus" (cosmetic). Also: `xr_render.gd` (xrfix-1104) reads the 4.7 source and finds
@@ -251,6 +251,8 @@ relics 37 + 19; the playground 0 + 44 (shadow only). At the table (+45°) the sa
 **4b. Renderer mismatch (found 11-06):** the server sim renders **Forward+ on Vulkan**, while Zeke's tower runs the
 **Mobile renderer on D3D12** (tower game log: `D3D12 12_0 - Forward Mobile - RTX 3060`; his renderer override picked D3D12).
 Only draws/prims carry over; a D3D12-vs-Vulkan A/B on the tower is an open, possibly large lever.
+**Corrected by §8 (11-06):** Zeke's own sessions run **Vulkan** (his renderer override + game logs). The D3D12 line was
+vrperf_1105's own launch falling back after SteamVR's OpenXR wasn't up. Measured D3D12 vs Vulkan: §8.3 item 4.
 
 **4. What this does NOT explain:** foveation MEDIUM cutting the shake 23 → 17 ms on the tower says those frames are also
 pixel-heavy there; the V100 can't show that. And whether 23–24 ms is GPU time or a frame-interval reading (§4.6) needs the
@@ -270,6 +272,150 @@ tower's SteamVR Advanced Frame Timing.
 | 8 | Bake the temple's static light (LightmapGI) and drop the sun's shadow to 1 split near the player | every frame | 1–2 ms | baked look must match day/night cycle — hard here (moving sun) | large | later |
 | 9 | Grass: shorter range / fewer far tufts | yard views | 0.3–0.5 ms | far grass thins | small | Zeke's eyes |
 | 10 | 90 Hz vs 72 Hz decision + Motion Smoothing policy | — | budget 13.9 → 11.1 ms | — | none | Zeke |
+
+## 8. Tower measurements (towerperf-1106, RTX 3060, SteamVR null headset, 2026-11-05/06 night)
+
+**Setup.** Zeke's tower, his RTX 3060, the exported release builds `main` (+ the probe only) and `vrperf-1106` running
+in VR on SteamVR 2.18.4's **null (simulated) headset**, Mobile renderer. The headset was held still or shaken by the
+probe (`xr_probe` `perf`), no human in it. The null headset window was 1280×720 so the run could be watched. Per cell: a
+warm shake at each vantage first (pipeline compiles, Lumen loading), then **3 repeats** × foveation off / MEDIUM ×
+(5 still headings −60…+60° in 30° steps, 120 frames each; RB6 head shake ±60° at 2.5 Hz, 450 frames). **GPU ms** = Godot's
+`viewport_get_measured_render_time_gpu` for the stereo (multiview) frame. **CPU** = the render thread's measured time +
+frame setup. Draws = headset view colour + shadow. Tooling: harness `xr/tower/` (vrperf-1106 branch).
+
+**Why vrperf_1105 got 0/36 measurements.**
+- SteamVR put the null headset into **standby** 5–10 s after the game connected (`vrserver.txt`: `0 - entering
+  standby`). The OpenXR session stayed SYNCHRONIZED, never visible, and the game's main loop blocked.
+- Its 41 commands were appended to a game that was already frozen.
+- Fix: for the run only, `power.turnOffScreensTimeout` = 86400 and `pauseCompositorOnStandby` = false, restored
+  byte-identical afterwards. Commands now go one at a time, after a `mark` echo proves the main loop runs.
+- Two more traps:
+  - `--rendering-driver` alone starts the game on **Forward+**. Pass `--rendering-method mobile` too.
+  - **Zeke's sessions run Vulkan, not D3D12.** His renderer override and all of his recent game logs say "Vulkan –
+    Forward Mobile" with the headset at **72 Hz**. The D3D12 line in §0/§6.4b came from a failed launch's fallback.
+
+**Read these numbers with three caveats.**
+1. The GPU stayed in a **low power state** for the whole run: P3/P5, 0.6–0.9 GHz of its 2.16 GHz max, 23–44 % busy
+   (`nvidia-smi`). The game's load is too light to make the driver boost, so these ms are an **upper bound** for the
+   3060 at full clocks. The clocks also wander, which shows as repeat spread.
+2. The null headset paces at **60 fps** whatever refresh it advertises (frame dt 16.7 ms; probably its desktop window's
+   vsync). So "frames over budget" uses GPU ms against the 72/90 Hz interval, not the pacing.
+3. This is the **game's render only**. The Quest streaming path (encode on the same GPU), SteamVR's compositor, other
+   players, the mirror and voice are not in it.
+
+### 8.1 The core matrix: Vulkan, 72 Hz, Quest 3 per-eye 2016×2112
+
+
+| vantage | foveation | build | still: GPU mean (5 headings) | worst heading: GPU mean / p95 · draws | shake: GPU mean / p95 / max | shake: CPU render p95 | shake: draws | frames over 13.9 ms | repeat spread |
+|---|---|---|---|---|---|---|---|---|---|
+| temple spawn | off | main | 6.59 | 7.10 / 7.70 · 848 | 6.62 / 7.47 / 8.2 | 2.56 | 634 | 0.0 % | 0.14 |
+| temple spawn | off | vrperf-1106 | 6.23 | 7.13 / 7.89 · 808 | 6.42 / 7.41 / 7.9 | 2.77 | 624 | 0.0 % | 0.17 |
+| temple spawn | medium | main | 1.87 | 2.42 / 3.55 · 842 | 2.18 / 3.06 / 5.3 | 2.56 | 635 | 0.0 % | 0.79 |
+| temple spawn | medium | vrperf-1106 | 2.02 | 2.48 / 3.42 · 802 | 2.20 / 3.16 / 5.4 | 2.58 | 624 | 0.0 % | 0.96 |
+| table | off | main | 6.66 | 6.76 / 7.49 · 802 | 6.75 / 7.59 / 8.8 | 2.47 | 644 | 0.0 % | 0.10 |
+| table | off | vrperf-1106 | 6.39 | 6.70 / 7.47 · 642 | 6.50 / 7.52 / 8.1 | 2.45 | 623 | 0.0 % | 0.20 |
+| table | medium | main | 2.26 | 2.43 / 3.26 · 718 | 2.11 / 2.96 / 6.1 | 2.43 | 641 | 0.0 % | 0.61 |
+| table | medium | vrperf-1106 | 2.19 | 2.43 / 3.61 · 696 | 2.04 / 3.32 / 6.3 | 2.47 | 620 | 0.0 % | 0.58 |
+| temple centre S | off | main | 7.57 | 8.18 / 12.70 · 297 | 7.41 / 11.27 / 12.9 | 2.21 | 529 | 0.0 % | 1.55 |
+| temple centre S | off | vrperf-1106 | 6.63 | 6.80 / 10.22 · 441 | 6.68 / 9.61 / 10.6 | 2.22 | 392 | 0.0 % | 0.33 |
+| temple centre S | medium | main | 1.91 | 2.28 / 3.37 · 534 | 2.23 / 3.24 / 3.9 | 2.25 | 527 | 0.0 % | 0.61 |
+| temple centre S | medium | vrperf-1106 | 2.10 | 2.23 / 3.31 · 438 | 2.06 / 3.19 / 5.8 | 2.26 | 390 | 0.0 % | 0.89 |
+| Lumen avenue | off | main | 3.38 | 3.60 / 4.00 · 236 | 3.36 / 3.97 / 5.0 | 1.91 | 194 | 0.0 % | 0.26 |
+| Lumen avenue | off | vrperf-1106 | 3.42 | 3.52 / 4.09 · 210 | 3.45 / 4.07 / 4.9 | 1.80 | 195 | 0.0 % | 0.11 |
+| Lumen avenue | medium | main | 1.39 | 1.49 / 2.36 · 233 | 1.48 / 2.29 / 5.2 | 1.87 | 189 | 0.0 % | 0.17 |
+| Lumen avenue | medium | vrperf-1106 | 1.42 | 1.46 / 2.29 · 210 | 1.41 / 2.29 / 4.8 | 1.91 | 191 | 0.0 % | 0.14 |
+
+
+### 8.2 Variants (temple spawn + table only, same 3 repeats)
+
+**Vulkan, 72 Hz null headset, Quest 2 1832×1920 per eye** (GPU ms = Godot's measured stereo render time; median over 3 repeats; p95 = median of the repeats' p95)
+
+| vantage | foveation | build | still: GPU mean (5 headings) | worst heading: GPU mean / p95 · draws | shake: GPU mean / p95 / max | shake: CPU render p95 | shake: draws | frames over 13.9 ms | repeat spread |
+|---|---|---|---|---|---|---|---|---|---|
+
+
+**D3D12, 72 Hz null headset, Quest 3 2016×2112 per eye** (GPU ms = Godot's measured stereo render time; median over 3 repeats; p95 = median of the repeats' p95)
+
+| vantage | foveation | build | still: GPU mean (5 headings) | worst heading: GPU mean / p95 · draws | shake: GPU mean / p95 / max | shake: CPU render p95 | shake: draws | frames over 13.9 ms | repeat spread |
+|---|---|---|---|---|---|---|---|---|---|
+| temple spawn | off | main | 5.91 | 6.68 / 7.09 · 864 | 6.08 / 6.98 / 7.6 | 2.65 | 635 | 0.0 % | 0.15 |
+| temple spawn | off | vrperf-1106 | 5.26 | 6.27 / 6.89 · 824 | 5.40 / 6.59 / 7.2 | 2.54 | 625 | 0.0 % | 0.26 |
+| temple spawn | medium | main | 6.05 | 6.72 / 7.10 · 864 | 6.13 / 7.02 / 7.8 | 2.64 | 634 | 0.0 % | 0.20 |
+| temple spawn | medium | vrperf-1106 | 5.33 | 6.26 / 7.02 · 824 | 5.43 / 6.64 / 7.7 | 2.57 | 624 | 0.0 % | 0.09 |
+| table | off | main | 6.11 | 6.43 / 7.23 · 732 | 6.20 / 6.99 / 7.9 | 2.48 | 645 | 0.0 % | 0.23 |
+| table | off | vrperf-1106 | 5.49 | 5.62 / 6.61 · 710 | 5.49 / 6.59 / 7.1 | 2.38 | 624 | 0.0 % | 0.09 |
+| table | medium | main | 6.18 | 6.46 / 7.22 · 730 | 6.23 / 7.05 / 7.7 | 2.48 | 644 | 0.0 % | 0.10 |
+| table | medium | vrperf-1106 | 5.52 | 5.65 / 6.66 · 708 | 5.51 / 6.57 / 7.0 | 2.47 | 623 | 0.0 % | 0.08 |
+
+### 8.3 What the numbers say
+
+1. **The game renders well inside the 72 Hz budget on the 3060.**
+   - Even at the GPU's low clocks, every vantage is ≤ 7.6 ms mean with foveation off.
+   - The worst p95 is temple centre S on main: 12.7 ms still (worst heading) and 11.3 ms shaking. vrperf-1106 brings
+     those to 10.2 and 9.6.
+   - **No frame of any shake went over 13.9 ms.**
+   - The head shake costs the same as holding still at the same headings (shake mean ≈ the still mean). §6's draw
+     swing is real, but on this GPU it moves the CPU render thread (r(cpu, draws) up to 0.86), not the GPU (r ≈ 0–0.5).
+   - **The GPU cost is pixels:**
+     - Foveation MEDIUM takes the stereo frame from ~6.6 to ~2.0 ms at every temple vantage (−65…−75 %).
+     - Lumen goes from 3.4 to 1.4 ms.
+     - The CPU render thread is ~2.5 ms p95 everywhere.
+2. **⇒ Zeke's ~12 ms still / 23 ms shake readings are not the game's own GPU render.** The candidates are what the null
+   headset doesn't have:
+   - the Quest streaming path: the encoder runs on the same 3060;
+   - SteamVR's compositor at his real resolution and his `supersampleScale` (0.7, from his steamvr.vrsettings);
+   - other players and the mirror;
+   - a frame-interval reading rather than GPU time (§4.6).
+
+   **Next step: SteamVR's Advanced Frame Timing during a real session** (GPU vs "Other" vs reprojection), plus the
+   game's own `[perf]`/probe GPU ms in that session for comparison. That's Zeke's headset, not something the null driver
+   can stand in for.
+3. **What vrperf-1106 actually saves on the 3060** (foveation off; repeat spread 0.1–0.3 ms, except main's centre S at 1.6):
+
+   | vantage | Vulkan main → vrperf | D3D12 main → vrperf |
+   |---|---|---|
+   | temple centre S | **−0.9 ms** still (7.57 → 6.63) and **−1.7 ms** shake p95 (11.27 → 9.61) | not measured |
+   | temple spawn | −0.2…−0.4 ms | **−0.6…−0.7 ms** (5.91 → 5.26) |
+   | table | −0.2…−0.4 ms | **−0.6…−0.7 ms** (6.11 → 5.49) |
+   | Lumen | ±0.05 (control, as expected) | not measured |
+
+   - With foveation MEDIUM on, the differences are inside the noise. The pixels that change are the ones VRS already
+     shades coarsely.
+   - The planar floors (pixel cost) are the likely source of the centre S gain. The draw cuts mainly lower the CPU,
+     which wasn't the bottleneck.
+4. **D3D12 vs Vulkan:**
+   - With foveation off, D3D12 is ~0.6–0.8 ms cheaper (main spawn 5.91 vs 6.59).
+   - **But foveation does nothing on D3D12:** MEDIUM = off, ±0.1 ms. The game's VRS_XR path needs Vulkan's
+     shading-rate attachment.
+   - So Vulkan + foveation (~2 ms) beats D3D12 (~5.4 ms) by ~3.4 ms. Zeke's Vulkan choice is the right one.
+5. **Pipeline compiles during the measured shakes: 0** at the temple vantages. There were 9 at Lumen on its first
+   shake, from the city loading in after the teleport.
+6. **A real hang found (not a perf issue):** a Godot 4.7.2 Forward Mobile **worker-pool deadlock** a few seconds after
+   the loading cover lifts.
+   - The main thread is in `render_camera`, waiting on a group task. One worker is doing a threaded resource load (mesh
+     `_set_surfaces` → pipeline compile → waiting on a group task). All 7 other workers are blocked on the scene-shader
+     lock (`get_shader_variant` / `_create_pipeline`).
+   - It froze 2 of 3 vrperf-1106 Vulkan launches and 0 of 2 main ones tonight.
+   - It's the 11-02 deadlock (`research/client_hang_1102.md`). The pool-8 fix only lowered the odds.
+   - Suspects for the post-cover threaded load: `city_skylanes.gd` starts `load_threaded_request` only once
+     `LoadGate.open()` (the flycars), plus `city_cars.gd` and `tree_kit.gd`. Not proven which one.
+   - The harness now detects a frozen client (no `mark` echo), dumps its stacks (`vr.sh clienthang`) and retries.
+
+### 8.4 Recommended defaults (for Zeke to approve)
+
+| setting | recommend | why (measured above) |
+|---|---|---|
+| renderer | **Vulkan** (keep) | foveation only works there; with it, ~3.4 ms cheaper than D3D12 |
+| foveation | **MEDIUM by default** (LOW if the "circle" bothers him; LOW wasn't measured) | ~4.5 ms per frame, the biggest lever by far; his eyes judge the periphery |
+| render scale | **1.0** (don't lower it) | the game's render has ≥ 2× headroom at 72 Hz even at the GPU's idle clocks; lowering resolution saves little that foveation doesn't |
+| refresh | **72 Hz now**; 90 Hz is open (§8.2) | at 90 Hz (11.1 ms) main's worst p95 with foveation off (12.7 ms at idle clocks) is marginal; with foveation MEDIUM everything is < 4 ms |
+| merge vrperf-1106 | yes, after his look check (§6 list) and a hang check | −0.2…−1.7 ms on the temple, 0 at Lumen. It froze 2 of 3 launches here vs main 0 of 2. That is the engine deadlock (item 6), which main has had too (11-02); the counts are too few to say vrperf makes it likelier, but a 10-launch smoke on each should come first |
+
+**Tower restored:**
+- `steamvr.vrsettings` and the null driver's `default.vrsettings` were restored byte-identical after every job (SHA-256
+  checked in the run log).
+- His game `settings.cfg` / `renderer_override.cfg` were never written (hash-checked).
+- No SteamVR or VRIris process is left, and the scheduled task was deleted (§8.5).
 
 ## Sources
 
