@@ -53,6 +53,10 @@ YOUR CLOCK (11-05: 4 of 6 helpers hit the hard timeout with their best work UNCO
 warning at the --timeout (default 2 h). COMMIT every working step as soon as its test passes (small commits, never a
 pile of uncommitted edits), check the elapsed time (`date`) between steps, and STOP BUILDING at ~75 % of your time:
 spend the rest on the suites + the final report. An uncommitted fix is a lost fix.
+NOTHING OUTLIVES YOU (11-06: a helper's "detached" 3 h full regress died at 75/177 when the helper exited): every
+process you start - setsid, nohup, `vr.sh bg`, `--bg` - is in YOUR worker cgroup and is killed when you finish. Never
+hand Iris a "still running, detached" job: either wait for it inside your time, or don't start it and give her the
+exact command to run from her own session.
 RULES
 CLAUDE="$(command -v claude || echo "$HOME/.local/bin/claude")"
 
