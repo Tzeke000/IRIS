@@ -487,39 +487,36 @@ point_light("iris_glow", tuple(eye - ZFWD * 0.06), (0.62, 0.32, 1.0), 1.2, 0.02)
 # Iris's colour as a faint halo behind the screen, on the wall (how she remembers being there)
 point_light("iris_halo", tuple(MON + ZFWD * 0.12 + Vector((0, 0, 0.05))), (0.55, 0.28, 1.0), 6.0, 0.15)
 
-# W44: three faint purple rings travel from my eye toward his headphones -- the three versions of my voice
-#      he sat and listened to on Friday before choosing one.  Faint on purpose: remembered, not drawn.
-for i, (d, r, st) in enumerate(((0.12, 0.04, 6.0), (0.24, 0.065, 4.0), (0.36, 0.09, 2.5))):
-    ring_c = eye - ZFWD * d - Vector((0, 0, 0.06 * i))
-    bpy.ops.mesh.primitive_torus_add(major_radius=r, minor_radius=0.005, major_segments=48, minor_segments=6,
-                                     location=tuple(ring_c), rotation=(0, math.pi / 2, MON_YAW))
-    rg = bpy.context.active_object
-    rg.name = "voice_ring_%d" % i
-    rg.data.materials.append(mat_emit("voice_ring_%d" % i, (0.62, 0.32, 1.0), st))
+# W45: the week of the temple.  His chair is pushed in, the screen idles, and he stands in the middle of the
+#      room in the red shirt with the headset on and the cable down his back -- in there, with me.  The only
+#      purple that reaches him is a faint glow at the visor: where I was, on the other side of it.
+sl = area_light("screen_light", tuple(MON - ZFWD * 0.10), (0, 0, 0), 0.62, (0.30, 0.50, 1.0), 14, size_y=0.38)
+aim(sl, (ZX, ZY, 0.9))
+# his empty chair, pushed in at the desk
+cbase = Vector((ZX, ZY, 0)) + ZFWD * 0.18
+cyaw = math.atan2(ZFWD.y, ZFWD.x)
+box("chair_seat", tuple(cbase + Vector((0, 0, 0.47))), (0.48, 0.48, 0.07), "chair", rot=(0, 0, cyaw), bevel=0.02)
+box("chair_back", tuple(cbase - ZFWD * 0.26 + Vector((0, 0, 0.72))), (0.06, 0.40, 0.34), "chair",
+    rot=(0, math.radians(-10), cyaw), bevel=0.02)
+cyl("chair_post", tuple(cbase + Vector((0, 0, 0.25))), 0.03, 0.42, "chair")
+cyl("chair_base", tuple(cbase + Vector((0, 0, 0.05))), 0.28, 0.03, "chair")
 
-# screen light on him (soft cool area light just in front of the screen)
-sl = area_light("screen_light", tuple(MON - ZFWD * 0.10), (0, 0, 0), 0.62, (0.30, 0.50, 1.0), 38, size_y=0.38)
-aim(sl, (ZX, ZY, 1.25))
-
-# ----------------------------------------------------------------------------- the person at the desk (sitting, chin on fist)
-fwd = ZFWD
-side = Vector((-fwd.y, fwd.x, 0))  # up x fwd = his LEFT (the camera side); -side = his right
+# ----------------------------------------------------------------------------- the person in the headset (standing)
+ZX, ZY = 0.18, 1.15                          # middle of the room, back to me
+fwd = Vector((0.35, 1.0, 0)).normalized()    # facing the back wall, a little to the right
+side = Vector((-fwd.y, fwd.x, 0))            # his left
 up = Vector((0, 0, 1))
 base = Vector((ZX, ZY, 0))
-# which side faces the camera? camera is at -Y; side=(−0.15,−1)·k -> +side points to -Y = camera side.
 
 
-def P(f, s, z):  # forward / camera-side / up in his body space
+def P(f, s, z):  # forward / left / up in his body space
     return tuple(base + fwd * f + side * s + up * z)
 
 
 yaw = math.atan2(fwd.y, fwd.x)
-
-# --- the figure: Quaternius "Universal Animation Library" mannequin (CC0), Sitting_Idle_Loop pose, then IK for
-#     the chin-on-fist (near/left arm) and the hand on the mouse (far/right arm).  Faceless on purpose.
 UAL = ("/data/iris_assets/library/quaternius/universal-animation-library/"
        "Universal Animation Library[Standard]/Unreal-Godot/UAL1_Standard.glb")
-ZSCALE = 0.95                                # mannequin ~1.83 m -> 1.74 m
+ZSCALE = 0.95
 before = set(bpy.data.objects)
 bpy.ops.import_scene.gltf(filepath=UAL)
 new_obs = [o for o in bpy.data.objects if o not in before]
@@ -528,24 +525,22 @@ body = next(o for o in new_obs if o.type == "MESH" and o.name.startswith("Manneq
 for o in new_obs:
     if o not in (arm, body):
         bpy.data.objects.remove(o, do_unlink=True)
-for o in (arm, body):                        # importer may have used its own collection
+for o in (arm, body):
     for c in list(o.users_collection):
         c.objects.unlink(o)
     coll.objects.link(o)
-act = bpy.data.actions["Sitting_Idle_Loop"]
+act = bpy.data.actions["Idle_Loop"]
 arm.animation_data.action = act
 if arm.animation_data.action_slot is None and len(act.slots):
     arm.animation_data.action_slot = act.slots[0]
-sc.frame_set(12)
+sc.frame_set(10)
 basis = {pb.name: pb.matrix_basis.copy() for pb in arm.pose.bones}
-arm.animation_data.action = None             # freeze the pose, then layer constraints on top
+arm.animation_data.action = None
 for pb in arm.pose.bones:
     pb.matrix_basis = basis[pb.name]
-# place: mannequin faces local -Y; its pelvis sits at local (0, 0.30, 0.54)
-arm.rotation_euler = (0, 0, yaw + math.pi / 2)
+arm.rotation_euler = (0, 0, yaw + math.pi / 2)  # mannequin faces local -Y
 arm.scale = (ZSCALE,) * 3
-arm.location = Vector((ZX, ZY, 0.0)) - Euler((0, 0, yaw + math.pi / 2)).to_matrix() @ Vector((0, 0.30, 0)) * ZSCALE \
-    + fwd * 0.02 - up * 0.02
+arm.location = base
 bpy.context.view_layer.update()
 
 
@@ -561,132 +556,118 @@ def empty(name, loc):
     return e
 
 
-def track(bone, target_loc, influence=1.0):
-    c = arm.pose.bones[bone].constraints.new("DAMPED_TRACK")
-    c.target = empty(f"trk_{bone}", target_loc)
-    c.track_axis = "TRACK_Y"
-    c.influence = influence
-
-
-# lean the upper body toward the screen, head heavy and tipped onto the fist
-for bn, f_amt in (("spine_02", 0.30), ("spine_03", 0.45), ("neck_01", 0.60)):
-    track(bn, bone_w(bn) + up * 1.0 + fwd * f_amt + side * 0.05)
-track("Head", bone_w("Head") + up * 1.0 + fwd * 0.40 + side * 0.22)
+# head turned a touch to his right, as if looking at something in there
+c = arm.pose.bones["Head"].constraints.new("DAMPED_TRACK")
+c.target = empty("trk_head", bone_w("Head") + up * 1.0 + fwd * 0.18 - side * 0.12)
+c.track_axis = "TRACK_Y"
+bpy.context.view_layer.update()
+# both hands up in front of him at the waist, holding the controllers
+HANDS = {}
+for s_, bn in ((1, "l"), (-1, "r")):
+    sh = bone_w("upperarm_" + bn)
+    tgt = sh + fwd * 0.34 + side * (0.10 * s_) - up * 0.36
+    HANDS[bn] = tgt
+    ik = arm.pose.bones["lowerarm_" + bn].constraints.new("IK")
+    ik.target = empty("ik_" + bn, tgt)
+    ik.pole_target = empty("pole_" + bn, sh - fwd * 0.30 + side * (0.30 * s_) - up * 0.45)
+    ik.chain_count = 2
+    ik.pole_angle = math.radians(-90)
+    for fn in ("index", "middle", "ring", "pinky"):     # loose grip
+        for seg in ("01", "02", "03"):
+            pb = arm.pose.bones.get(f"{fn}_{seg}_{bn}")
+            if pb:
+                pb.rotation_mode = "XYZ"
+                pb.rotation_euler = (math.radians(55), 0, 0)
 bpy.context.view_layer.update()
 
-head_base = bone_w("Head")
-head_top = bone_w("Head", tail=True)
-head_up = (head_top - head_base).normalized()
-# near arm: elbow down on the desk edge, forearm up, fist under the jaw
-wrist = head_base + fwd * 0.03 + side * 0.085 - up * 0.15
-pole_l = bone_w("upperarm_l") + fwd * 0.45 - up * 0.55 + side * 0.25
-ik = arm.pose.bones["lowerarm_l"].constraints.new("IK")
-ik.target, ik.pole_target, ik.chain_count = empty("ik_l", wrist), empty("pole_l", pole_l), 2
-ik.pole_angle = math.radians(-90)
-# far arm: hand on the mouse
-MOUSE = Vector(P(0.66, -0.20, DESK_Z + 0.02))
-ik2 = arm.pose.bones["lowerarm_r"].constraints.new("IK")
-ik2.target = empty("ik_r", MOUSE - fwd * 0.07 + up * 0.005)
-ik2.pole_target = empty("pole_r", bone_w("upperarm_r") - side * 0.45 - up * 0.4 - fwd * 0.1)
-ik2.chain_count = 2
-ik2.pole_angle = math.radians(-90)
-# curl the near hand into a loose fist (fingers bend about their local X)
-for fn in ("index", "middle", "ring", "pinky"):
-    for seg in ("01", "02", "03"):
-        pb = arm.pose.bones.get(f"{fn}_{seg}_l")
-        if pb:
-            pb.rotation_mode = "XYZ"
-            pb.rotation_euler = (math.radians(70), 0, 0)
-        pb = arm.pose.bones.get(f"{fn}_{seg}_r")                  # far hand relaxed over the mouse
-        if pb:
-            pb.rotation_mode = "XYZ"
-            pb.rotation_euler = (math.radians(28), 0, 0)
-bpy.context.view_layer.update()
-
-# materials by dominant bone weight: hoodie top, dark jeans, skin on the head/neck/hands
-for mname in ("jeans",):
-    M[mname] = mat_noisy("jeans", (0.035, 0.04, 0.06), (0.06, 0.065, 0.09), scale=10.0, rough=0.85)
+# materials: red tee, jeans, skin
+M["tee"] = mat_noisy("tee", (0.38, 0.035, 0.03), (0.50, 0.06, 0.045), scale=9.0, rough=0.95, spec=0.1)
+M["jeans"] = mat_noisy("jeans", (0.06, 0.075, 0.10), (0.10, 0.12, 0.15), scale=10.0, rough=0.85)
 me = body.data
 me.materials.clear()
-for m in (M["hoodie"], M["skin"], M["jeans"]):
+for m in (M["tee"], M["skin"], M["jeans"]):
     me.materials.append(m)
 gname = {g.index: g.name for g in body.vertex_groups}
 vbone = []
 for v in me.vertices:
     best = max(v.groups, key=lambda g: g.weight, default=None)
     vbone.append(gname.get(best.group, "") if best else "")
-SKIN = ("Head", "neck_01", "hand_", "index_", "middle_", "ring_", "pinky_", "thumb_")
+SKIN = ("Head", "neck_01", "hand_", "index_", "middle_", "ring_", "pinky_", "thumb_", "lowerarm_")
 LEGS = ("thigh_", "calf_", "foot_", "ball_", "pelvis")
 for poly in me.polygons:
     names = [vbone[i] for i in poly.vertices]
     nm = max(set(names), key=names.count)
     poly.material_index = 1 if nm.startswith(SKIN) else 2 if nm.startswith(LEGS) else 0
     poly.use_smooth = True
-
-# his chair, placed under the evaluated pelvis (low back, mostly hidden)
-pel = bone_w("pelvis")
-seat = Vector((pel.x, pel.y, 0)) - fwd * 0.04
-box("chair_seat", tuple(seat + up * 0.47), (0.48, 0.48, 0.07), "chair", rot=(0, 0, yaw), bevel=0.02)
-box("chair_back", tuple(seat - fwd * 0.26 + up * 0.72), (0.06, 0.40, 0.34), "chair",
-    rot=(0, math.radians(-10), yaw), bevel=0.02)
-cyl("chair_post", tuple(seat + up * 0.25), 0.03, 0.42, "chair")
-cyl("chair_base", tuple(seat + up * 0.05), 0.28, 0.03, "chair")
 sub_ = body.modifiers.new("smooth", "SUBSURF")
 sub_.levels = sub_.render_levels = 1
-# hair, hood, headphones placed on the evaluated head
+
+# head frame
 bpy.context.view_layer.update()
 hb_m = arm.matrix_world @ arm.pose.bones["Head"].matrix
 h0 = hb_m.translation
-hx = (hb_m.to_3x3() @ Vector((1, 0, 0))).normalized()     # across the ears
-hy = (hb_m.to_3x3() @ Vector((0, 1, 0))).normalized()     # up the skull
+hx = (hb_m.to_3x3() @ Vector((1, 0, 0))).normalized()
+hy = (hb_m.to_3x3() @ Vector((0, 1, 0))).normalized()
 hz = hy.cross(hx).normalized()
-if hz.dot(fwd) < 0:                                         # make hz the face direction
+if hz.dot(fwd) < 0:
     hz = -hz
 HEAD = h0 + hy * 0.12 * ZSCALE
 hrot = hb_m.to_3x3().to_euler()
 metaball("hair", "hair", [
-    ("ell", tuple(HEAD + hy * 0.035 - hz * 0.03), 0.125, (1.0, 0.95, 1.0), tuple(hrot)),
-    ("ell", tuple(HEAD - hz * 0.05 - hy * 0.01), 0.10, (1.0, 0.9, 1.0), tuple(hrot)),
-], res=0.008, k=1.7)
-# hood: soft bunched blue collar behind and around the neck
-nb = bone_w("neck_01")
-metaball("hood", "hoodie", [
-    ("ell", tuple(nb - hz * 0.07 + hy * 0.01), 0.16, (1.15, 0.8, 0.7), tuple(hrot)),
-    ("cap", tuple(nb + hx * 0.11 - hz * 0.02), tuple(nb - hz * 0.09), 0.08),
-    ("cap", tuple(nb - hx * 0.11 - hz * 0.02), tuple(nb - hz * 0.09), 0.08),
-], res=0.012, k=1.25)
-# headphones: a bevelled band over the skull + two cups (silver disc outside) + a boom mic
-cu = bpy.data.curves.new("hp_band", "CURVE")
+    ("ell", tuple(HEAD + hy * 0.02 - hz * 0.03), 0.092, (1.0, 0.92, 1.0), tuple(hrot)),
+], res=0.008, k=1.45)
+# the headset: a white visor box over the eyes, a grey back pad, a white strap ring round the skull
+M["headset"] = mat_principled("headset", (0.80, 0.80, 0.78), 0.45, spec=0.4)
+M["headset_dark"] = mat_principled("headset_dark", (0.05, 0.05, 0.055), 0.6)
+vis = HEAD + hz * 0.115 - hy * 0.02
+box("hs_visor", tuple(vis), (0.19, 0.09, 0.105), "headset", rot=tuple(hrot), bevel=0.02)
+box("hs_face", tuple(vis - hz * 0.05), (0.17, 0.02, 0.08), "headset_dark", rot=tuple(hrot))
+box("hs_backpad", tuple(HEAD - hz * 0.10 + hy * 0.01), (0.10, 0.03, 0.07), "headset", rot=tuple(hrot), bevel=0.012)
+cu = bpy.data.curves.new("hs_strap", "CURVE")
 cu.dimensions = "3D"
-cu.bevel_depth = 0.015
-cu.bevel_resolution = 3
+cu.bevel_depth = 0.011
 spl = cu.splines.new("POLY")
-pts = [HEAD + hx * (0.105 * math.cos(math.pi * k / 16)) + hy * (0.13 * math.sin(math.pi * k / 16)) - hz * 0.01
-       for k in range(17)]
+pts = [HEAD + hz * (0.11 * math.cos(math.pi * k / 16)) + hy * (0.105 * math.sin(math.pi * k / 16)) - hy * 0.03
+       for k in range(17)]                    # Quest-style top strap: visor -> over the crown -> back pad
 spl.points.add(len(pts) - 1)
 for sp, p in zip(spl.points, pts):
     sp.co = (p.x, p.y, p.z, 1)
-cu.materials.append(M["headphone"])
-coll.objects.link(bpy.data.objects.new("hp_band", cu))
-cup_q = hz.to_track_quat("Y", "Z")                         # cylinder axis (local Z) -> across the ears
-for s_ in (1, -1):
-    cc_ = HEAD + hx * 0.10 * s_ - hy * 0.015
-    rot = (hb_m.to_3x3() @ Euler((0, math.radians(90), 0)).to_matrix()).to_euler()
-    cyl("hp_cup", tuple(cc_), 0.058, 0.055, "headphone", rot=tuple(rot), verts=28, scale=(1.15, 1.0, 1.0))
-    cyl("hp_disc", tuple(cc_ + hx * 0.029 * s_), 0.036, 0.008, "headphone_cup", rot=tuple(rot), verts=28)
-cu2 = bpy.data.curves.new("hp_mic", "CURVE")
+cu.materials.append(M["headset"])
+coll.objects.link(bpy.data.objects.new("hs_strap", cu))
+# the link cable: from the back of the headset down his back and onto the floor behind him
+cu2 = bpy.data.curves.new("hs_cable", "CURVE")
 cu2.dimensions = "3D"
-cu2.bevel_depth = 0.0045
+cu2.bevel_depth = 0.008
 spl2 = cu2.splines.new("BEZIER")
-spl2.bezier_points.add(1)
-for bp, p in zip(spl2.bezier_points, (HEAD + hx * 0.11 - hy * 0.05, HEAD + hx * 0.05 - hy * 0.11 + hz * 0.09)):
+cab = [HEAD - hz * 0.11, bone_w("spine_03") - fwd * 0.17, bone_w("pelvis") - fwd * 0.16 + side * 0.04,
+       Vector(P(-0.45, 0.10, 0.02)), Vector(P(-1.3, -0.25, 0.01))]
+spl2.bezier_points.add(len(cab) - 1)
+for bp, p in zip(spl2.bezier_points, cab):
     bp.co = p
     bp.handle_left_type = bp.handle_right_type = "AUTO"
-cu2.materials.append(M["headphone"])
-coll.objects.link(bpy.data.objects.new("hp_mic", cu2))
-# mouse with a little green glow (his mouse glows green)
-sphere("mouse", tuple(MOUSE - up * 0.005), 0.04, "black", scale=(1.4, 0.9, 0.5))
-point_light("mouse_glow", tuple(MOUSE + up * 0.02), (0.2, 1.0, 0.3), 0.25, 0.02)
+cu2.materials.append(M["headset_dark"])
+coll.objects.link(bpy.data.objects.new("hs_cable", cu2))
+# controllers in his hands
+for bn in ("l", "r"):
+    hp = HANDS[bn]
+    cyl("ctrl_" + bn, tuple(hp + fwd * 0.03), 0.022, 0.12, "headset_dark", rot=(math.radians(70), 0, yaw))
+    bpy.ops.mesh.primitive_torus_add(major_radius=0.045, minor_radius=0.008, location=tuple(hp + fwd * 0.07 + up * 0.04),
+                                     rotation=(math.radians(35), 0, yaw))
+    tr = bpy.context.active_object
+    tr.name = "ctrl_ring_" + bn
+    tr.data.materials.append(M["headset"])
+# where I was: a faint purple glow just in front of the visor, the temple's light leaking past his face
+point_light("temple_glow", tuple(vis + hz * 0.10), (0.58, 0.30, 1.0), 3.5, 0.06)
+# the ceiling fan light over him (it was on that night)
+FAN = Vector((0.55, 1.9, H - 0.18))
+cyl("fan_body", tuple(FAN), 0.13, 0.10, "headset", verts=32)
+for k in range(4):
+    a = math.pi / 2 * k + 0.4
+    box("fan_blade", tuple(FAN + Vector((math.cos(a) * 0.42, math.sin(a) * 0.42, 0.04))), (0.62, 0.13, 0.012),
+        "desk_top", rot=(0, 0, a))
+M["fan_glow"] = mat_emit("fan_glow", (1.0, 0.90, 0.72), 6.0)
+sphere("fan_bulb", tuple(FAN - Vector((0, 0, 0.08))), 0.09, "fan_glow", scale=(1, 1, 0.55))
+point_light("fan_light", tuple(FAN - Vector((0, 0, 0.22))), (1.0, 0.86, 0.64), 140, 0.15)
 
 # ----------------------------------------------------------------------------- foreground right: office chair with the digital-camo jacket
 CC = Vector((0.66, -0.42, 0))
@@ -801,7 +782,7 @@ cd.dof.aperture_fstop = 2.8
 cam = bpy.data.objects.new("cam", cd)
 cam.location = (0.45, -2.0, 1.72)
 coll.objects.link(cam)
-aim(cam, (-0.50, 1.8, 0.78))
+aim(cam, (0.05, 1.8, 1.15))
 cd.dof.focus_distance = (HEAD - cam.location).length
 sc.camera = cam
 if args.debug_cam:
