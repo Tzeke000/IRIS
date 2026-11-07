@@ -2707,7 +2707,7 @@ async def _guest_pre_tool_hook(input_data, tool_use_id, context):
             # not for guests: stopping/starting my body, kicking players, stage/test actions, destroying builds
             # 10-30 security audit M4: also not for guests — reading everyone's transcript (incl. what Zeke
             # said), carrying people, the comm roster, omniscient sight, powers and the gun.
-            if act not in ("join", "leave", "kick", "action", "heard", "carry", "comm", "omniscient", "power", "gun") \
+            if act not in ("join", "leave", "kick", "tp", "action", "heard", "carry", "comm", "omniscient", "power", "gun") \
                     and not (act == "build" and op in ("delete", "clear_strokes", "unstroke")):
                 return {}
         _blog("guard", "guest turn tool denied", _tr({"tool": name, "sub": str(ti.get("name") or "")[:40]}))

@@ -507,6 +507,7 @@ ACTION_PARAMS: dict[str, tuple[str, ...]] = {
     "gun": ("op", "target", "at", "compensate", "adjust"), "power": ("pick",),
     "follow": ("name", "dist", "height", "look", "on"), "comm": ("to",), "intercom": ("to",),
     "carry": ("allow",), "pat": ("name",),
+    "tp": ("name", "to"), "unstuck": (),   # batch3safety-1107: admin rescue (server-validated); lands with that deploy
 }
 # a wrong key that has an obvious right one
 _PARAM_HINTS = {("look", "yaw"): "look takes at=[x,y,z] (a point to look at), not an angle",
@@ -586,7 +587,7 @@ register_tool(
     "round walls; stuck ⇒ teleports beside them; teleports WITH them; on=false stops; no name = status) | comm to=[names]|all|none (who hears me in-ear when out of earshot; default all) | "
     "carry allow=[names]|all|none (who may pick me up; default Zeke) | pat name=<person> (head pat) | move speed=N (thruster ≤9 m/s; any height) | "
     "chess op=board|move from=e2 to=e4 (I really pick the piece up; events chess_done/chess_failed) | "
-    "rules → /data/projects/vr_iris/research/iris_body_physics_rules_2026-10-23.md | speak text [face=auto|name|none] (ALOUD, my voice, positional; I turn to who I answer first) | intercom to=[names]|all|none (whose voice reaches me out of earshot) | hush | say text (bubble only) | action name=stage_on|stage_off|drop_test|reset_cans|make_day|make_night | kick name | omniscient on=true|false (see everything vs field of view) | "
+    "rules → /data/projects/vr_iris/research/iris_body_physics_rules_2026-10-23.md | speak text [face=auto|name|none] (ALOUD, my voice, positional; I turn to who I answer first) | intercom to=[names]|all|none (whose voice reaches me out of earshot) | hush | say text (bubble only) | action name=stage_on|stage_off|drop_test|reset_cans|make_day|make_night | kick name | tp name=<player> to=spawn|me (ADMIN rescue a stuck player; server-validated) | unstuck (me back to spawn) | omniscient on=true|false (see everything vs field of view) | "
     "heard [n] [since=10m|ISO|epoch] [only_attending=true] [speaker] (HEAR: who said what + when + where from my head, per speaker; addressed = said my name, attending = said it ≤90 s ago) | hearing (my ears' counters).",
     1,
     _vr_temple,
