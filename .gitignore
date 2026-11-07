@@ -135,3 +135,4 @@ models/antispoof/*.onnx
 
 # My voice reference — private, cloneable (Zeke OK 2026-10-30). Kept on disk, never tracked.
 models/voice/*.wav
+.worktrees/
