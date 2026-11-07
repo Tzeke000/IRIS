@@ -46,6 +46,19 @@ def _print_to_stderr(*args, **kwargs):
     return _real_print(*args, **kwargs)
 _builtins.print = _print_to_stderr
 
+# ── STDIO GUARD (2026-11-07, mcphang_1107 — the intermittent 180 s MCP hang) ──
+# Every child this process spawns inherited fd 0/1 = the MCP pipes. The status board's ssh loops (no -n) READ that
+# stdin and shipped whole JSON-RPC requests to the remote shell: the call never reached a handler (the 11-05 ledger
+# shows no row for it) and the CLI waited 180 s. Move the protocol to private non-inheritable fds NOW, before any
+# import can spawn a child; fd 0 -> /dev/null, fd 1 -> stderr. Only when run as the server (never on import in
+# tests). Kill switch IRIS_STDIO_ISOLATE=0. See brain/stdio_guard.py, research/mcp_hang_rootcause_2026-11-07.md.
+if __name__ == "__main__":
+    try:
+        from brain import stdio_guard as _stdio_guard
+        _stdio_guard.isolate()
+    except Exception as _sge:  # noqa: BLE001
+        print(f"[iris_runtime] stdio guard unavailable: {_sge!r}", file=sys.stderr, flush=True)
+
 # ── SHADOW-AVA KILL SWITCH (2026-08-27, the night the tower froze at 98% RAM) ──
 # avaagent.py runs _run_startup(globals()) at MODULE level, so ANY
 # `import avaagent` boots Ava's ENTIRE stack (whisper, TTS, VideoMemory,
@@ -5287,7 +5300,14 @@ if __name__ == "__main__":
     print("[iris_runtime] starting MCP server on stdio...", file=sys.stderr, flush=True)
     threading.Thread(target=_eager_init_engines, daemon=True, name="iris-eager-init").start()
     try:
-        mcp.run()
+        try:
+            from brain import stdio_guard as _stdio_guard_run
+        except Exception:  # noqa: BLE001
+            _stdio_guard_run = None
+        if _stdio_guard_run is not None:
+            _stdio_guard_run.run(mcp)   # private fds when isolated, else the stock mcp.run()
+        else:
+            mcp.run()
     finally:
         # mcp.run() returns when CC closes stdin. Release the pidfile, then
         # schedule the force-exit in case some non-daemon thread (in brain/*)
