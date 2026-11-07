@@ -28,7 +28,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def _run(cmd: list[str], timeout: float = 20.0) -> tuple[int, str]:
     try:
-        cp = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        cp = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                            stdin=subprocess.DEVNULL)  # mcphang_1107: never let ssh read the MCP stdin
         return cp.returncode, cp.stdout + cp.stderr
     except Exception as e:  # noqa: BLE001
         return -1, repr(e)

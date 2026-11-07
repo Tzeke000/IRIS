@@ -256,13 +256,15 @@ def install(app: Any, g: dict[str, Any], root: Path, existing: set) -> list[str]
             out = subprocess.run(["ssh", "-o", "BatchMode=yes", "tower",
                                   r'D:\Wren-Companion\.venv\Scripts\python.exe D:\Wren-Companion\scripts\desktop_bridge.py '
                                   r'submit screenshot "{\"monitor\": 1, \"max_px\": 4000}"'],
-                                 capture_output=True, text=True, timeout=45)
+                                 capture_output=True, text=True, timeout=45,
+                                 stdin=subprocess.DEVNULL)
             d = json.loads(out.stdout.strip().splitlines()[-1])
             if not d.get("ok"):
                 return {"ok": False, "error": f"screenshot: {d.get('error')}"}
             mon = next((m for m in d.get("monitors", []) if m.get("index") == 1), {"left": 0, "top": 0})
             local = Path(tempfile.gettempdir()) / "iris_taskbar_shot.jpg"
-            subprocess.run(["scp", "-q", f"tower:{d['path'].replace(chr(92), '/')}", str(local)], timeout=30, check=True)
+            subprocess.run(["scp", "-q", f"tower:{d['path'].replace(chr(92), '/')}", str(local)], timeout=30, check=True,
+                           stdin=subprocess.DEVNULL)
             scr = cv2.imread(str(local))
             H = scr.shape[0]
             bar = scr[H - 48:H, :]

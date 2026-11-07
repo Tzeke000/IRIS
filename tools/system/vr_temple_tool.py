@@ -485,7 +485,7 @@ def _unit(cmd: str) -> str:
         argv = ["systemctl", cmd, _UNIT] if cmd in ("is-active", "status", "show") else ["sudo", "-n", "systemctl", cmd, _UNIT]
     else:
         argv = ["systemctl", "--user", cmd, _UNIT]
-    r = subprocess.run(argv, capture_output=True, text=True, timeout=20)
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
     return (r.stdout or r.stderr).strip()
 
 

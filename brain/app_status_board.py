@@ -45,6 +45,7 @@ _TOWER_REPO = r"D:\Wren-Companion"
 def _run(cmd: list[str], timeout: float) -> tuple[int, str]:
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           stdin=subprocess.DEVNULL,  # mcphang_1107: ssh (no -n) READ the MCP stdin and stole requests
                            creationflags=_NOWIN)
         return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
     except subprocess.TimeoutExpired:
