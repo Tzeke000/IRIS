@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """scripts/server/vr_players.py — "how many players?" for the VR temple (Zeke 11-03 docket: downloads / whitelisted / online).
 
-  downloads    GitHub release asset download_count for every VRIris-Setup.exe (token ~/.config/iris/secrets/github_friends_token)
+  downloads    GitHub release asset download_count for every Setup .exe (LUMEN-Setup.exe; older VRIris-Setup.exe still counted) (token ~/.config/iris/secrets/github_friends_token)
   whitelisted  invites on the temple (server.cfg [invites] names) + approved tunnel peers on wg-gate (wg show peers)
   online       players the temple welcomed and hasn't seen leave since its last start (journal '[net] welcome' / 'left')
   perf         (11-04) pull the opt-in performance reports (perf_reports.jsonl [+ .1]) off the temple into
@@ -54,7 +54,7 @@ def temple_host() -> str:
 def whitelisted(th: str) -> dict:
     out: dict = {}
     cfg = _ssh(["-i", str(HOME / ".ssh/id_ed25519_temple"), f"root@{th}"],
-               'sed -n "/^\\[invites\\]/,/^\\[/p" "/srv/vrtemple/home/.local/share/godot/app_userdata/VR Iris/server.cfg"') if th else ""
+               f'sed -n "/^\\[invites\\]/,/^\\[/p" "{_UD_SH}/server.cfg"') if th else ""
     names = set()
     for ln in cfg.splitlines():
         for m in re.finditer(r'"name"\s*:\s*"([^"]+)"', ln):
@@ -84,7 +84,10 @@ def online(th: str) -> dict:
     return {"count": len(humans), "players": humans, "bots": sorted(n for n, k in here.items() if k == "bot")}
 
 
-TEMPLE_USERDATA = "/srv/vrtemple/home/.local/share/godot/app_userdata/VR Iris"
+# LUMEN rename 11-07: the server copies "VR Iris" -> "LUMEN" on its first renamed start; read LUMEN when it exists
+TEMPLE_USERDATA_BASE = "/srv/vrtemple/home/.local/share/godot/app_userdata"
+TEMPLE_USERDATA = TEMPLE_USERDATA_BASE + "/VR Iris"   # legacy constant (pre-rename)
+_UD_SH = f'$( [ -d "{TEMPLE_USERDATA_BASE}/LUMEN" ] && echo "{TEMPLE_USERDATA_BASE}/LUMEN" || echo "{TEMPLE_USERDATA_BASE}/VR Iris" )'
 PERF_TABLE = Path("/data/projects/vr_iris/harness/tools/perf_table.py")
 
 
@@ -97,7 +100,7 @@ def perf(th: str, out_dir: Path | None = None) -> dict:
     got = []
     for name in ("perf_reports.jsonl", "perf_reports.1.jsonl"):
         body = _ssh(["-i", str(HOME / ".ssh/id_ed25519_temple"), f"root@{th}"],
-                    f'cat "{TEMPLE_USERDATA}/{name}" 2>/dev/null', timeout=30)
+                    f'cat "{_UD_SH}/{name}" 2>/dev/null', timeout=30)
         if body.strip():
             (out_dir / name).write_text(body)
             got.append(str(out_dir / name))

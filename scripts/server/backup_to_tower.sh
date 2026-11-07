@@ -107,7 +107,7 @@ if [ "$ENC" = 1 ]; then
   mkdir -p "$STAGE/remote"
   TH=$(grep -s '^TEMPLE_HOST=' "$HOME/.iris_private.env" | cut -d= -f2)
   if [ -n "$TH" ] && timeout 60 ssh -o BatchMode=yes -o ConnectTimeout=8 -i "$HOME/.ssh/id_ed25519_temple" "root@$TH" \
-       'cd "/srv/vrtemple/home/.local/share/godot/app_userdata/VR Iris" && tar -cf - server.cfg temple_server.key invites' \
+       'U=/srv/vrtemple/home/.local/share/godot/app_userdata; { cd "$U/LUMEN" 2>/dev/null || cd "$U/VR Iris"; } && tar -cf - server.cfg temple_server.key invites'   # LUMEN rename 11-07: the live dir after the rename deploy, old name before it \
        > "$STAGE/remote/temple_secrets.tar" 2>/dev/null && [ -s "$STAGE/remote/temple_secrets.tar" ]; then
     say "temple secrets staged ($(stat -c %s "$STAGE/remote/temple_secrets.tar") B)"
   else rm -f "$STAGE/remote/temple_secrets.tar"; say "WARNING: temple secrets NOT staged (CT unreachable?)"; fi
