@@ -311,13 +311,19 @@ def stop_unit(unit: str) -> None:
 
 # ── admission ──────────────────────────────────────────────────────────────────
 def slice_used(d) -> int:
-    """memory.current MINUS reclaimable page cache (inactive_file). 10-30: after the Sands render the slice held
-    11.1 GB of finished frames' page cache (anon 0) and admission refused every new job ("slice headroom 9 G")
-    although the kernel would have dropped that cache on demand. Active file pages still count (conservative)."""
+    """What the slice REALLY holds: memory.current minus ALL page cache (active + inactive file), plus shmem
+    (tmpfs/shared pages live in "file" but can't be dropped). 10-30: inactive_file alone was subtracted after the
+    Sands render's frame cache blocked admission. 11-07: still refused jobs with anon 3.8 G because 17.8 G of
+    ACTIVE file cache (Godot imports/exports) counted as used; the kernel reclaims file pages before it OOM-kills
+    anything, and a 15-min probe showed the disks idle (util <3 %, iowait 0), so evicting cache is cheap.
+    The per-job estimate (1.25 x p90 of measured peaks) is the safety margin. IRIS_SLICE_COUNT_ACTIVE_FILE=1 = old."""
     cur = _read_int(d / "memory.current") or 0
     try:
         st = dict(l.split() for l in (d / "memory.stat").read_text().splitlines())
-        cur -= int(st.get("inactive_file", 0))
+        if os.environ.get("IRIS_SLICE_COUNT_ACTIVE_FILE") == "1":
+            cur -= int(st.get("inactive_file", 0))
+        else:
+            cur -= int(st.get("inactive_file", 0)) + int(st.get("active_file", 0)) - int(st.get("shmem", 0))
     except Exception:  # noqa: BLE001
         pass
     return max(0, cur)
