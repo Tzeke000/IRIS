@@ -10,7 +10,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/lib.sh"
 REPO=/home/iris/IRIS
-BOT=/data/projects/vr_iris/bot/VRIrisServer.x86_64
+BOT=/data/projects/vr_iris/bot/LUMENServer.x86_64
 U=iris-vr-presence.service
 DRY=0; SWITCH=1
 for a in "$@"; do case "$a" in --dry-run) DRY=1;; --no-switch) SWITCH=0;; *) echo "unknown arg $a"; exit 2;; esac; done

@@ -6,7 +6,7 @@
 #   --with-firewall: run as the idle `nobody` uid with a TEMPORARY egress-rule copy for it (proves the socket replies pass)
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/lib.sh"
-BOT=/data/projects/vr_iris/bot/VRIrisServer.x86_64
+BOT=/data/projects/vr_iris/bot/LUMENServer.x86_64
 FW=0; [ "${1:-}" = --with-firewall ] && { FW=1; shift; }
 SECS=${1:-60}; shift || true
 U=iris-vr-sandbox-test; PORT=17790
