@@ -2,6 +2,8 @@
 # job_notify.sh NAME OUTFILE -- CMD...   (11-08) run CMD (stdout+stderr → OUTFILE), then wake Iris with an LLM-bridge
 # request (kind job_done) carrying rc + the last lines. Why: worker jobs (land, flaky, regress) finished/failed UNSEEN
 # for ~1 h twice on 11-08 — a job that can't wake me is a job I forget. Wrap long worker commands in this.
+# opsguard 11-08: worker.py run now notifies (kind job_done) BY DEFAULT and tees output to state/workers/out/ - this
+# wrapper is only for commands run OUTSIDE worker.py.
 NAME=$1; OUT=$2; shift 2; [ "$1" = "--" ] && shift
 t0=$(date +%s); "$@" > "$OUT" 2>&1; rc=$?
 cd /home/iris/IRIS && /home/iris/venvs/iris-v100/bin/python - "$NAME" "$rc" "$t0" "$OUT" <<'PYEOF'

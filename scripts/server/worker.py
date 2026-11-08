@@ -41,8 +41,9 @@ V3 Phase 1 step 1.3 (2026-10-30) - every job is a TASK in the event store (brain
     gone stops the unit, unless the task is side_effects=external (then it only logs: reconcile by hand).
   * a killed launcher stops heartbeating -> the lease expires -> `sweep` (or anything calling
     store.sweep_expired) moves the task to needs_review. Never silently `running` (checklist P2-T4d).
-    --detach jobs have nobody heartbeating, so their lease is timeout + 5 min and they end in
-    needs_review unless someone completes them: nobody watched the outcome, so it IS unreviewed.
+    --detach (opsguard 11-08) starts a small SUPERVISOR unit (iris-wsup-*) that runs the same request in the
+    foreground - waits for --after parents, retries admission, watches, records, notifies. Before that,
+    a detached unit had nobody heartbeating/recording: rows stayed 'detached' and tasks went needs_review.
   * the store fails OPEN: an auto-created task that can't be written just runs untracked (noted);
     an explicit --task-id that can't be claimed is REFUSED (exit 77) - the fence is the point.
 
@@ -305,6 +306,15 @@ def running_workers() -> list[str]:
     return [ln.split()[0] for ln in out.splitlines() if ln.strip()]
 
 
+def supervisors() -> list[str]:
+    try:
+        out = subprocess.run(["systemctl", "--user", "list-units", "--type=service", "--state=active,activating",
+                              "--no-legend", "--plain", "iris-wsup-*"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [ln.split()[0] for ln in out.splitlines() if ln.strip()]
+
+
 def stop_unit(unit: str) -> None:
     subprocess.run(["systemctl", "--user", "stop", unit], timeout=120)
 
@@ -508,7 +518,119 @@ def precheck_task(store, task_id: str) -> tuple[dict | None, str]:
 # ── run ────────────────────────────────────────────────────────────────────────
 RUN_DEFAULTS = {"task_id": "", "priority": DEFAULT_PRIORITY, "side_effects": "none", "cancel_lower": False,
                 "lease": LEASE_S, "cpu_quota": CPU_QUOTA, "cpu_weight": CPU_WEIGHT, "ledger": False,
-                "after": "", "key": "", "wait_deps": 0.0}
+                "after": "", "key": "", "wait_deps": 0.0, "after_verified": False, "no_notify": False,
+                "out": "", "argv": None, "wait_admit": 0.0}
+# opsguard 11-08: how long a queued (--detach) dependant may wait for its parents before it gives up loudly
+DEP_WAIT_MAX_S = float(os.environ.get("IRIS_WORKER_DEP_WAIT_MAX_S", str(24 * 3600)))
+ADMIT_POLL_S = float(os.environ.get("IRIS_WORKER_ADMIT_POLL_S", "30"))
+SUP_ADMIT_WAIT_S = 6 * 3600
+SUP_PREFIX = "iris-wsup-"   # supervisor units of --detach jobs (NOT iris-worker-*: they never count as workers)
+DONE_OK = ("output_pending", "verified", "committed")   # a parent's job finished OK (a result exists)
+DONE_BAD = ("failed", "cancelled", "needs_review")
+
+
+def resolve_after(ids: list[str]) -> tuple[list[str], list[str]]:
+    """--after accepts task ids, `job:N` (worker job id) or `name:NAME` (newest job row with that name)."""
+    out, bad = [], []
+    for x in ids:
+        if x.startswith(("job:", "name:")):
+            k, v = x.split(":", 1)
+            with db() as c:
+                row = (c.execute("SELECT task_id FROM jobs WHERE id=?", (int(v) if v.isdigit() else -1,))
+                       if k == "job" else
+                       c.execute("SELECT task_id FROM jobs WHERE name=? ORDER BY id DESC LIMIT 1", (v,))).fetchone()
+            (out.append(row[0]) if row and row[0] else bad.append(x))
+        else:
+            out.append(x)
+    return out, bad
+
+
+def parents_done_state(store, parents: list[str]) -> dict:
+    """--after default semantics (opsguard 11-08): ready once every parent's job FINISHED OK (output_pending or
+    later) - not 'verified', which nobody sets for a worker job, so the 11-07 dependant waited forever."""
+    st = {"state": "ready", "waiting_on": [], "failed": [], "reason": None}
+    for p in parents:
+        t = store.get_task(p)
+        s_ = (t or {}).get("status", "missing")
+        if s_ in DONE_OK:
+            continue
+        if t is None or s_ in DONE_BAD:
+            st["failed"].append({"task_id": p, "status": s_})
+        else:
+            st["waiting_on"].append({"task_id": p, "status": s_})
+    if st["failed"]:
+        f = st["failed"][0]
+        st.update(state="blocked", reason=f"dependency {f['task_id']} is {f['status']}")
+    elif st["waiting_on"]:
+        st.update(state="waiting", reason="waiting on " + ", ".join(f"{w['task_id']} ({w['status']})"
+                                                                   for w in st["waiting_on"]))
+    return st
+
+
+def wait_parents_done(store, parents: list[str], wait_s: float, poll: float | None = None,
+                      sleep=time.sleep, clock=time.monotonic) -> dict:
+    poll = DEP_POLL_S if poll is None else poll
+    deadline = clock() + max(0.0, float(wait_s))
+    while True:
+        st = parents_done_state(store, parents)
+        if st["state"] != "waiting" or clock() >= deadline:
+            return st
+        sleep(min(poll, max(0.05, deadline - clock())))
+
+
+def supervisor_argv(argv: list[str], task_id: str | None, wait_s: float) -> list[str]:
+    """The argv a --detach job's supervisor re-runs: same request, minus --detach / --wait-deps / --task-id,
+    plus the task it already owns and a long dependency wait."""
+    out, skip = [], False
+    for x in argv:
+        if skip:
+            skip = False
+            continue
+        if x == "--":
+            break
+        if x == "--detach":
+            continue
+        if x in ("--wait-deps", "--task-id", "--wait-admit"):
+            skip = True
+            continue
+        if x.startswith(("--wait-deps=", "--task-id=", "--wait-admit=")):
+            continue
+        out.append(x)
+    rest = argv[argv.index("--"):] if "--" in argv else []
+    extra = ["--wait-deps", str(int(wait_s)), "--wait-admit", str(SUP_ADMIT_WAIT_S)] + \
+        (["--task-id", task_id] if task_id else [])
+    return out + extra + rest
+
+
+def launch_supervisor(a, task_id: str | None) -> int:
+    """--detach (opsguard 11-08): instead of a bare unit nobody watches (15 rows stuck 'detached', no
+    notify, --after dependants never started), start a small supervisor unit that runs this same request
+    in the FOREGROUND: it waits for --after parents, gets admitted, watches, records the outcome, notifies."""
+    if not a.argv or "run" not in a.argv:
+        print(json.dumps({"admitted": False, "why": ["--detach needs the CLI argv (programmatic callers: run "
+                                                     "without detach)"]}), file=sys.stderr)
+        return 2
+    i = a.argv.index("run")
+    sub = supervisor_argv(a.argv[i + 1:], task_id, DEP_WAIT_MAX_S + (a.timeout if a.after else 0))
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", a.name)[:60]
+    unit = f"{SUP_PREFIX}{safe}-{int(time.time())}.service"
+    # the supervisor sees the caller's DBs/knobs (systemd-run does NOT pass the environment through)
+    fwd = [f"--setenv={k}={v}" for k, v in sorted(os.environ.items())
+           if k.startswith("IRIS_WORKER_") or k in ("IRIS_EVENTS_DB", "IRIS_LIVE_WORKER_TESTS")]
+    cmd = ["systemd-run", "--user", "--quiet", "--collect", f"--unit={unit}", "-p", "MemoryMax=512M",
+           "-p", f"RuntimeMaxSec={int(DEP_WAIT_MAX_S + SUP_ADMIT_WAIT_S + a.timeout + 900)}",
+           "-p", "Environment=PYTHONUNBUFFERED=1", *fwd,
+           f"--working-directory={a.cwd or os.getcwd()}", "--", sys.executable, str(Path(__file__).resolve()),
+           "run", *sub]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(json.dumps({"admitted": False, "why": [f"supervisor launch failed: {r.stderr[-300:]}"]}), file=sys.stderr)
+        return r.returncode or 1
+    print(json.dumps({"detached": True, "supervisor": unit, "task_id": task_id, "after": a.after or None,
+                      "notify": notify_default(a.kind, a.no_notify),
+                      "eta": eta(a.kind, a.name).get("say"),
+                      "see": f"journalctl --user -u {unit} -f   |  worker.py history -n 5"}))
+    return 0
 
 
 # ── task dependencies (V3 Phase 3) ──────────────────────────────────────────────
@@ -614,7 +736,12 @@ def run(a) -> int:
             setattr(a, k, v)
     mem = parse_size(a.mem) if a.mem else 0
     store = None
-    after = _split_ids(a.after)
+    after, bad = resolve_after(_split_ids(a.after))
+    if bad:
+        print(json.dumps({"admitted": False, "why": [f"--after: no such job {bad}"]}, indent=1))
+        return EX_NOPERM
+    # default --after = parents FINISHED OK (job semantics); --after-verified = the store's verified edges
+    store_after = after if a.after_verified else []
     if (after or a.key) and not a.task_id:
         # Phase 3: a dependant task must exist in the store BEFORE we wait/launch (the wait survives us)
         store = events_store()
@@ -622,15 +749,16 @@ def run(a) -> int:
             print(json.dumps({"admitted": False, "claimed": False,
                               "why": ["event store unavailable - --after/--key need it"]}, indent=1))
             return EX_NOPERM
+        note_ = json.dumps(a.cmd)[:500] + (f" | after_done={','.join(after)}" if after and not store_after else "")
         r = store.create_task(f"{a.kind}: {a.name}", kind=f"worker:{a.kind}", side_effects=a.side_effects,
-                              idempotency_key=a.key or None, after=after, note=json.dumps(a.cmd)[:500],
+                              idempotency_key=a.key or None, after=store_after, note=note_,
                               actor="worker.py")
         if r is None:
             print(json.dumps({"admitted": False, "claimed": False,
                               "why": [f"could not create the task: {store.last_error}"]}, indent=1))
             return EX_NOPERM
-        if not r.created and after and r.status == "admitted":
-            store.add_dependencies(r.id, after, actor="worker.py")   # same key, maybe new parents
+        if not r.created and store_after and r.status == "admitted":
+            store.add_dependencies(r.id, store_after, actor="worker.py")   # same key, maybe new parents
         a.task_id = r.id
     if a.task_id:
         store = store or events_store()
@@ -639,16 +767,36 @@ def run(a) -> int:
             print(json.dumps({"admitted": False, "claimed": False, "why": [why]}, indent=1))
             return EX_NOPERM
         a.side_effects = task_row.get("side_effects") or a.side_effects
+        if a.detach:
+            # queue it: the supervisor does the waiting (a check-once-and-exit here is what lost 11-07's job)
+            return launch_supervisor(a, a.task_id)
         dep = wait_for_deps(store, a.task_id, float(a.wait_deps or 0))
+        if dep["state"] == "ready" and after and not store_after:
+            dep = wait_parents_done(store, after, float(a.wait_deps or 0))
+            if dep["state"] == "blocked":   # the parent failed: this one never runs - say so in the store
+                store.cancel_task(a.task_id, note=f"not started: {dep['reason']}")
         if dep["state"] != "ready":
             blocked = dep["state"] in ("blocked", "unknown")
             print(json.dumps({"admitted": False, "claimed": False, "task_id": a.task_id,
                               "deps": dep["state"], "why": [dep.get("reason")],
                               "waiting_on": dep.get("waiting_on", [])}, indent=1))
+            print(f"worker: NOT STARTED '{a.name}': {dep.get('reason')}"
+                  + ("" if blocked else " - nothing will start it later; use --detach (a supervisor waits and "
+                                        "starts it when the parent finishes) or --wait-deps SECONDS"), file=sys.stderr)
+            if blocked and notify_default(a.kind, a.no_notify) and float(a.wait_deps or 0) > 0:
+                notify_done(a.name, 0, "dep_failed", None, 0, [], "")   # a queued job that will never run
             return EX_DEPFAILED if blocked else EX_TEMPFAIL
+    elif a.detach:
+        return launch_supervisor(a, None)
     ok, info = admit_with_cancel(a, mem)
+    give_up = time.monotonic() + float(getattr(a, "wait_admit", 0) or 0)
+    while not ok and not a.force and time.monotonic() < give_up:   # a supervisor queues for admission too
+        time.sleep(ADMIT_POLL_S)
+        ok, info = admit_with_cancel(a, mem)
     if not ok and not a.force:
         print(json.dumps({"admitted": False, **info}, indent=1))
+        if float(getattr(a, "wait_admit", 0) or 0) > 0 and notify_default(a.kind, a.no_notify):
+            notify_done(a.name, 0, "never_admitted", None, 0, [], "")
         return EX_TEMPFAIL
     store = store or events_store()
     mem_limit = mem or info["estimate"]
@@ -657,7 +805,7 @@ def run(a) -> int:
 
     # claim BEFORE systemd-run
     claim = None
-    lease_s = float(a.timeout + 300) if a.detach else float(a.lease)
+    lease_s = float(a.lease)   # --detach never reaches here any more: its supervisor runs us in the foreground
     note = None
     if store is not None:
         tid = a.task_id
@@ -700,8 +848,20 @@ def run(a) -> int:
     if act_id:
         props += [f"--setenv=IRIS_ACT_ID={act_id}"]
     props += lockdown_props(a.lockdown)
+    notify = notify_default(a.kind, a.no_notify, a.cmd)
+    out_paths: list[str] = []
+    job_cmd = list(a.cmd)
+    if notify or a.out:
+        # capture output to a file ALWAYS (journal keeps it too); the caller's own redirect target is tailed first
+        own = a.out or str(OUT_DIR / f"{unit[:-len('.service')]}.log")
+        try:
+            Path(own).parent.mkdir(parents=True, exist_ok=True)
+            job_cmd = tee_wrap(job_cmd, own)
+            out_paths = caller_out_files(a.cmd) + [own]
+        except OSError as e:
+            note = (note or "") + f" | no output file ({e})"
     cmd = ["systemd-run", "--user", "--quiet", "--collect", f"--unit={unit}", f"--slice={SLICE}",
-           f"--working-directory={a.cwd or os.getcwd()}", *props, "--", *a.cmd]
+           f"--working-directory={a.cwd or os.getcwd()}", *props, "--", *job_cmd]
     with db() as c:
         jid = c.execute("INSERT INTO jobs(unit,name,kind,cmd,mem_limit,timeout_s,start_ts,outcome,task_id,fence,"
                         "priority,side_effects,note) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -710,32 +870,25 @@ def run(a) -> int:
                          a.side_effects, note)).lastrowid
     hello = {"admitted": True, "job": jid, "unit": unit, "mem_limit": human(mem_limit),
              "estimate_from_history_n": info["history_n"], "priority": a.priority,
-             "task_id": claim.task_id if claim else None, "fence": claim.fence if claim else None}
+             "task_id": claim.task_id if claim else None, "fence": claim.fence if claim else None,
+             "notify": notify, "out": out_paths[-1] if out_paths else None, "eta": eta(a.kind, a.name).get("say")}
     if act_id:
         hello["act_id"] = act_id
     if info.get("cancelled"):
         hello["cancelled"] = info["cancelled"]
-    if not a.detach:
-        cmd.insert(cmd.index("--quiet"), "--wait")
-        cmd.remove("--quiet")  # --wait prints the result summary we parse
-        print(json.dumps(hello), flush=True)
-        try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        except OSError as e:
-            _launch_failed(jid, claim, repr(e))
-            ledger_exit(act_id, "launch_failed", None, repr(e))
-            return 1
-        return watch(jid, unit, proc, claim=claim, act_id=act_id)
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        _launch_failed(jid, claim, r.stderr[-500:])
-        ledger_exit(act_id, "launch_failed", r.returncode, r.stderr[-300:])
-        print(r.stderr, file=sys.stderr)
-        return r.returncode
-    print(json.dumps(hello))
-    with db() as c:
-        c.execute("UPDATE jobs SET outcome='detached' WHERE id=?", (jid,))
-    return 0
+    cmd.insert(cmd.index("--quiet"), "--wait")
+    cmd.remove("--quiet")  # --wait prints the result summary we parse
+    print(json.dumps(hello), flush=True)
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    except OSError as e:
+        _launch_failed(jid, claim, repr(e))
+        ledger_exit(act_id, "launch_failed", None, repr(e))
+        if notify:
+            notify_done(a.name, jid, "launch_failed", None, 0, out_paths, a.cwd)
+        return 1
+    return watch(jid, unit, proc, claim=claim, act_id=act_id,
+                 notify={"name": a.name, "paths": out_paths, "cwd": a.cwd} if notify else None)
 
 
 def _launch_failed(jid: int, claim: Claim | None, err: str) -> None:
@@ -747,7 +900,7 @@ def _launch_failed(jid: int, claim: Claim | None, err: str) -> None:
 
 
 def watch(jid: int, unit: str, proc: subprocess.Popen, poll: float = 1.0, claim: Claim | None = None,
-          act_id: str | None = None) -> int:
+          act_id: str | None = None, notify: dict | None = None) -> int:
     """Sample the unit's cgroup (+ per-unit VRAM) until `systemd-run --wait` returns, heartbeating the task
     claim, then record the outcome - into the jobs row always, into the task only with the CURRENT fence.
     Kernel 5.15 has no memory.peak, so the peak is the max of sampled memory.current."""
@@ -826,6 +979,11 @@ def watch(jid: int, unit: str, proc: subprocess.Popen, poll: float = 1.0, claim:
     ledger_exit(act_id, outcome, code, f"job {jid}")   # noted only: the action stays open until verified
     if outcome not in ("ok", "cancelled"):
         _wake_on_bad_end(unit, outcome, code, peak)
+    if notify:
+        with db() as c:
+            r0 = c.execute("SELECT start_ts FROM jobs WHERE id=?", (jid,)).fetchone()
+        notify_done(notify["name"], jid, outcome, code, time.time() - ((r0 and r0[0]) or time.time()),
+                    notify.get("paths") or [], notify.get("cwd") or "")
     print(json.dumps({"job": jid, "unit": unit, "outcome": outcome, "exit_code": code,
                       "peak_mem": human(peak or None), "cpu_s": round((cpu or 0) / 1e6, 1),
                       "gpu_mib": gpu_peak, "task_id": claim.task_id if claim else None,
@@ -857,26 +1015,175 @@ def _wake_on_bad_end(unit: str, outcome: str, code, peak) -> None:
     except Exception as e:  # noqa: BLE001
         print(f"[worker] wake-on-bad-end failed (non-fatal): {e!r}", file=sys.stderr)
 
+# ── completion notification (opsguard 11-08: notify is the DEFAULT) ─────────────
+# 11-07/08: land RED at 02:27 and a land abort at step 1 each sat UNSEEN ~1 h - nothing woke me when a
+# worker job ended. job_notify.sh fixed it per call, by hand; now every watched job (helpers excepted:
+# they have helper_done) submits kind="job_done" with rc + the last lines of its output. --no-notify opts out.
+OUT_DIR = Path(os.environ.get("IRIS_WORKER_OUT_DIR", ROOT / "state" / "workers" / "out"))
+_REDIRECT_RE = re.compile(r"(?:\|\s*tee(?:\s+-a)?|&?>>?)\s*([^\s|;&<>'\"]+)")
+
+
+def notify_default(kind: str, no_notify: bool, cmd: list[str] | None = None) -> bool:
+    # helpers have helper_done; a command already wrapped in job_notify.sh wakes me itself (no double ping)
+    return not no_notify and kind != "helper" and not any("job_notify.sh" in str(x) for x in (cmd or [])[:3])
+
+
+def caller_out_files(cmd: list[str]) -> list[str]:
+    """Files the caller's own command redirects into (`> f`, `>> f`, `&> f`, `| tee [-a] f`), so the
+    notification can tail THOSE when the caller captured output itself (our tee then sees nothing)."""
+    out = []
+    for m in _REDIRECT_RE.finditer(" ".join(cmd)):
+        p = m.group(1)
+        if p not in ("/dev/null", "&1", "&2", "1", "2") and not p.startswith("&"):
+            out.append(p)
+    return out
+
+
+def tee_wrap(cmd: list[str], out_file: str) -> list[str]:
+    """stdout+stderr -> journal AND out_file; the exit code is the command's (pipefail)."""
+    return ["bash", "-c", 'o=$1; shift; set -o pipefail; "$@" 2>&1 | tee -a "$o"', "worker-tee", out_file, *cmd]
+
+
+def tail_text(paths: list[str], cwd: str = "", n: int = 12, limit: int = 1500) -> tuple[str, str]:
+    """(path, last lines) of the first path with content - caller files first, then our tee file."""
+    for p in paths:
+        fp = Path(p) if os.path.isabs(p) else Path(cwd or ".") / p
+        try:
+            if fp.is_file() and fp.stat().st_size > 0:
+                with open(fp, errors="replace") as f:
+                    return str(fp), "".join(f.readlines()[-n:])[-limit:]
+        except OSError:
+            continue
+    return (paths[-1] if paths else ""), "(no output captured)"
+
+
+def _submit_llm(prompt: str, **kw) -> None:  # seam for tests
+    sys.path.insert(1, str(ROOT))
+    from brain import iris_llm
+    iris_llm.submit(prompt, **kw)
+
+
+def notify_done(name: str, jid: int, outcome: str, code, dur_s: float, paths: list[str], cwd: str = "") -> bool:
+    try:
+        where, tail = tail_text(paths, cwd)
+        _submit_llm(
+            f"[JOB DONE - automated, not Zeke] Worker job '{name}' (#{jid}) ended outcome={outcome} exit={code} "
+            f"after {dur_s / 60:.0f} min. Output: {where}. Last lines:\n{tail}\n"
+            "Read it, act on it (next step / tell Zeke if it matters), then reply here with one line via llm_reply.",
+            kind="job_done", requester="job:" + name, deadline_s=24 * 3600, priority=2)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[worker] job_done notify failed (non-fatal): {e!r}", file=sys.stderr)
+        return False
+
+
+# ── ETA from history (opsguard 11-08: two wrong ETAs to Zeke the ship night) ────
+def _stem(name: str) -> str:
+    """lumen_deploy5 -> lumen_deploy, land_integ4b -> land_integ, integ4_final -> integ4_final."""
+    return re.sub(r"_?\d+[a-z]?$", "", name) or name
+
+
+def eta(kind: str, name: str = "", like: str = "", min_n: int = 2) -> dict:
+    """p50/p90 duration of FINISHED jobs (ok or failed - a red land costs as long as a green one) of this
+    kind whose name matches, trying the most specific pattern first: --like, the name's stem, its first token."""
+    pats = [like] if like else []
+    if name:
+        st = _stem(name)
+        pats += [st + "%", re.split(r"[_\-]", st)[0] + "%"]
+    pats.append("%")
+    with db() as c:
+        for p in pats:
+            rows = c.execute("SELECT end_ts - start_ts, outcome FROM jobs WHERE kind=? AND name LIKE ? AND end_ts IS NOT "
+                             "NULL AND start_ts IS NOT NULL AND outcome NOT IN ('launch_failed','cancelled','lost',"
+                             "'launcher_lost') ORDER BY id DESC LIMIT 30", (kind, p)).fetchall()
+            # early aborts (a land dead at step 1 in 20 s) say nothing about how long a real run takes:
+            # use the OK runs when there are enough of them, else every finished run
+            ok = sorted(r[0] for r in rows if r[0] and r[0] > 0 and r[1] == "ok")
+            d = ok if len(ok) >= min_n else sorted(r[0] for r in rows if r[0] and r[0] > 0)
+            if len(d) >= min_n or (p == "%" and d):
+                med = d[len(d) // 2]
+                return {"n": len(d), "like": p, "p50_min": round(med / 60, 1), "p90_min": round(p90(d) / 60, 1),
+                        "max_min": round(d[-1] / 60, 1),
+                        "say": f"about {med / 60:.0f}-{p90(d) / 60:.0f} min (history: n={len(d)} {kind} jobs like '{p}')"}
+    return {"n": 0, "say": f"no history for kind={kind} - say 'unknown, I'll time it'"}
+
+
 # ── sweep (P2-T4d) ─────────────────────────────────────────────────────────────
+_JOURNAL_STATUS = re.compile(r"Main process exited, code=(\w+), status=(\d+)")
+
+
+def journal_exit(unit: str) -> tuple[str, int | None, float | None] | None:
+    """The real end of a unit nobody watched, from the user journal (units are --collect'ed, so
+    systemctl has forgotten them): (outcome 'ok'|'exit-code'|'killed'|'timeout'|'oom', code, end_ts) or None.
+    end_ts = the journal time of the unit's last line - NOT the sweep time (that would poison eta())."""
+    try:
+        raw = subprocess.run(["journalctl", "--user", "-u", unit, "--no-pager", "-o", "short-unix", "-n", "60"],
+                             capture_output=True, text=True, timeout=15).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    msgs, last_ts = [], None
+    for ln in raw.splitlines():
+        m = re.match(r"(\d+\.\d+) \S+ [^:]+: (.*)$", ln)
+        if m:
+            last_ts = float(m.group(1))
+            msgs.append(m.group(2))
+    r = parse_journal_exit("\n".join(msgs))
+    return (r[0], r[1], last_ts) if r else None
+
+
+def parse_journal_exit(txt: str) -> tuple[str, int | None] | None:
+    code = None
+    for m in _JOURNAL_STATUS.finditer(txt):
+        code = int(m.group(2))
+    if "Failed with result 'oom-kill'" in txt or "oom-kill" in txt and "Failed with result" in txt:
+        return "oom", code
+    if "Failed with result 'timeout'" in txt:
+        return "timeout", code
+    if "Failed with result 'signal'" in txt:
+        return "killed", code
+    if "Failed with result 'exit-code'" in txt:
+        return "exit-code", code
+    if "Deactivated successfully" in txt or "Succeeded." in txt or (code is None and "Consumed " in txt):
+        # systemd 249 logs only "Consumed N CPU time" for a clean exit of a --collect'ed unit (seen 11-08)
+        return "ok", 0 if code is None else code
+    if code is not None:
+        return ("ok" if code == 0 else "exit-code"), code
+    return None
+
+
 def sweep() -> dict:
-    """Expired task leases -> needs_review (store.sweep_expired), and jobs rows still `running` whose
-    unit is gone and whose launcher stopped recording (killed) -> `launcher_lost`."""
+    """Expired task leases -> needs_review (store.sweep_expired), and jobs rows still `running`/`detached`
+    whose unit is gone get their REAL end from the journal (opsguard 11-08: 15 detached rows sat 'running'
+    on the health board); with no journal evidence a `running` row -> `launcher_lost`, a detached one -> `lost`."""
     store = events_store()
     out: dict = {"store": store.sweep_expired(actor="worker.py sweep") if store is not None else None}
     if store is not None:   # Phase 3: dependants of a failed/cancelled parent never wait forever
         out["deps_failed"] = store.settle_dependencies(actor="worker.py sweep").get("failed", [])
     live = set(running_workers())
     now = time.time()
-    lost = []
+    lost, reconciled = [], []
     with db() as c:
-        for jid, unit, t0 in c.execute("SELECT id, unit, start_ts FROM jobs WHERE outcome='running' "
-                                       "AND end_ts IS NULL").fetchall():
-            if unit not in live and (t0 or 0) < now - 30:
-                c.execute("UPDATE jobs SET outcome='launcher_lost', end_ts=?, note=COALESCE(note,'') || ? "
-                          "WHERE id=? AND outcome='running'",
-                          (now, " | launcher died before recording the outcome; unit gone", jid))
+        rows = c.execute("SELECT id, unit, start_ts, outcome FROM jobs WHERE outcome IN ('running','detached') "
+                         "AND end_ts IS NULL").fetchall()
+    for jid, unit, t0, was in rows:
+        if unit in live or (t0 or 0) >= now - 30:
+            continue
+        je = journal_exit(unit)
+        with db() as c:
+            if je:
+                c.execute("UPDATE jobs SET outcome=?, exit_code=?, end_ts=?, note=COALESCE(note,'') || ? "
+                          "WHERE id=? AND outcome=?", (je[0], je[1], je[2] if len(je) > 2 and je[2] else now,
+                                                       f" | reconciled from journal ({was})", jid, was))
+                reconciled.append({"unit": unit, "outcome": je[0], "exit_code": je[1]})
+            else:
+                new = "launcher_lost" if was == "running" else "lost"
+                c.execute("UPDATE jobs SET outcome=?, end_ts=?, note=COALESCE(note,'') || ? "
+                          "WHERE id=? AND outcome=?",
+                          (new, now, " | launcher died before recording the outcome; unit gone" if was == "running"
+                           else " | detached, unit gone, no journal record of its end", jid, was))
                 lost.append(unit)
     out["launcher_lost"] = lost
+    out["reconciled"] = reconciled
     return out
 
 
@@ -932,11 +1239,20 @@ def main() -> int:
     r.add_argument("--lockdown", choices=["off", "helper", "helper-ssh"], default="off",
                    help="V3 spec §6/§13 sandbox (11-02): 'helper' = NoNewPrivileges (no sudo/setuid), PrivateUsers, "
                         "secrets + ssh keys + Discord channel creds INACCESSIBLE; 'helper-ssh' = same but keeps ~/.ssh")
-    r.add_argument("--after", default="", help="comma-separated task ids that must be done+verified first")
+    r.add_argument("--after", default="", help="comma-separated task ids / job:N / name:NAME that must FINISH OK "
+                   "first (output_pending+); a failed parent => this never runs (loud). See --after-verified")
     r.add_argument("--leases", default="", help="comma-separated path globs this job may write (file leases, "
                    "LOG-ONLY: a conflict is reported, the job still runs); released when it ends")
     r.add_argument("--key", default="", help="idempotency key for the auto-created task (re-run = same task)")
-    r.add_argument("--wait-deps", type=float, default=0.0, help="seconds to wait for --after parents (0 = check once)")
+    r.add_argument("--wait-deps", type=float, default=0.0, help="seconds to wait for --after parents (0 = check once; "
+                   "--detach queues it: a supervisor waits up to IRIS_WORKER_DEP_WAIT_MAX_S, default 24 h)")
+    r.add_argument("--wait-admit", type=float, default=0.0,
+                   help="seconds to keep retrying admission (a --detach supervisor uses 6 h)")
+    r.add_argument("--after-verified", action="store_true",
+                   help="old strict semantics: parents must be VERIFIED (worker.py verify), not just finished ok")
+    r.add_argument("--no-notify", action="store_true",
+                   help="don't wake Iris (kind job_done) when the job ends - notify is the DEFAULT (helpers excepted)")
+    r.add_argument("--out", default="", help="output file (default state/workers/out/<unit>.log when notifying)")
     r.add_argument("cmd", nargs=argparse.REMAINDER)
     ad = sub.add_parser("admit")
     ad.add_argument("--kind", required=True)
@@ -945,6 +1261,10 @@ def main() -> int:
     ad.add_argument("--priority", type=int, default=DEFAULT_PRIORITY)
     ad.add_argument("--cancel-lower", action="store_true", help="show (never execute) the cancel plan")
     sub.add_parser("status")
+    et = sub.add_parser("eta", help="history-based duration (p50/p90) for a job like this - quote THIS, not a guess")
+    et.add_argument("--kind", required=True)
+    et.add_argument("--name", default="")
+    et.add_argument("--like", default="", help="SQL LIKE pattern on the job name (else the name's stem)")
     sub.add_parser("sweep")
     dp = sub.add_parser("deps")
     dp.add_argument("task_id")
@@ -970,7 +1290,11 @@ def main() -> int:
             a.cmd = a.cmd[1:]
         if not a.cmd:
             ap.error("run needs a command after --")
+        a.argv = sys.argv[1:]
         return run(a)
+    if a.op == "eta":
+        print(json.dumps(eta(a.kind, a.name, a.like), indent=1))
+        return 0
     if a.op == "admit":
         ok, info = admit(a.kind, parse_size(a.mem) if a.mem else 0, a.gpu_mib)
         if not ok and a.cancel_lower:
@@ -980,6 +1304,12 @@ def main() -> int:
         print(json.dumps(info, indent=1))
         return 0 if ok else 1
     if a.op == "status":
+        sw = sweep()   # opsguard 11-08: rows whose unit is gone get their real end before we list anything
+        if sw.get("reconciled") or sw.get("launcher_lost"):
+            print(f"(reconciled {len(sw.get('reconciled') or [])} ended job row(s) from the journal, "
+                  f"{len(sw.get('launcher_lost') or [])} lost)")
+        for u in supervisors():
+            print(f"{u}  (supervisor of a --detach job: waiting for deps / watching)")
         for d in running_jobs_detail():
             print(f"{d['unit']}  mem={human(d['mem'])} gpu={d['gpu_mib']}MiB p={d['priority']} "
                   f"fx={d['side_effects']} task={d['task_id']} fence={d['fence']}")
@@ -1009,7 +1339,7 @@ def main() -> int:
                       f"cpu={(cpu or 0) / 1e6:.0f}s gpu={g if g is not None else '?'}MiB p={pr} dur={dur}")
         return 0
     if a.op == "stop":
-        units = [u for u in running_workers() if a.name in u]
+        units = [u for u in supervisors() + running_workers() if a.name in u]   # supervisor first: no relaunch
         for u in units:
             subprocess.run(["systemctl", "--user", "stop", u], timeout=30)
         print(json.dumps({"stopped": units}))
