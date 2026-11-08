@@ -62,7 +62,8 @@ def test_no_notify_and_helpers_are_silent(env, sent):
     env.set_proc(lambda: FakeProc())
     env.main("run", "--no-notify", "--kind", "job", "--name", "q", "--", "true")
     env.main("run", "--kind", "helper", "--name", "helper-x", "--", "true")
-    assert sent == []
+    env.main("run", "--kind", "job", "--name", "w", "--", "bash", "scripts/server/job_notify.sh", "w", "o", "--", "true")
+    assert sent == [], "helpers + job_notify.sh-wrapped commands wake me themselves"
     assert "worker-tee" not in env.calls["popen"][0] and "worker-tee" not in env.calls["popen"][1]
 
 

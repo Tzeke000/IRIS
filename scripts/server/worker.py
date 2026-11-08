@@ -844,7 +844,7 @@ def run(a) -> int:
     if act_id:
         props += [f"--setenv=IRIS_ACT_ID={act_id}"]
     props += lockdown_props(a.lockdown)
-    notify = notify_default(a.kind, a.no_notify)
+    notify = notify_default(a.kind, a.no_notify, a.cmd)
     out_paths: list[str] = []
     job_cmd = list(a.cmd)
     if notify or a.out:
@@ -1019,8 +1019,9 @@ OUT_DIR = Path(os.environ.get("IRIS_WORKER_OUT_DIR", ROOT / "state" / "workers" 
 _REDIRECT_RE = re.compile(r"(?:\|\s*tee(?:\s+-a)?|&?>>?)\s*([^\s|;&<>'\"]+)")
 
 
-def notify_default(kind: str, no_notify: bool) -> bool:
-    return not no_notify and kind != "helper"
+def notify_default(kind: str, no_notify: bool, cmd: list[str] | None = None) -> bool:
+    # helpers have helper_done; a command already wrapped in job_notify.sh wakes me itself (no double ping)
+    return not no_notify and kind != "helper" and not any("job_notify.sh" in str(x) for x in (cmd or [])[:3])
 
 
 def caller_out_files(cmd: list[str]) -> list[str]:
