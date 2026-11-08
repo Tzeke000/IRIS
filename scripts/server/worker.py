@@ -614,8 +614,12 @@ def launch_supervisor(a, task_id: str | None) -> int:
     sub = supervisor_argv(a.argv[i + 1:], task_id, DEP_WAIT_MAX_S + (a.timeout if a.after else 0))
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", a.name)[:60]
     unit = f"{SUP_PREFIX}{safe}-{int(time.time())}.service"
+    # the supervisor sees the caller's DBs/knobs (systemd-run does NOT pass the environment through)
+    fwd = [f"--setenv={k}={v}" for k, v in sorted(os.environ.items())
+           if k.startswith("IRIS_WORKER_") or k in ("IRIS_EVENTS_DB", "IRIS_LIVE_WORKER_TESTS")]
     cmd = ["systemd-run", "--user", "--quiet", "--collect", f"--unit={unit}", "-p", "MemoryMax=512M",
-           "-p", f"RuntimeMaxSec={int(DEP_WAIT_MAX_S + a.timeout + 900)}", "-p", "Environment=PYTHONUNBUFFERED=1",
+           "-p", f"RuntimeMaxSec={int(DEP_WAIT_MAX_S + SUP_ADMIT_WAIT_S + a.timeout + 900)}",
+           "-p", "Environment=PYTHONUNBUFFERED=1", *fwd,
            f"--working-directory={a.cwd or os.getcwd()}", "--", sys.executable, str(Path(__file__).resolve()),
            "run", *sub]
     r = subprocess.run(cmd, capture_output=True, text=True)
