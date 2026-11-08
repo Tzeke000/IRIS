@@ -283,7 +283,7 @@ contract fails a fast unit test, not a 6-minute XR suite.
   on live with an owner. **Never delete a check to get green.**
 - Review the list weekly with `vr.sh history SUITE` (the Odeneye view). A known flake that fails > 50 % of runs gets
   promoted to a real bug.
-- *(tooling follow-up, not built tonight: `known_mark` honouring `until=`.)*
+- Built: `known_mark` / `triage.py` honour `until=` (guard-1107 d90ca95). Existing lines have no `until=` yet; add them at the next review.
 
 ### (e) Release-config hazards
 
@@ -309,16 +309,18 @@ read it** (`suites:` line), and touchmap's table maps the file to them. `scripts
 
 | command | what | verified |
 |---|---|---|
-| `vr.sh touchmap [BRANCH] [--base auto] [--cmd]` | suites a branch could break: table + diff tokens + its own | unit checks; retro-run on batch3safety-1107 (base auto → lumen-rename-1107). It lists xr/wristfit, xr/run, xr/ledge, xr/web, xr/throw, mp/coop* and the stepup/menuair suites, i.e. tonight's reds |
-| `vr.sh conflicts A B …` | pairwise HIGH/MED/LOW overlap + "after merging both, run" | unit checks; retro-run on integ4's 3 feature branches. batch3safety × updater: HIGH `rig_xr.gd` near hunks, HIGH `settings:profile/height_m`, MED net.gd + boot. The two body branches: no overlap (correct) |
+| `vr.sh touchmap [BRANCH] [--base auto] [--cmd\|--list]` | suites a branch could break: table + diff tokens + its own | 13 unit checks; retro-run on integ4's branches. batch3safety-1107 (base auto → lumen-rename-1107) lists **xr/ledge, xr/run, xr/wristfit, xr/body, xr/web** among its top 23 (tonight's reds from it). updater-1107 lists **mp/updatemp** 2nd and **mp/coop, coop4, coop5, coopon, cooppop** (net.gd). It does *not* list xr/throw, which is pre-existing anyway |
+| `vr.sh conflicts A B … [--base auto]` | pairwise HIGH/MED/LOW overlap + "after merging both, run" | unit checks. On integ4's 3 branches (base lumen-rename): batch3safety × updater = HIGH `rig_xr.gd` near hunks + HIGH `settings:profile/height_m`, MED net.gd + boot. The two body branches: no overlap. **On tonight's unmerged city stack** (`--base auto`): lobby × holo2 = HIGH `holo_board.gd` (the conflict Iris predicted by hand) **and HIGH `stage_tower.gd`** (not predicted), pair suites unit/flycar_lights_unit, unit/stage_mixer_unit, xr/renderbudget; `shot.gd` near hunks in most pairs (an append list, "keep both") |
+| `vr.sh land` (+ touchmap) | the land gate also runs each branch's touchmap suites (≤ 25/branch, `LAND_TOUCHMAP=0` = off) | `land --dry integ4-1107` read-only: 25 touchmap suites added |
 | `vr.sh regdiff LOG BASE…` | per-check NEW / PRE-EXISTING / FIXED / NO-BASE | unit checks incl. the journal prefix and multi-base; on integ4 vs the 11-06 live-ish runs: updatemp = NO-BASE, coop5 K3/coopon O2/W4d = PRE-EXISTING |
 | `vr.sh baseline [--ref] [--from LOG] [--against LOG] SUITE…` | the same suites on the base trees → a real log + run/latest (+ regdiff) | `--dry` plan only (no suites run tonight) |
+| quarantine expiry | `known_flakes.txt` notes may carry `owner= until=YYYY-MM-DD`; past it a FAIL prints `(known-EXPIRED …)` and counts as NEW (vr.sh, triage.py) | unit check |
 | `vr.sh testkeys [--project P]` | test-keys copy of a release-keyed project | unit check + real run on wt_integ4_project: 1.6 s, original untouched |
 | `vr.sh rerun journal:UNIT` / `lane:N` | rerun from a worker journal / a lane log | the error path; the parse is covered by the regdiff checks |
 | lane.sh `run/latest_lane` | a lane run leaves a pointer in the caller's harness | `bash -n` only (needs a lane run) |
 | updatemp test copy | `mp/updatemp.py` on `updatemp-testkeys-1107` (off integ4) | `test_copy` self-test on wt_integ4_project. **The suite itself was not run** (no Godot tonight) |
 
-Unit checks: `python3 -I tools/test_guard.py` (12, temp git repos, no Godot).
+Unit checks: `python3 -I tools/test_guard.py` (13, temp git repos, no Godot).
 
 ## 5. Tooling gotchas from tonight (now in the skill)
 
