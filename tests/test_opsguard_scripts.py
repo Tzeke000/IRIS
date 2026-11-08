@@ -1,6 +1,7 @@
 """opsguard 11-08: vr_players.py online never invents "0 online" from a failed ssh; pve_vm.py state prints one word."""
 from __future__ import annotations
 
+import builtins
 import importlib.util
 import io
 import sys
@@ -14,6 +15,14 @@ def _load(name, path, monkeypatch=None):
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
+
+
+def _own_print(monkeypatch):
+    """Another suite in the same pytest run rebinds print/stdout (an MCP stdout guard) - capture at print itself."""
+    buf = io.StringIO()
+    monkeypatch.setattr(builtins, "print", lambda *a, sep=" ", end="\n", file=None, **k:
+                        buf.write(sep.join(map(str, a)) + end) if file in (None, sys.stdout) else None)
+    return buf
 
 
 def test_vr_players_failed_ssh_is_unknown_not_zero():
@@ -30,7 +39,7 @@ def test_vr_players_online_subcommand_exit_codes(monkeypatch):
     monkeypatch.setattr(v, "_ssh", lambda *a, **k: "")
     assert v.main(["online", "--json"]) == 3
     monkeypatch.setattr(v, "_ssh", lambda *a, **k: "__VRP_OK__\n")
-    buf = io.StringIO(); monkeypatch.setattr(sys, "stdout", buf)   # other suites rebind stdout: own the buffer
+    buf = _own_print(monkeypatch)
     assert v.main(["online", "--json"]) == 0 and '"count": 0' in buf.getvalue()
 
 
@@ -43,6 +52,6 @@ def test_pve_vm_state_prints_one_word(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "call", lambda path, *a, **k: {"status": "stopped"} if path == "/101/status/current" else None)
     monkeypatch.setattr(sys, "argv", ["pve_vm.py", "state", "101"])
     code = compile(src.split('if __name__ == "__main__":', 1)[1].replace("\n    ", "\n"), "pve_main", "exec")
-    buf = io.StringIO(); monkeypatch.setattr(sys, "stdout", buf)
+    buf = _own_print(monkeypatch)
     exec(code, {**m.__dict__, "sys": sys})
     assert buf.getvalue().strip() == "stopped"
