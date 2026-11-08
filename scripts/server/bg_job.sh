@@ -48,7 +48,7 @@ PYEOF
 chmod 700 "$INNER"
 [ -f "$OUT/$NAME.worker.log" ] && mv -f "$OUT/$NAME.worker.log" "$OUT/$NAME.worker.log.prev"   # fresh log: the admission check below reads it
 nohup "$PY" "$ROOT/scripts/server/worker.py" run --kind job --name "job-$NAME" --mem "$MEM" --timeout "$TIMEOUT" \
-  --side-effects reversible -- bash "$INNER" >> "$OUT/$NAME.worker.log" 2>&1 &
+  --side-effects reversible --no-notify -- bash "$INNER" >> "$OUT/$NAME.worker.log" 2>&1 &   # --no-notify: this script wakes me itself (opsguard 11-08)
 # 10-30: the launcher runs in the background, so a REFUSED admission used to be invisible ("started" printed
 # anyway; the vrsecbatch helper silently never ran). Wait for worker.py's verdict and say it.
 : > /dev/null
