@@ -5,6 +5,7 @@
 #   ./apply.sh --no-switch   install everything but leave the OLD user unit running (stage now, switch later)
 # Needs FIRST: the bot rebuilt + deployed with game_code_file.patch (preflight proves it; refuses otherwise).
 # Undo: ./rollback.sh       Check: ./verify.sh
+# NOT re-runnable after the first install: a NEW BOT BINARY (e.g. the LUMEN rename) ⇒ ./update_bin.sh [--bin PATH] [--dry-run] (opsguard 11-08)
 # Never writes the temple address or the invite into a tracked file: they go to root-only files under /etc/irisvr
 # and the generated drop-in, read from ~/.iris_private.env at apply time.
 set -euo pipefail
