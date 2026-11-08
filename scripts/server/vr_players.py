@@ -3,7 +3,7 @@
 
   downloads    GitHub release asset download_count for every Setup .exe (LUMEN-Setup.exe; older VRIris-Setup.exe still counted) (token ~/.config/iris/secrets/github_friends_token)
   whitelisted  invites on the temple (server.cfg [invites] names) + approved tunnel peers on wg-gate (wg show peers)
-  online       players the temple welcomed and hasn't seen leave since its last start (journal '[net] welcome' / 'left')
+  online       (`vr_players.py online [--json]` = only this; exit 3 = UNKNOWN) players the temple welcomed and hasn't seen leave since its last start (journal '[net] welcome' / 'left')
   perf         (11-04) pull the opt-in performance reports (perf_reports.jsonl [+ .1]) off the temple into
                state/vr_temple/perf/ and print harness/tools/perf_table.py's "how it runs on what" table
 Read-only everywhere. Prints JSON (--json) or a short human summary. Never prints keys, IPs or invite codes.
@@ -70,7 +70,15 @@ def online(th: str) -> dict:
         return {"error": "no TEMPLE_HOST"}
     log = _ssh(["-i", str(HOME / ".ssh/id_ed25519_temple"), f"root@{th}"],
                "journalctl -u vr-temple -b --no-pager -o cat --since \"$(systemctl show vr-temple -p ActiveEnterTimestamp --value)\" "
-               "| grep -E '^\\[net\\] (welcome|.* left$)'", timeout=30)
+               "| grep -E '^\\[net\\] (welcome|.* left$)'; echo __VRP_OK__", timeout=30)
+    return parse_online(log)
+
+
+def parse_online(log: str) -> dict:
+    """opsguard 11-08: an ssh that FAILED used to read as an empty journal = "0 online" - the one answer a deploy gate
+    must never invent. The command now ends with a marker; no marker = unknown (an error, never a count)."""
+    if "__VRP_OK__" not in log:
+        return {"error": "temple unreachable (ssh failed) - roster UNKNOWN"}
     here: dict[str, str] = {}
     for ln in log.splitlines():
         m = re.match(r"\[net\] welcome \d+ = (.+?) \((\w+)\)", ln)
@@ -116,6 +124,11 @@ def perf(th: str, out_dir: Path | None = None) -> dict:
 
 def main(argv: list[str]) -> int:
     th = temple_host()
+    if argv[:1] == ["online"]:   # opsguard 11-08: just the roster, fast (vr.sh safe's fallback when my VR body is off)
+        on = online(th)
+        print(json.dumps(on) if "--json" in argv else
+              f"online now: {on.get('count', '?')} {on.get('players', on.get('error', ''))}")
+        return 0 if "count" in on else 3
     if argv[:1] == ["perf"]:
         d = perf(th)
         print(json.dumps(d, indent=1) if "--json" in argv else

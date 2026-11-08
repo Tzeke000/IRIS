@@ -1,7 +1,8 @@
 """Scoped Proxmox control for Zeke's desktop VMs (101 windows10, 102 zorin) via token iris@pve!vmctl.
 Secrets in ~/.iris_private.env (PVE_TOKEN_ID / PVE_TOKEN_SECRET / PVE_HOST). Zeke's rule: only ONE of 101/102 runs.
 status lists EVERY VM + CT the token can see (Zeke 10-30: "for every VM or CT you should at least know if it's on").
-usage: pve_vm.py status | start <vmid> | shutdown <vmid> | exec <vmid> <powershell or bash command...>
+usage: pve_vm.py status | state <vmid> | start <vmid> | shutdown <vmid> | exec <vmid> <powershell or bash command...>
+  state <vmid>  (opsguard 11-08) ONE word: running|stopped|... - harness client/vm_ready.sh reads it before a client smoke
 """
 import json, os, ssl, sys, time, urllib.parse, urllib.request
 
@@ -50,6 +51,8 @@ if __name__ == "__main__":
                 print(f"{kind}: list failed ({e!r})", file=sys.stderr)
         for vmid, k, name, st in sorted(rows):
             print(vmid, k, name, st)
+    elif a[0] == "state":
+        print(status(int(a[1])))
     elif a[0] == "start":
         v = int(a[1]); other = 102 if v == 101 else 101
         if status(other) == "running":
