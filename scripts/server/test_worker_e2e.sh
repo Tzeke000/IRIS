@@ -14,7 +14,7 @@ $PY "$W" run --kind e2e --name e2e_parent --mem 100M --timeout 120 --force --no-
 grep -q '"supervisor": "iris-wsup-e2e_parent' $E/p.json && ok "E1 --detach starts a supervisor unit" || no "E1"
 for i in $(seq 1 30); do [ -n "$(q "select id from jobs where name='e2e_parent'")" ] && break; sleep 1; done
 # 2. … and a child queued on it by NAME, detached, BEFORE the parent ends (the 11-07 case)
-$PY "$W" run --kind e2e --name e2e_child --mem 100M --timeout 120 --force --no-notify --after name:e2e_parent --detach \
+$PY "$W" run --kind e2e --name e2e_child --mem 100M --timeout 120 --force --no-notify --out $E/out/e2e_child.log --after name:e2e_parent --detach \
   -- bash -c "echo CHILD RAN > $E/child.txt" | tee $E/c.json
 grep -q '"supervisor": "iris-wsup-e2e_child' $E/c.json && ok "E2 the dependant is queued under its own supervisor" || no "E2"
 [ -e $E/child.txt ] && no "E3 the child must NOT run before the parent ends" || ok "E3 the child waits while the parent runs"
@@ -28,6 +28,6 @@ $PY "$W" run --kind e2e --name e2e_bad --mem 100M --timeout 60 --force --no-noti
 $PY "$W" run --kind e2e --name e2e_orphan --mem 100M --timeout 60 --force --no-notify --after name:e2e_bad --wait-deps 5 -- touch $E/orphan.txt > /dev/null 2>$E/o.err; rc=$?
 [ $rc = 65 ] && [ ! -e $E/orphan.txt ] && grep -q "NOT STARTED" $E/o.err && ok "E7 failed parent ⇒ child refused (65), never ran" || no "E7 rc=$rc"
 # 4. the output file + eta
-ls $E/out/*e2e_child*.log >/dev/null 2>&1 && ok "E8 output tee'd to the out dir" || no "E8"
+[ -e $E/out/e2e_child.log ] && ok "E8 --out file created through the supervisor (--no-notify = no default file, by design)" || no "E8 no --out file"
 $PY "$W" eta --kind e2e --name e2e_parent | grep -q '"n"' && ok "E9 eta answers from history" || no "E9"
 echo "worker e2e: $([ $F = 0 ] && echo ALL PASS || echo "$F FAIL") (temp dir $E)"; [ $F = 0 ] && rm -rf "$E"; [ $F = 0 ]
