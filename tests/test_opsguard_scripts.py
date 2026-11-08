@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import sys
 from pathlib import Path
 
@@ -23,16 +24,17 @@ def test_vr_players_failed_ssh_is_unknown_not_zero():
     assert v.parse_online("[net] welcome 3 = Zeke (human)\n[net] Zeke left\n__VRP_OK__")["count"] == 0
 
 
-def test_vr_players_online_subcommand_exit_codes(monkeypatch, capsys):
+def test_vr_players_online_subcommand_exit_codes(monkeypatch):
     v = _load("vrp2", ROOT / "scripts/server/vr_players.py")
     monkeypatch.setattr(v, "temple_host", lambda: "x")
     monkeypatch.setattr(v, "_ssh", lambda *a, **k: "")
     assert v.main(["online", "--json"]) == 3
     monkeypatch.setattr(v, "_ssh", lambda *a, **k: "__VRP_OK__\n")
-    assert v.main(["online", "--json"]) == 0 and '"count": 0' in capsys.readouterr().out
+    buf = io.StringIO(); monkeypatch.setattr(sys, "stdout", buf)   # other suites rebind stdout: own the buffer
+    assert v.main(["online", "--json"]) == 0 and '"count": 0' in buf.getvalue()
 
 
-def test_pve_vm_state_prints_one_word(tmp_path, monkeypatch, capsys):
+def test_pve_vm_state_prints_one_word(tmp_path, monkeypatch):
     (tmp_path / ".iris_private.env").write_text("PVE_HOST=h\nPVE_TOKEN_ID=i\nPVE_TOKEN_SECRET=s\n")
     monkeypatch.setenv("HOME", str(tmp_path))
     src = (ROOT / "scripts/server/pve_vm.py").read_text()
@@ -41,5 +43,6 @@ def test_pve_vm_state_prints_one_word(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(m, "call", lambda path, *a, **k: {"status": "stopped"} if path == "/101/status/current" else None)
     monkeypatch.setattr(sys, "argv", ["pve_vm.py", "state", "101"])
     code = compile(src.split('if __name__ == "__main__":', 1)[1].replace("\n    ", "\n"), "pve_main", "exec")
+    buf = io.StringIO(); monkeypatch.setattr(sys, "stdout", buf)
     exec(code, {**m.__dict__, "sys": sys})
-    assert capsys.readouterr().out.strip() == "stopped"
+    assert buf.getvalue().strip() == "stopped"
