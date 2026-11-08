@@ -128,7 +128,7 @@ def _main_pids():
 
 def _launch(db, name, mem, alloc_mib, hold, out_file):
     env = dict(os.environ, IRIS_WORKER_DB=str(db))
-    cmd = [sys.executable, str(WORKER), "run", "--kind", "acceptance", "--name", name, "--mem", mem,
+    cmd = [sys.executable, str(WORKER), "run", "--no-notify", "--kind", "acceptance", "--name", name, "--mem", mem,
            "--swap", "0", "--timeout", "120", "--force", "--",
            sys.executable, "-c", _ALLOC.format(n=alloc_mib, hold=hold), str(out_file)]
     return subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -175,7 +175,7 @@ def test_live_detached_child_does_not_outlive_its_worker(tmp_path):
     pidf = tmp_path / "child.pid"
     env = dict(os.environ, IRIS_WORKER_DB=str(db))
     script = f"setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $! > {pidf}; sleep 1; exit 0"
-    subprocess.run([sys.executable, str(WORKER), "run", "--kind", "acceptance", "--name", "acc_leak",
+    subprocess.run([sys.executable, str(WORKER), "run", "--no-notify", "--kind", "acceptance", "--name", "acc_leak",
                     "--mem", "200M", "--timeout", "60", "--force", "--", "/bin/bash", "-c", script],
                    env=env, capture_output=True, text=True, timeout=120)
     child = int(pidf.read_text())
@@ -231,7 +231,7 @@ def test_live_cap_of_four_admits_up_to_four_then_refuses_under_real_load(tmp_pat
         live_before = len([u for u in subprocess.run(
             ["systemctl", "--user", "list-units", "--type=service", "--state=active,activating", "--no-legend",
              "--plain", "iris-worker-*"], capture_output=True, text=True, timeout=10).stdout.splitlines() if u.strip()])
-        cmd = [sys.executable, str(WORKER), "run", "--kind", "acceptance", "--name", f"cap4_{i}", "--mem", "200M",
+        cmd = [sys.executable, str(WORKER), "run", "--no-notify", "--kind", "acceptance", "--name", f"cap4_{i}", "--mem", "200M",
                "--timeout", "120", "--", "/bin/sleep", "25"]
         p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
@@ -265,7 +265,7 @@ def test_live_killed_launcher_leaves_launcher_lost_and_needs_review_not_running(
     import signal
     import sqlite3
     env = _live_env(tmp_path)
-    p = subprocess.Popen([sys.executable, str(WORKER), "run", "--kind", "acceptance", "--name", "t4d", "--mem", "150M",
+    p = subprocess.Popen([sys.executable, str(WORKER), "run", "--no-notify", "--kind", "acceptance", "--name", "t4d", "--mem", "150M",
                           "--timeout", "120", "--lease", "6", "--force", "--", "/bin/sleep", "8"],
                          env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     unit = _wait_row_unit(tmp_path / "jobs.sqlite", "t4d")

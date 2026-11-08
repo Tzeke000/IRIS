@@ -64,7 +64,9 @@ class FakeProc:
 def env(monkeypatch, tmp_path):
     monkeypatch.setenv("IRIS_WORKER_DB", str(tmp_path / "jobs.sqlite"))
     monkeypatch.setenv("IRIS_EVENTS_DB", str(tmp_path / "events.sqlite"))
+    monkeypatch.setenv("IRIS_WORKER_OUT_DIR", str(tmp_path / "out"))
     w = _load(WORKER, "iris_worker_v3_under_test")
+    monkeypatch.setattr(w, "_submit_llm", lambda *a, **k: None)   # never wake the real Iris from a test
     store = iris_events.EventStore(tmp_path / "events.sqlite")
     monkeypatch.setattr(w, "_STORE", store)
     monkeypatch.setattr(w, "running_workers", lambda: [])
