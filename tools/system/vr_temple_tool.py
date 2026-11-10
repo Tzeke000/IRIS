@@ -10,8 +10,10 @@ Actions:
   state                          SEE: me, people (name, where, distance, facing me, avatar), props near, stage
   events                         FEEL: touches on my eye / hands since the last call
   move  to=[x,y,z]               glide there (I float)
-  follow name=<player> [dist=3] [height=0] [look=true]
+  follow name=<player> [dist=3 | distance_m=3] [height=0] [look=true]
                                  FOLLOW MODE (Zeke 10-29; reworked 11-05 to his 11-04 spec): I keep `dist` m from them,
+                                 ANY value 1–30 m ("follow Zeke at 1 m / 3.2 m / 5 m", DK-61 11-09; "3.2 m" strings ok;
+                                 outside the range it's clamped and the reply says so in `clamped`),
                                  tracking them from the network (out of my sight is fine), predicting from their
                                  velocity, thruster up to 24 m/s. I go the SHORTEST way to where they are NOW (straight
                                  if clear, else an A* path round or over what's between us — never their trail); I
@@ -505,7 +507,7 @@ ACTION_PARAMS: dict[str, tuple[str, ...]] = {
     "build": ("op", "data"), "draw": ("points", "color", "width"), "chess": ("op", "from", "to"),
     "laser": ("at",), "arrow": ("at", "speed"),
     "gun": ("op", "target", "at", "compensate", "adjust"), "power": ("pick",),
-    "follow": ("name", "dist", "height", "look", "on"), "comm": ("to",), "intercom": ("to",),
+    "follow": ("name", "dist", "distance_m", "height", "look", "on"), "comm": ("to",), "intercom": ("to",),
     "carry": ("allow",), "pat": ("name",),
     "tp": ("name", "to"), "unstuck": (),   # batch3safety-1107: admin rescue (server-validated); lands with that deploy
 }
@@ -516,6 +518,48 @@ _PARAM_HINTS = {("look", "yaw"): "look takes at=[x,y,z] (a point to look at), no
                 ("move", "at"): "move takes to=[x,y,z]", ("hand", "at"): "hand takes to=[x,y,z]",
                 ("follow", "who"): "follow takes name=<player>", ("follow", "player"): "follow takes name=<player>",
                 ("speak", "say"): "speak takes text=\"…\"", ("color", "color"): "color takes hex=\"#rrggbb\""}
+
+
+# tool-side spellings the tool rewrites before sending (the body never sees them)
+PARAM_ALIASES: dict[tuple[str, str], str] = {("follow", "distance_m"): "dist"}
+
+# FOLLOW DISTANCE IS AN INPUT (DK-61, Zeke 11-09: "follow <name> at 1 m / 5 m / 3.2 m away", any value). The body
+# (iris_follow.gd DIST_MIN_M/DIST_MAX_M) keeps 1–30 m: under 1 m my 0.25 m eye is in their face (rig_iris slows me
+# inside 0.6 m of a face); 30 m is the body's old cap. Clamped HERE too, and said so, so I know what I'm really doing
+# (a body older than follow-1110 floors at 1.2 m).
+FOLLOW_DIST_MIN_M = 1.0
+FOLLOW_DIST_MAX_M = 30.0
+
+
+def follow_dist(p: dict[str, Any]) -> "tuple[float | None, dict[str, Any] | None, str]":
+    """dist / distance_m → (metres to send or None if neither given, refusal or None, clamp note or "").
+    Accepts a number or a string like "3.2", "3.2 m", "3.2m"."""
+    import math
+    import re
+    given = [(k, p[k]) for k in ("dist", "distance_m") if k in p]
+    if not given:
+        return None, None, ""
+    vals = []
+    for k, v in given:
+        if isinstance(v, bool):
+            f = None
+        elif isinstance(v, (int, float)):
+            f = float(v)
+        elif isinstance(v, str):
+            m = re.fullmatch(r"\s*([+-]?(?:\d+\.?\d*|\.\d+))\s*(?:m|metres?|meters?)?\s*", v, re.I)
+            f = float(m.group(1)) if m else None
+        else:
+            f = None
+        if f is None or not math.isfinite(f):
+            return None, {"ok": False, "error": f"follow {k} must be a distance in metres (e.g. 3.2), got {v!r}"}, ""
+        vals.append(f)
+    if len(vals) == 2 and abs(vals[0] - vals[1]) > 1e-9:
+        return None, {"ok": False, "error": f"follow got dist={vals[0]} AND distance_m={vals[1]} — give one"}, ""
+    d = vals[0]
+    c = min(max(d, FOLLOW_DIST_MIN_M), FOLLOW_DIST_MAX_M)
+    note = "" if c == d else (f"asked {d:g} m → keeping {c:g} m (follow range {FOLLOW_DIST_MIN_M:g}–{FOLLOW_DIST_MAX_M:g} m: "
+                              + ("closer and my eye is in their face)" if d < c else "the body's cap)"))
+    return c, None, note
 
 
 def check_params(action: str, p: dict[str, Any]) -> "dict[str, Any] | None":
@@ -562,8 +606,19 @@ def _vr_temple(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
             p["fade_ms"] = vr_cfg()["hush_fade_ms"]          # an old bot ignores the key (= the hard cut)
         if action == "heard":
             return _heard(p)
+        note = ""
+        if action == "follow":
+            d, refusal, note = follow_dist(p)
+            if refusal:
+                return refusal
+            p.pop("distance_m", None)
+            if d is not None:
+                p["dist"] = d
         req = {"cmd": action, **p}
-        return _send(req)
+        out = _send(req)
+        if note and isinstance(out, dict):
+            out.setdefault("clamped", note)
+        return out
     except OSError as e:
         return {"ok": False, "error": f"my temple body isn't reachable ({e!r}) — vr_temple action=join first"}
 
@@ -583,7 +638,7 @@ register_tool(
     "overheats on the 18th shot ⇒ locked 10 s venting; ≤2.5 shots/s never overheats; every reply carries heat{heat_pct, overheated, "
     "shots_before_overheat|vent_s_left, ready_in_s} — pace yourself; everyone sees the gauge + steam) | "
     "power [pick=web|''] (superpowers: mine + who has what) | "
-    "follow name=<player> [dist=3] [height] [look] (FOLLOW MODE: shortest way to them, out of sight too, thruster ≤24 m/s, steers "
+    "follow name=<player> [dist=3|distance_m=3 — ANY gap 1–30 m, e.g. 1, 3.2, 5; clamped + said so outside it] [height] [look] (FOLLOW MODE: shortest way to them, out of sight too, thruster ≤24 m/s, steers "
     "round walls; stuck ⇒ teleports beside them; teleports WITH them; on=false stops; no name = status) | comm to=[names]|all|none (who hears me in-ear when out of earshot; default all) | "
     "carry allow=[names]|all|none (who may pick me up; default Zeke) | pat name=<person> (head pat) | move speed=N (thruster ≤9 m/s; any height) | "
     "chess op=board|move from=e2 to=e4 (I really pick the piece up; events chess_done/chess_failed) | "

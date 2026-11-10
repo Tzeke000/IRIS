@@ -119,4 +119,5 @@ def test_table_matches_the_game_handler():
             continue
         game = keys[action]
         assert game <= set(accepted), f"{action}: the body reads {sorted(game - set(accepted))} the tool would refuse"
-        assert set(accepted) <= game, f"{action}: the tool accepts {sorted(set(accepted) - game)} the body ignores"
+        rewritten = {k for (a, k) in getattr(vt, "PARAM_ALIASES", {}) if a == action}   # (follow-1110) the tool renames these
+        assert set(accepted) - rewritten <= game, f"{action}: the tool accepts {sorted(set(accepted) - rewritten - game)} the body ignores"
