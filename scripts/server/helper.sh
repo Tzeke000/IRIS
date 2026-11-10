@@ -40,13 +40,16 @@ MEM=8G; TIMEOUT=7200; CWD="$ROOT"; MODEL="${IRIS_HELPER_MODEL:-claude-opus-5-5}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --trusted-ssh) LOCK=helper-ssh;;   # keeps ~/.ssh (tower/temple builds); still NO sudo, NO secrets
-    --mem) MEM=$2; shift;; --timeout) TIMEOUT=$2; shift;; --cwd) CWD=$2; shift;; --model) MODEL=$2; shift;;
+    --mem) MEM=$2; MEM_SET=1; shift;; --timeout) TIMEOUT=$2; shift;; --cwd) CWD=$2; shift;; --model) MODEL=$2; shift;;
     --leases) LEASES=$2; shift;;      # 11-03: comma-separated globs this helper may write (file leases, log-only)
     *) echo "unknown arg $1" >&2; exit 2;;
   esac; shift
 done
 [[ "$NAME" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "bad NAME (letters, digits, _ . - only)" >&2; exit 2; }
 [ -s "$PROMPT_FILE" ] || { echo "empty/missing prompt file $PROMPT_FILE" >&2; exit 2; }
+# 11-10: powersfw_1110 was OOM-killed at the 8G default after 25 min (Godot suites in its cgroup). A VR brief (mentions
+# vr.sh) defaults to 16G unless --mem was given explicitly.
+[ -z "${MEM_SET:-}" ] && grep -q 'vr\.sh' "$PROMPT_FILE" && MEM=16G && echo "helper: VR brief ⇒ --mem 16G" >&2
 OUT="$ROOT/state/helpers"; mkdir -p "$OUT"
 cp "$PROMPT_FILE" "$OUT/$NAME.prompt.md"
 # Standing rules every helper gets (11-02: a helper's FAKE Discord-shaped test token blocked a push - GitHub
