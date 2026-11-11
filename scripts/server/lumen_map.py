@@ -128,22 +128,41 @@ def cmd_status():
 
 
 TOK_RE = re.compile(r"`([^`\s]+)`")
-BRANCH_RE = re.compile(r"\b([a-z][a-z0-9]*(?:-[a-z0-9]+)*-1[01]\d\d[a-z]?)\b")
-PATH_EXT = (".gd", ".py", ".sh", ".md", ".json", ".tsv", ".txt", ".tscn", ".nsi", ".tres", ".cfg", ".service")
+BRANCH_RE = re.compile(r"(?<![\w/.-])([a-z][a-z0-9]*(?:-[a-z0-9]+)+)")
+DATED = re.compile(r"-1[01]\d\d[a-z]?(?:-|$)")
+STATE_RE = re.compile(r"(BRANCH ONLY|ON MAIN|LIVE|PLANNED|UNSURE)")
+
+
+def branch_only_names(line):
+    """branch names that sit in a BRANCH ONLY segment of the line (up to the next state word)"""
+    parts = STATE_RE.split(line)
+    names = []
+    for i in range(1, len(parts) - 1, 2):
+        if parts[i] == "BRANCH ONLY":
+            names += [b for b in BRANCH_RE.findall(parts[i + 1]) if DATED.search(b)]
+    return names
+PATH_EXT = (".gd", ".py", ".sh", ".md", ".json", ".tsv", ".txt", ".tscn", ".nsi", ".tres", ".cfg")
+
+
+def _exists(p):
+    try:
+        return p.exists()
+    except PermissionError:
+        return True  # e.g. a secrets file this user can't stat — present-but-private, not "missing"
 
 
 def path_exists(tok):
-    tok = tok.rstrip(".,;:)")
+    tok = re.sub(r":\d[\d-]*$", "", tok.rstrip(".,;)"))  # file.gd:87-89 → file.gd
     if any(c in tok for c in "<>*${}|") or tok.startswith(("http", "-", "res://", "user://")):
         return True  # a pattern / placeholder / in-game path — not checkable
     if "/" not in tok and not tok.endswith(PATH_EXT):
         return True  # not a path
     p = Path(os.path.expanduser(tok))
     if p.is_absolute():
-        return p.exists()
+        return _exists(p)
     bases = [REPOS["project"], REPOS["project"] / "scripts", REPOS["harness"], REPOS["harness"] / "tools", VR, IRIS,
              IRIS / "profiles/vr_temple", IRIS / "scripts/server", Path.home() / ".claude/projects/-home-iris-IRIS/memory"]
-    return any((b / tok).exists() for b in bases)
+    return any(_exists(b / tok) for b in bases)
 
 
 def cmd_check():
@@ -158,7 +177,7 @@ def cmd_check():
         branches[name] = (main_branch(repo), set(refs.split()))
     for i, line in enumerate(text.splitlines(), 1):
         if "BRANCH ONLY" in line:
-            for br in BRANCH_RE.findall(line):
+            for br in branch_only_names(line):
                 where = [n for n, (_, s) in branches.items() if br in s]
                 if not where:
                     warns.append(f"L{i}: branch {br} is gone in both repos (map says BRANCH ONLY)")
