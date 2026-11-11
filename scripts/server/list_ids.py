@@ -81,10 +81,15 @@ def tick(specs: list[str]) -> None:
     done: dict[str, str] = {}; prog: dict[str, list[str]] = {}
     for spec in specs:
         for sha, date, body in _commits(spec):
-            for t in TRAILER.findall(body):
+            trailers = TRAILER.findall(body)
+            for t in trailers:
                 partial = "partial" in t.lower()
                 for p, n in IDRE.findall(t):
                     (prog.setdefault(f"{p}-{n}", []).append(sha) if partial else done.setdefault(f"{p}-{n}", f"{sha} {date}"))
+            if not trailers:   # (11-10 listaudit: textui/smallfix/wristmenu named DK-n only in the SUBJECT ⇒ never ticked) — a
+                # subject ID is a MENTION, not a claim of done ⇒ record it as PROGRESS only; a tick still needs the trailer
+                for p, n in IDRE.findall(body.split("\n", 1)[0]):
+                    prog.setdefault(f"{p}-{n}", []).append(sha)
     hit = set(); seen = set()
 
     def fn(iid, m, ln):
@@ -113,7 +118,8 @@ def shipped(version: str) -> None:
 def untagged(specs: list[str]) -> None:
     bad = [(sha, body.split("\n", 1)[0][:90]) for s in specs for sha, _d, body in _commits(s) if not TRAILER.search(body)]
     for sha, subj in bad:
-        print(f"  ⚠ no list: trailer  {sha} {subj}")
+        hint = "  (names an ID in the subject — counted as progress; add `list: …` to tick it)" if IDRE.search(subj) else ""
+        print(f"  ⚠ no list: trailer  {sha} {subj}{hint}")
     print(f"untagged: {len(bad)} commit(s) with no list ID")
 
 
