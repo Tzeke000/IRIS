@@ -618,9 +618,44 @@ def _vr_temple(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         out = _send(req)
         if note and isinstance(out, dict):
             out.setdefault("clamped", note)
+        _note_follow(action, p, out)
         return out
     except OSError as e:
         return {"ok": False, "error": f"my temple body isn't reachable ({e!r}) — vr_temple action=join first"}
+
+
+# VR-191 (Zeke 10-29): my VR ears (scripts/vr/vr_hear.py) treat the player I'm FOLLOWING as someone I'm WITH - their
+# "I'm back" / "you there?" reach me without my name. The follow state lives in the bot; this file is the ears' copy.
+_FOLLOW = "/home/iris/IRIS/state/vr_temple/follow.json"
+
+
+def _follow_path() -> "str | None":
+    env = os.environ.get("IRIS_VR_FOLLOW", "")
+    if env:
+        return env
+    if "PYTEST_CURRENT_TEST" in os.environ and _FOLLOW == "/home/iris/IRIS/state/vr_temple/follow.json":
+        return None                              # a test with a mocked _send must never touch the live state
+    return _FOLLOW
+
+
+def _note_follow(action: str, p: dict[str, Any], out: Any) -> None:
+    import time
+    if action not in ("follow", "move") or not isinstance(out, dict) or out.get("ok") is False:
+        return
+    name = str(p.get("name", "")).strip()
+    if action == "follow" and not name and p.get("on", True) not in (False, "false", "0", 0):
+        return                                   # follow (no name) = status only
+    on = action == "follow" and bool(name) and p.get("on", True) not in (False, "false", "0", 0)
+    path = _follow_path()
+    if not path:
+        return
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"name": name if on else "", "on": on, "t": time.time()}, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 register_tool(

@@ -418,6 +418,140 @@ class VRBackchannel:
         return json.loads(buf.decode() or "{}")
 
 
+
+# ---------------------------------------------------------------------------------------------- WITH (VR-191)
+# Zeke 10-29 (VR): "Okay, hey, I am back!" + "I hope you hear me, I am back" - no name ⇒ attending=false ⇒ never
+# routed; he had to ask on the terminal. A speaker I'm WITH gets a much longer, NARROWER window: while WITH, only
+# lines that are plausibly to me route without my name. Shape borrowed from voice assistants' follow-up modes
+# (Google "Continued Conversation" ~8 s, Alexa "Follow-Up Mode" ~5 s: a short re-open after the device spoke,
+# ended by "thank you"/"stop", and Alexa only keeps it when it's "sure you were talking to it") and from
+# device-directed-speech detection (lexical cues + context decide "to me or not", e.g. Siegert et al. 2022 review).
+# Ours is a co-present companion, not a speaker on a shelf, so the window is minutes, but stays lexically gated.
+#
+# WITH starts when:   (1) I'm FOLLOWING that player (vr_temple follow writes state/vr_temple/follow.json)
+#                     (2) they told me to wait ("stay here", "I'll be back", "brb", …) while attending  → WITH_WAIT_S
+#                     (3) we've been talking: any attending line from them                              → WITH_CONVO_S
+# WITH ends when:     they say bye ("bye", "see you", "good night", "gotta go", "I'm logging off", …), I stop
+#                     following them, or the window runs out (refreshed by every routed line).
+# While WITH, a line routes if it is
+#     DIRECT  (always): a return ("I'm back", "I am here", "back now", "I've returned"), a check
+#                       ("you there?", "can you hear me", "still with me"), a wait ("stay here"), a goodbye
+#     GATED   (only when no OTHER player has spoken in the last OTHERS_RECENT_S): a greeting at the start
+#                       ("hey", "hi", "hello", "yo", "okay hey"), a question ("…?"), "follow me", "come here",
+#                       "let's go", "look at this".
+# Everyone else's lines (strangers, other players' chatter) still need my name - the 90 s ATTEND_S path is unchanged.
+WITH_WAIT_S = 30 * 60.0           # "stay here, I'll be back" ⇒ keep listening for their return this long
+WITH_CONVO_S = 10 * 60.0          # an attending line ⇒ WITH this long ("we've been talking")
+WITH_FOLLOW_S = 30 * 60.0         # following them ⇒ WITH (follow.json older than this is ignored unless refreshed)
+OTHERS_RECENT_S = 60.0            # another player spoke this recently ⇒ greetings/questions are ambiguous ⇒ need my name
+FOLLOW_FILE = Path(os.environ.get("IRIS_VR_FOLLOW", str(REPO / "state" / "vr_temple" / "follow.json")))
+
+WAIT_RE = re.compile(r"\b(?:stay (?:here|there|put)|wait (?:here|there|for me)|i ?(?:ll|will) be (?:right )?back|"
+                     r"be right back|brb|dont go anywhere|hang (?:on|tight) here|hold (?:on|tight) here)\b")
+RETURN_RE = re.compile(r"\b(?:(?:i ?m|i am) (?:back|here now|home)|back now|ive returned|i have returned|"
+                       r"im here iris|i made it back)\b")
+CHECK_RE = re.compile(r"\b(?:(?:are )?you (?:still )?(?:there|here|around)|can you (?:still )?hear me|"
+                      r"do you hear me|still with me)\b")
+GREET_RE = re.compile(r"^(?:(?:okay|ok|alright|so|oh|well) )?(?:hey|hi|hello|yo|hiya|howdy)\b")
+ASK_RE = re.compile(r"\b(?:follow me|come (?:here|over here|with me|on)|lets go|look at (?:this|that))\b")
+BYE_RE = re.compile(r"\b(?:bye|goodbye|good bye|see (?:you|ya) (?:later|soon|tomorrow|around|next time)|^(?:okay |ok |alright )?see (?:you|ya)$|good ?night|gotta go|got to go|i ?m (?:leaving|"
+                    r"logging off|heading out|off now)|logging off|talk (?:to you )?later|catch you later|later iris)\b")
+
+
+def read_follow(path: Path | None = None) -> dict | None:
+    """{"name", "on", "t"} written by vr_temple follow; None if absent/unreadable/off."""
+    try:
+        d = json.loads((path or FOLLOW_FILE).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(d, dict) or not d.get("on") or not str(d.get("name", "")).strip():
+        return None
+    return d
+
+
+class WithTracker:
+    """Pure state: who I'm WITH, until when, and why. Times are wall-clock seconds (the utterance's own times)."""
+
+    def __init__(self, data: dict | None = None, follow_path: Path | None = None):
+        self.with_: dict[str, dict] = {}            # speaker → {"until": t, "why": "wait|convo|follow"}
+        self.heard: dict[str, float] = {}           # speaker → last time any line of theirs was heard
+        self.follow_path = follow_path
+        for k, v in ((data or {}).items()):
+            try:
+                self.with_[str(k)] = {"until": float(v["until"]), "why": str(v.get("why", "convo"))}
+            except Exception:
+                pass
+
+    def following(self, who: str, t: float) -> bool:
+        f = read_follow(self.follow_path)
+        if not f or str(f["name"]).strip().casefold() != who.casefold():
+            return False
+        return t - float(f.get("t", t)) <= WITH_FOLLOW_S or self.with_.get(who, {}).get("why") == "follow"
+
+    def is_with(self, who: str, t: float) -> str | None:
+        """why I'm with them at time t (follow|wait|convo), or None."""
+        w = self.with_.get(who)
+        if w and t <= w["until"]:
+            return w["why"]
+        if self.following(who, t):
+            return "follow"
+        return None
+
+    def others_recent(self, who: str, t: float) -> bool:
+        return any(k != who and 0 <= t - v <= OTHERS_RECENT_S for k, v in self.heard.items())
+
+    def route(self, who: str, text: str, t: float) -> str | None:
+        """Called for a line WITHOUT my name and outside the 90 s window: the reason it's still to me, or None."""
+        why = self.is_with(who, t)
+        if not why:
+            return None
+        n = norm(text)
+        if RETURN_RE.search(n):
+            return "with:%s:return" % why
+        if CHECK_RE.search(n):
+            return "with:%s:check" % why
+        if WAIT_RE.search(n):
+            return "with:%s:wait" % why             # "stay here, I'll be back" is said to the one who stays
+        if BYE_RE.search(n):
+            return "with:%s:bye" % why              # their goodbye is to me too (then update() ends WITH)
+        if self.others_recent(who, t):
+            return None                              # someone else is around: a "hey"/question may be theirs
+        if GREET_RE.search(n):
+            return "with:%s:greeting" % why
+        if text.rstrip().endswith("?"):
+            return "with:%s:question" % why
+        if ASK_RE.search(n):
+            return "with:%s:ask" % why
+        return None
+
+    def update(self, who: str, text: str, t_end: float, attending: bool) -> None:
+        """After a line: remember they spoke, then start / refresh / end WITH."""
+        self.heard[who] = t_end
+        n = norm(text)
+        if BYE_RE.search(n) and not WAIT_RE.search(n):
+            self.with_.pop(who, None)
+            return
+        if not attending:
+            return
+        cur = self.with_.get(who, {"until": 0.0, "why": "convo"})
+        if WAIT_RE.search(n):
+            self.with_[who] = {"until": max(cur["until"], t_end + WITH_WAIT_S), "why": "wait"}
+        elif cur["why"] == "wait" and cur["until"] >= t_end and not RETURN_RE.search(n):
+            self.with_[who] = {"until": max(cur["until"], t_end + WITH_CONVO_S), "why": "wait"}
+        elif self.following(who, t_end):
+            self.with_[who] = {"until": max(cur["until"], t_end + WITH_FOLLOW_S), "why": "follow"}
+        else:
+            self.with_[who] = {"until": max(cur["until"] if cur["why"] != "wait" else 0.0, t_end + WITH_CONVO_S),
+                               "why": "convo"}
+
+    def end(self, who: str) -> None:
+        self.with_.pop(who, None)
+
+    def dump(self, now: float) -> dict:
+        self.with_ = {k: v for k, v in self.with_.items() if v["until"] > now - 3600}
+        return self.with_
+
+
 # ---------------------------------------------------------------------------------------------- service
 class Ears:
     def __init__(self, a):
@@ -436,10 +570,13 @@ class Ears:
         self.spool.mkdir(parents=True, exist_ok=True)
         self.bc = VRBackchannel()
         self.attn: dict[str, float] = {}           # speaker → attending until (wall clock)
+        self._wt = None
         try:
             self.attn = {k: float(v) for k, v in json.loads(self.state_path.read_text()).get("until", {}).items()}
         except Exception:
             pass
+        self._wt = None
+        self.withs                                  # load the WITH windows from the same state file
         from faster_whisper import WhisperModel
         t = time.time()
         try:
@@ -450,12 +587,26 @@ class Ears:
         self.model.transcribe(np.zeros(16000, dtype=np.float32), language="en", beam_size=1)
         log("model %s on %s/%s ready in %.1fs; spool %s → %s" % (a.model, a.device, a.compute, time.time() - t, self.spool, self.out))
 
+    @property
+    def withs(self) -> WithTracker:
+        """VR-191: who I'm WITH (lazy - tests build Ears with __new__)."""
+        if getattr(self, "_wt", None) is None:
+            data = None
+            try:
+                data = json.loads(self.state_path.read_text()).get("with")
+            except Exception:
+                pass
+            self._wt = WithTracker(data if isinstance(data, dict) else None)
+        return self._wt
+
     def save_state(self) -> None:
         now = time.time()
         self.attn = {k: v for k, v in self.attn.items() if v > now - 3600}
+        w = self.withs.dump(now)
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps({"until": self.attn, "attend_s": ATTEND_S,
-                                   "attending_now": sorted(k for k, v in self.attn.items() if v > now)}))
+                                   "attending_now": sorted(k for k, v in self.attn.items() if v > now),
+                                   "with": w, "with_now": sorted(k for k, v in w.items() if v["until"] > now)}))
         tmp.replace(self.state_path)
 
     def pending(self) -> list[Path]:
@@ -522,13 +673,19 @@ class Ears:
         is_addr = addressed(text)
         until = self.attn.get(who, 0.0)
         attending = bool(is_addr or a <= until)
+        routed = None
+        if not attending:                          # VR-191: a player I'm WITH needn't say my name to reach me
+            routed = self.withs.route(who, text, a)
+            attending = bool(routed)
         if attending:
             self.attn[who] = max(until, b + ATTEND_S)
+        self.withs.update(who, text, b, attending)
         line = {"t_start": iso(a), "t_end": iso(b), "speaker": who, "text": text,
                 "dist_m": meta.get("dist_m"), "facing": bool(meta.get("facing")),
                 "where": where_phrase(meta), "dir": meta.get("dir"), "bearing_deg": meta.get("bearing_deg"),
                 "dist_now_m": meta.get("dist_now_m"), "via": meta.get("via", "air"),
-                "addressed": is_addr, "attending": attending,
+                "addressed": is_addr, "attending": attending, "with": self.withs.is_with(who, b),
+                **({"routed": routed} if routed else {}),
                 "ts": round(a, 3), "ts_end": round(b, 3), "peer": meta.get("peer"),
                 "display_name": meta.get("display_name"), "level_db": round(float(lvl), 1), "eff_db": round(float(eff), 1),
                 "secs": round(secs, 2), "stt_s": round(stt_s, 2), "id": stem}
@@ -583,7 +740,8 @@ class Ears:
         self.append(line)
         self.save_state()
         log("%s %s%s: %s" % (line["t_start"][11:19], line["speaker"],
-                             " [ADDRESSED]" if line["addressed"] else (" [attending]" if line["attending"] else ""),
+                             " [ADDRESSED]" if line["addressed"] else (" [%s]" % line["routed"] if line.get("routed")
+                                                                       else (" [attending]" if line["attending"] else "")),
                              line["text"]))
         return 1
 
