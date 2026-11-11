@@ -417,10 +417,12 @@ def _check_unit(unit: str, voice: bool = False):
     def _f() -> tuple[bool | None, str]:
         rc, out = _run(["systemctl", "--user", "is-active", unit], 5.0)
         state = out.strip().splitlines()[-1] if out.strip() else "?"
-        if state != "active" and voice:
+        if voice:
             why = _voice_off_reason()
-            if why:  # off ON PURPOSE - neutral, not a fault
+            if why and state != "active":  # off ON PURPOSE - neutral, not a fault
                 return None, f"inactive because {why}"
+            if why:  # (11-10, Zeke saw GREEN mouth+ears at 22:4x) the services stay UP in quiet hours; the FLAG gates
+                return None, f"{unit} running but GATED OFF: {why}"   # them - green read as 'listening/talking'
         return (state == "active"), f"{unit}: {state}"
     return _f
 
